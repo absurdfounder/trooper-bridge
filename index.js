@@ -57,7 +57,8 @@ const asyncNotifications = new Map();
 const requestEmitter = new EventEmitter();
 
 // Skill registry — OpenClaw pushes skills here, CrabsHQ pulls them
-// slug -> { slug, name, displayName, summary, description, version, stats, content, updatedAt, registeredAt }
+// slug -> { slug, name, displayName, summary, description, version, stats, content, files, updatedAt, registeredAt }
+// files: { "SKILL.md": "...", "MEMORY.md": "...", "SOUL.md": "...", ... }
 const skillRegistry = new Map();
 
 // Cleanup old requests every 5 minutes
@@ -305,6 +306,12 @@ app.post('/skills/register', (req, res) => {
   let registered = 0;
   for (const skill of skills) {
     if (!skill.slug) continue;
+    // Support files object: { "SKILL.md": "...", "MEMORY.md": "...", "SOUL.md": "..." }
+    // Backward compat: if only content is provided, wrap as SKILL.md
+    let files = skill.files || {};
+    if (!Object.keys(files).length && skill.content) {
+      files = { 'SKILL.md': skill.content };
+    }
     skillRegistry.set(skill.slug, {
       slug: skill.slug,
       name: skill.name || skill.slug,
@@ -313,7 +320,8 @@ app.post('/skills/register', (req, res) => {
       description: skill.summary || skill.description || '',
       version: skill.version || null,
       stats: skill.stats || {},
-      content: skill.content || '',
+      content: files['SKILL.md'] || skill.content || '',
+      files,
       updatedAt: skill.updatedAt || null,
       changelog: skill.changelog || null,
       registeredAt: Date.now(),
@@ -327,17 +335,42 @@ app.post('/skills/register', (req, res) => {
 
 // CrabsHQ fetches the skill catalog
 app.get('/skills/catalog', (req, res) => {
-  const skills = Array.from(skillRegistry.values()).map(({ content, ...meta }) => meta);
+  const skills = Array.from(skillRegistry.values()).map(({ content, files, ...meta }) => ({
+    ...meta,
+    availableFiles: Object.keys(files || {}),
+  }));
   res.json({ skills, totalSkills: skills.length });
 });
 
-// CrabsHQ fetches SKILL.md content for a specific skill
+// CrabsHQ fetches SKILL.md content for a specific skill (backward compat)
 app.get('/skills/:slug/content', (req, res) => {
   const skill = skillRegistry.get(req.params.slug);
   if (!skill || !skill.content) {
     return res.status(404).json({ error: 'Skill not found or has no content' });
   }
   res.type('text/plain').send(skill.content);
+});
+
+// CrabsHQ fetches all .md files for a specific skill
+app.get('/skills/:slug/files', (req, res) => {
+  const skill = skillRegistry.get(req.params.slug);
+  if (!skill) {
+    return res.status(404).json({ error: 'Skill not found' });
+  }
+  res.json({ slug: skill.slug, files: skill.files || {} });
+});
+
+// CrabsHQ fetches a specific file by name (e.g. MEMORY.md, SOUL.md)
+app.get('/skills/:slug/files/:filename', (req, res) => {
+  const skill = skillRegistry.get(req.params.slug);
+  if (!skill) {
+    return res.status(404).json({ error: 'Skill not found' });
+  }
+  const content = (skill.files || {})[req.params.filename];
+  if (!content) {
+    return res.status(404).json({ error: `File ${req.params.filename} not found for this skill` });
+  }
+  res.type('text/plain').send(content);
 });
 
 // CrabsHQ searches skills by query
@@ -352,7 +385,10 @@ app.get('/skills/search', (req, res) => {
       s.description.toLowerCase().includes(query) ||
       s.slug.toLowerCase().includes(query)
     )
-    .map(({ content, ...meta }) => meta);
+    .map(({ content, files, ...meta }) => ({
+      ...meta,
+      availableFiles: Object.keys(files || {}),
+    }));
 
   res.json({ results });
 });
@@ -366,6 +402,7 @@ app.get('/skills/stats', (req, res) => {
       name: s.displayName,
       version: s.version,
       hasContent: !!s.content,
+      availableFiles: Object.keys(s.files || {}),
       registeredAt: s.registeredAt,
     })),
   });
@@ -460,6 +497,8 @@ app.get('/', (req, res) => {
     <code>POST /skills/register</code> - OpenClaw registers available skills<br>
     <code>GET /skills/catalog</code> - CrabsHQ fetches skill catalog<br>
     <code>GET /skills/:slug/content</code> - CrabsHQ fetches SKILL.md<br>
+    <code>GET /skills/:slug/files</code> - CrabsHQ fetches all .md files<br>
+    <code>GET /skills/:slug/files/:name</code> - CrabsHQ fetches a specific file<br>
     <code>GET /skills/search?q=</code> - CrabsHQ searches skills<br>
     <code>GET /skills/stats</code> - Skill registry stats<br><br>
     <code>GET /health</code> - Health check
@@ -497,7 +536,9 @@ app.get('/', (req, res) => {
             <span class="type" style="background:#22c55e">SKILL</span>
             <strong>${s.displayName}</strong> <span style="color:#64748b">(${s.slug})</span>
             ${s.version ? `<span class="badge">v${s.version}</span>` : ''}
-            ${s.content ? '<span class="badge" style="background:#22c55e;color:#0f172a">has SKILL.md</span>' : '<span class="badge" style="background:#ef4444">no content</span>'}
+            ${Object.keys(s.files || {}).length > 0
+              ? Object.keys(s.files).map(f => `<span class="badge" style="background:#22c55e;color:#0f172a">${f}</span>`).join('')
+              : s.content ? '<span class="badge" style="background:#22c55e;color:#0f172a">SKILL.md</span>' : '<span class="badge" style="background:#ef4444">no files</span>'}
           </div>
         `).join('')}
       </div>`}
@@ -530,6 +571,8 @@ Endpoints:
   POST /skills/register          - OpenClaw registers skills
   GET  /skills/catalog           - CrabsHQ fetches skill catalog
   GET  /skills/:slug/content     - CrabsHQ fetches SKILL.md
+  GET  /skills/:slug/files       - CrabsHQ fetches all .md files
+  GET  /skills/:slug/files/:name - CrabsHQ fetches specific file
   GET  /skills/search?q=         - CrabsHQ searches skills
   GET  /skills/stats             - Skill registry stats
 
