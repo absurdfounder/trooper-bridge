@@ -8,10 +8,25 @@ import { EventEmitter } from 'events';
 const app = express();
 const PORT = process.env.PORT || 3002;
 const WEBHOOK_SECRET = process.env.OPENCLAW_WEBHOOK_SECRET || '';
+const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
 const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || 'https://control-center-bot.onrender.com';
 
 app.use(cors());
 app.use(express.json());
+
+// Auth middleware — exempt health endpoint, support both Bearer token and x-webhook-secret
+app.use((req, res, next) => {
+  if (req.path === '/health') return next();
+  if (!BRIDGE_AUTH_TOKEN && !WEBHOOK_SECRET) return next();
+  // Check Bearer token first
+  const bearerToken = req.headers.authorization?.replace('Bearer ', '');
+  if (BRIDGE_AUTH_TOKEN && bearerToken === BRIDGE_AUTH_TOKEN) return next();
+  // Fall back to legacy webhook secret
+  if (WEBHOOK_SECRET && req.headers['x-webhook-secret'] === WEBHOOK_SECRET) return next();
+  // If neither auth method is configured, allow through (backward compat)
+  if (!BRIDGE_AUTH_TOKEN && !WEBHOOK_SECRET) return next();
+  return res.status(401).json({ error: 'Unauthorized' });
+});
 
 // Forward agent responses back to Mission Control
 async function forwardToMissionControl(notification, result) {
