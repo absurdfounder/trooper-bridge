@@ -149,7 +149,7 @@ class OpenClawGateway {
           minProtocol: 1,
           maxProtocol: 1,
           client: {
-            id: 'crabhq-bridge',
+            id: 'gateway-client',
             displayName: 'CrabsHQ Bridge',
             version: '1.0.0',
             platform: 'linux',
