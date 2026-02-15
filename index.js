@@ -183,7 +183,9 @@ app.post('/webhook/mission-control', async (req, res) => {
 });
 
 // OpenClaw polls for pending requests (includes both sync and async)
+// DEPRECATED: Use direct OpenClaw hooks API instead of polling. Kept for backward compatibility.
 app.get('/requests/pending', (req, res) => {
+  res.set('X-Deprecated', 'Use direct OpenClaw hooks API instead of polling');
   // Get sync requests
   const syncRequests = Array.from(pendingRequests.values())
     .filter(r => r.status === 'pending');
@@ -237,7 +239,9 @@ app.get('/requests/:id', (req, res) => {
 });
 
 // OpenClaw submits results
+// DEPRECATED: Use direct OpenClaw hooks API instead of polling. Kept for backward compatibility.
 app.post('/requests/:id/result', (req, res) => {
+  res.set('X-Deprecated', 'Use direct OpenClaw hooks API instead of polling');
   const { id } = req.params;
   const { result, error } = req.body;
   
@@ -421,6 +425,31 @@ app.get('/skills/stats', (req, res) => {
       registeredAt: s.registeredAt,
     })),
   });
+});
+
+// Callback endpoint for OpenClaw hooks results
+// When CrabsHQ delegates via OpenClaw hooks API, OpenClaw can POST results here
+// which get forwarded to CrabsHQ's /api/agent-response endpoint
+app.post('/callback/result', async (req, res) => {
+  const { taskId, agentName, result, sessionKey } = req.body;
+
+  if (!result) {
+    return res.status(400).json({ error: 'result field required' });
+  }
+
+  console.log(`📥 [callback] Result from OpenClaw hooks for agent=${agentName || 'unknown'}, task=${taskId || 'unknown'}`);
+
+  try {
+    await forwardToMissionControl({
+      context: { taskId, sourceName: agentName },
+      task: sessionKey || '',
+      agentName: agentName || 'openclaw'
+    }, result);
+    res.json({ success: true, forwarded: true });
+  } catch (err) {
+    console.error(`❌ [callback] Failed to forward result:`, err.message);
+    res.status(500).json({ error: 'Failed to forward result to Mission Control' });
+  }
 });
 
 // Dashboard UI
