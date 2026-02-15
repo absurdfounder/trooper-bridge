@@ -4,6 +4,8 @@
 import express from 'express';
 import cors from 'cors';
 import { EventEmitter } from 'events';
+import { execSync } from 'child_process';
+import { readFileSync, writeFileSync } from 'fs';
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -449,6 +451,59 @@ app.post('/callback/result', async (req, res) => {
   } catch (err) {
     console.error(`❌ [callback] Failed to forward result:`, err.message);
     res.status(500).json({ error: 'Failed to forward result to Mission Control' });
+  }
+});
+
+// ─── Gateway Service Management ──────────────────────────────────────────────
+
+// Restart the OpenClaw gateway Docker container
+app.post('/gateway/restart', (req, res) => {
+  try {
+    console.log('🔄 Restarting OpenClaw gateway container...');
+    execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 });
+    res.json({ success: true, message: 'Gateway container restarted' });
+  } catch (err) {
+    console.error('❌ Failed to restart gateway:', err.message);
+    res.status(500).json({ error: 'Failed to restart gateway', details: err.stderr?.toString() || err.message });
+  }
+});
+
+// Get gateway container status
+app.get('/gateway/status', (req, res) => {
+  try {
+    const status = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-gateway 2>&1', { timeout: 10000 }).toString().trim();
+    const [state, running, restarts] = status.split(':');
+    // Also grab last few lines of logs
+    let logs = '';
+    try {
+      logs = execSync('docker logs --tail 20 openclaw-gateway 2>&1', { timeout: 10000 }).toString();
+    } catch {}
+    res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, recentLogs: logs });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to get gateway status', details: err.message });
+  }
+});
+
+// Read/update the gateway config file
+app.get('/gateway/config', (req, res) => {
+  try {
+    const config = readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8');
+    res.type('application/json').send(config);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to read gateway config', details: err.message });
+  }
+});
+
+app.put('/gateway/config', (req, res) => {
+  try {
+    const newConfig = JSON.stringify(req.body, null, 2);
+    writeFileSync('/opt/openclaw-data/config/openclaw.json', newConfig, 'utf8');
+    console.log('📝 Gateway config updated, restarting...');
+    execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 });
+    res.json({ success: true, message: 'Config updated and gateway restarted' });
+  } catch (err) {
+    console.error('❌ Failed to update gateway config:', err.message);
+    res.status(500).json({ error: 'Failed to update config', details: err.message });
   }
 });
 
