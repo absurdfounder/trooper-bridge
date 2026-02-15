@@ -147,7 +147,7 @@ class OpenClawGateway {
         method: 'connect',
         params: {
           minProtocol: 1,
-          maxProtocol: 1,
+          maxProtocol: 3,
           client: {
             id: 'gateway-client',
             displayName: 'CrabsHQ Bridge',
