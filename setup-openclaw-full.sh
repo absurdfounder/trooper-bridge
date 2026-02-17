@@ -395,6 +395,7 @@ services:
       CHROMIUM_PATH: /usr/bin/google-chrome-stable
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
       OPENCLAW_BROWSER_EXECUTABLE: /usr/bin/google-chrome-stable
+    user: "0:0"
     entrypoint: ["/bin/bash", "/opt/startup.sh"]
     command: ["${GATEWAY_PORT}"]
 OVERRIDE
@@ -414,7 +415,8 @@ else
   echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
 fi
 GATEWAY_PORT="${1:-18789}"
-exec node dist/index.js gateway --allow-unconfigured --bind lan --port "$GATEWAY_PORT"
+# Drop back to node user for the gateway process
+exec su -s /bin/bash node -c "node dist/index.js gateway --allow-unconfigured --bind lan --port $GATEWAY_PORT"
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh
 
