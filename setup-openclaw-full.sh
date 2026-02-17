@@ -180,6 +180,9 @@ ${HTTPS_DOMAIN} {
     handle /api/proxy/* {
         reverse_proxy 127.0.0.1:${BRIDGE_PORT}
     }
+    handle /files/* {
+        reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+    }
     handle {
         reverse_proxy 127.0.0.1:${GATEWAY_PORT}
     }
