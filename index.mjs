@@ -648,7 +648,7 @@ async function handleIncomingTask(req, res) {
     console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})...`);
     const result = await gateway.runAgent(fullTask, {
       agentId, agentName: agentName || 'default', sessionKey,
-      thinking: thinking || 'medium',
+      thinking: thinking || undefined,
       extraSystemPrompt: registered ? undefined : (systemPrompt || undefined),
       timeoutMs: 180000,
     });
@@ -708,7 +708,7 @@ async function handleIncomingTaskStream(req, res) {
     console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}...`);
     const { response, toolLog } = await gateway.runAgentStreaming(fullTask, {
       agentId, agentName: agentName || 'default', sessionKey,
-      thinking: thinking || 'medium',
+      thinking: thinking || undefined,
       extraSystemPrompt: registered ? undefined : (systemPrompt || undefined),
       timeoutMs: 180000,
     }, (event, data) => {
