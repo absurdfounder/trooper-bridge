@@ -706,6 +706,27 @@ async function handleIncomingTaskStream(req, res) {
 
 // ── HTTP Routes ──────────────────────────────────────────────────────
 
+// Serve files from inside the OpenClaw container (screenshots, workspace files, etc.)
+app.get('/files/*', (req, res) => {
+  const filePath = '/' + req.params[0]; // reconstruct absolute path
+  // Only allow specific directories for security
+  const allowed = ['/tmp/', '/home/node/.openclaw/workspace/', '/opt/openclaw-data/workspace/'];
+  if (!allowed.some(d => filePath.startsWith(d))) {
+    return res.status(403).json({ error: 'Path not allowed' });
+  }
+  try {
+    const data = execSync(`docker exec openclaw-openclaw-gateway-1 cat "${filePath.replace(/"/g, '')}"`, { maxBuffer: 50 * 1024 * 1024, timeout: 10000 });
+    // Guess content type from extension
+    const ext = filePath.split('.').pop().toLowerCase();
+    const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf', json: 'application/json', txt: 'text/plain', md: 'text/markdown', html: 'text/html' };
+    res.set('Content-Type', types[ext] || 'application/octet-stream');
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.send(data);
+  } catch (e) {
+    res.status(404).json({ error: 'File not found' });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok', service: 'openclaw-bridge',
