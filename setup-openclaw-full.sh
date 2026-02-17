@@ -406,11 +406,11 @@ cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 # Ensure Chrome is installed (survives container restarts)
 if ! command -v google-chrome-stable &>/dev/null; then
   echo "[startup] Chrome not found, installing..."
-  apt-get update -qq 2>/dev/null
-  wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb 2>/dev/null
-  apt-get install -y -qq /tmp/chrome.deb 2>/dev/null
+  dpkg --configure -a 2>/dev/null
+  wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+  dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
   rm -f /tmp/chrome.deb
-  echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo 'unknown')"
+  echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
 else
   echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
 fi
