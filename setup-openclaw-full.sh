@@ -240,7 +240,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
       }
     ],
     "defaults": {
-      "model": { "primary": "openai/gpt-5-mini" },
+      "model": { "primary": "openai/gpt-5.2" },
       "maxConcurrent": 4,
       "thinkingDefault": "low",
       "heartbeat": {
@@ -256,7 +256,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
         }
       },
       "subagents": {
-        "model": "openai/gpt-5-mini",
+        "model": "openai/gpt-5.2",
         "thinking": "low",
         "maxConcurrent": 8,
         "archiveAfterMinutes": 30
@@ -283,7 +283,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
         "baseUrl": "https://api.openai.com/v1",
         "api": "openai-completions",
         "models": [
-          { "id": "gpt-5-mini", "name": "GPT-5 Mini", "contextWindow": 128000 }
+          { "id": "gpt-5.2", "name": "GPT-5 Mini", "contextWindow": 128000 }
         ]
       }
     }
@@ -587,7 +587,7 @@ Environment=BRIDGE_URL=http://127.0.0.1:${BRIDGE_PORT}
 Environment=OPENCLAW_URL=http://127.0.0.1:${GATEWAY_PORT}
 Environment=OPENCLAW_TOKEN=${GATEWAY_TOKEN}
 Environment=OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
-Environment=OPENCLAW_MODEL=openai/gpt-5-mini
+Environment=OPENCLAW_MODEL=openai/gpt-5.2
 Environment=POLL_INTERVAL=3000
 Environment=REQUEST_TIMEOUT=180000
 Environment=NODE_ENV=production
