@@ -710,7 +710,7 @@ async function handleIncomingTaskStream(req, res) {
 app.get('/files/*', (req, res) => {
   const filePath = '/' + req.params[0]; // reconstruct absolute path
   // Only allow specific directories for security
-  const allowed = ['/tmp/', '/home/node/.openclaw/workspace/', '/opt/openclaw-data/workspace/'];
+  const allowed = ['/tmp/', '/home/node/.openclaw/workspace/', '/home/node/.openclaw/media/', '/opt/openclaw-data/workspace/'];
   if (!allowed.some(d => filePath.startsWith(d))) {
     return res.status(403).json({ error: 'Path not allowed' });
   }
