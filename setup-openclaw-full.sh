@@ -28,7 +28,9 @@ CAPTCHA_2CAPTCHA_API_KEY="{{CAPTCHA_2CAPTCHA_API_KEY}}"
 
 # Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
 DEPLOY_LOG=/tmp/deploy.log
+DEPLOY_RAW_LOG=/tmp/deploy-raw.log
 echo '[]' > "$DEPLOY_LOG"
+: > "$DEPLOY_RAW_LOG"
 dlog() {
  local msg="$1" step="${2:-installing}"
  local ts=$(date +%s000 2>/dev/null || echo 0)
@@ -50,6 +52,9 @@ except: pass
  fi
 }
 
+# Capture all script output to raw log (apt-get, docker, etc.) — served via /deploy-logs-raw
+exec 1> >(tee -a "$DEPLOY_RAW_LOG") 2>&1
+
 # Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT
 # The real bridge will replace this later
 python3 -c "
@@ -63,6 +68,12 @@ class H(http.server.BaseHTTPRequestHandler):
  self.send_response(200); self.send_header('Content-Type','application/json')
  self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
  with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
+ elif self.path=='/deploy-logs-raw':
+ self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
+ self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+ try:
+  with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
+ except: self.wfile.write(b'')
  else:
  self.send_response(404); self.end_headers()
  def log_message(self,*a): pass
