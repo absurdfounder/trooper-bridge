@@ -804,14 +804,32 @@ app.get('/files', (req, res) => {
       if (!name || name === '.' || name === '..') continue;
       const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
       let type = 'file';
+      let size = 0;
+      let modified = null;
+      let childCount = null;
       try {
+        // Get type, size, and modification time in one stat call
         const statOut = execSync(
-          `docker exec openclaw-openclaw-gateway-1 stat -c "%F" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
+          `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
           { encoding: 'utf8', timeout: 2000 }
         );
-        if (statOut.trim() === 'directory') type = 'dir';
+        const [fileType, fileSize, mtime] = statOut.trim().split('|');
+        if (fileType === 'directory') {
+          type = 'dir';
+          // Get child count for directories
+          try {
+            const countOut = execSync(
+              `docker exec openclaw-openclaw-gateway-1 sh -c "ls -1A '${fullPath.replace(/'/g, "\\'")}' 2>/dev/null | wc -l"`,
+              { encoding: 'utf8', timeout: 2000 }
+            );
+            childCount = parseInt(countOut.trim()) || 0;
+          } catch { childCount = 0; }
+        } else {
+          size = parseInt(fileSize) || 0;
+        }
+        modified = mtime ? parseInt(mtime) * 1000 : null; // Convert Unix epoch seconds to ms
       } catch {}
-      entries.push({ name, type, path: fullPath, size: 0 });
+      entries.push({ name, type, path: fullPath, size, modified, childCount });
     }
     res.json({ files: entries });
   } catch (e) {
