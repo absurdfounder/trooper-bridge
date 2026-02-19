@@ -1847,29 +1847,18 @@ function ensureBrowserConfig() {
   }
 
   // Set proper viewport + stealth via extraArgs
-  const desiredArgs = [
-   '--window-size=1440,900',
-   '--disable-blink-features=AutomationControlled',
-   '--disable-infobars',
-   '--lang=en-US,en',
-  ];
-  if (!Array.isArray(config.browser.extraArgs)) {
-   config.browser.extraArgs = desiredArgs;
+  // NOTE: removed — older OpenClaw images don't recognize browser.extraArgs
+  // and it causes a crash loop. Clean up if present from a prior run.
+  if (config.browser.extraArgs) {
+   delete config.browser.extraArgs;
    changed = true;
-  } else {
-   // Add any missing args
-   for (const arg of desiredArgs) {
-    const argKey = arg.split('=')[0];
-    if (!config.browser.extraArgs.some(a => a.startsWith(argKey))) {
-     config.browser.extraArgs.push(arg);
-     changed = true;
-    }
-   }
   }
 
   if (changed) {
    writeFileSync(configPath, JSON.stringify(config, null, 2));
-   console.log('[Browser] Patched openclaw.json with browser viewport/stealth config');
+   console.log('[Browser] Patched openclaw.json with browser config');
+   // Run doctor --fix to clean up any remaining unrecognized keys
+   try { execSync('docker exec openclaw-openclaw-gateway-1 openclaw doctor --fix 2>/dev/null', { timeout: 15000 }); console.log('[Browser] Ran openclaw doctor --fix'); } catch {}
    // Signal OpenClaw to reload config
    try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
   } else {

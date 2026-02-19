@@ -549,7 +549,7 @@ docker image prune -f 2>/dev/null || true
 
 # Run openclaw setup to seed any missing workspace files, then doctor for diagnostics
 docker compose exec -T openclaw-gateway openclaw setup --workspace /opt/openclaw-data/workspace 2>/dev/null || true
-docker compose exec -T openclaw-gateway openclaw doctor 2>/dev/null || true
+docker compose exec -T openclaw-gateway openclaw doctor --fix 2>/dev/null || true
 
 # ── [5/8] Bridge ────────────────────────────────────────────────────
 dlog "Setting up Bridge..."
