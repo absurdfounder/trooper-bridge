@@ -169,7 +169,7 @@ class OpenClawGateway {
  this._pendingRequests.clear();
  this._eventListeners.clear();
  this._reconnectTimer = setTimeout(() => this.connect(), this._reconnectDelay);
- this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 30000);
+ this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 10000);
  });
 
  this.ws.on('error', (err) => {
