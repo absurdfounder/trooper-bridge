@@ -1818,6 +1818,72 @@ wss.on('connection', (clientWs) => {
  });
 });
 
+// ── Browser Config Initialization ────────────────────────────────────
+// Ensure OpenClaw browser has proper viewport, stealth flags, and anti-detection
+// on first startup. This patches openclaw.json so the container picks it up.
+function ensureBrowserConfig() {
+ const configPath = '/opt/openclaw-data/config/openclaw.json';
+ try {
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  if (!config.browser) config.browser = {};
+  let changed = false;
+
+  // Enable browser if not explicitly configured
+  if (config.browser.enabled === undefined) {
+   config.browser.enabled = true;
+   changed = true;
+  }
+
+  // Set headless mode (needed in Docker — no display server)
+  if (config.browser.headless === undefined) {
+   config.browser.headless = true;
+   changed = true;
+  }
+
+  // Ensure noSandbox for Docker (no suid sandbox in containers)
+  if (config.browser.noSandbox === undefined) {
+   config.browser.noSandbox = true;
+   changed = true;
+  }
+
+  // Set proper viewport + stealth via extraArgs
+  const desiredArgs = [
+   '--window-size=1440,900',
+   '--disable-blink-features=AutomationControlled',
+   '--disable-infobars',
+   '--lang=en-US,en',
+  ];
+  if (!Array.isArray(config.browser.extraArgs)) {
+   config.browser.extraArgs = desiredArgs;
+   changed = true;
+  } else {
+   // Add any missing args
+   for (const arg of desiredArgs) {
+    const argKey = arg.split('=')[0];
+    if (!config.browser.extraArgs.some(a => a.startsWith(argKey))) {
+     config.browser.extraArgs.push(arg);
+     changed = true;
+    }
+   }
+  }
+
+  if (changed) {
+   writeFileSync(configPath, JSON.stringify(config, null, 2));
+   console.log('[Browser] Patched openclaw.json with browser viewport/stealth config');
+   // Signal OpenClaw to reload config
+   try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+  } else {
+   console.log('[Browser] Browser config already up to date');
+  }
+ } catch (err) {
+  // Config file may not exist yet (first boot) — that's fine, the gateway will create it
+  console.log('[Browser] Could not patch browser config (may not exist yet):', err.message);
+ }
+}
+
+// Run browser config check on startup (delayed to let container boot)
+setTimeout(ensureBrowserConfig, 5000);
+
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
  console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'}`);
