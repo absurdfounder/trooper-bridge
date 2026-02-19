@@ -38,9 +38,9 @@ dlog() {
  DEPLOY_LOG="$DEPLOY_LOG" LOG_MSG="$msg" LOG_STEP="$step" LOG_TS="$ts" python3 -c "
 import json,os
 try:
- with open(os.environ['DEPLOY_LOG'],'r+') as f:
- logs=json.load(f); logs.append({'t':int(os.environ['LOG_TS']),'msg':os.environ['LOG_MSG'],'step':os.environ['LOG_STEP']})
- f.seek(0); json.dump(logs,f); f.truncate()
+  with open(os.environ['DEPLOY_LOG'],'r+') as f:
+    logs=json.load(f); logs.append({'t':int(os.environ['LOG_TS']),'msg':os.environ['LOG_MSG'],'step':os.environ['LOG_STEP']})
+    f.seek(0); json.dump(logs,f); f.truncate()
 except: pass
 " 2>/dev/null || true
  # Also POST directly to Render API for instant visibility in the frontend
@@ -60,23 +60,23 @@ exec 1> >(tee -a "$DEPLOY_RAW_LOG") 2>&1
 python3 -c "
 import http.server, json, threading, os
 class H(http.server.BaseHTTPRequestHandler):
- def do_GET(self):
- if self.path=='/health':
- self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
- self.wfile.write(b'{\"status\":\"installing\"}')
- elif self.path=='/deploy-logs':
- self.send_response(200); self.send_header('Content-Type','application/json')
- self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
- with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
- elif self.path=='/deploy-logs-raw':
- self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
- self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
- try:
-  with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
- except: self.wfile.write(b'')
- else:
- self.send_response(404); self.end_headers()
- def log_message(self,*a): pass
+    def do_GET(self):
+        if self.path=='/health':
+            self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+            self.wfile.write(b'{\"status\":\"installing\"}')
+        elif self.path=='/deploy-logs':
+            self.send_response(200); self.send_header('Content-Type','application/json')
+            self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+            with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
+        elif self.path=='/deploy-logs-raw':
+            self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+            try:
+                with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
+            except: self.wfile.write(b'')
+        else:
+            self.send_response(404); self.end_headers()
+    def log_message(self,*a): pass
 s=http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H)
 s.serve_forever()
 " &
@@ -395,27 +395,27 @@ sed -i "s/HOOK_TOKEN_PLACEHOLDER/oc-hook-${HOOK_TOKEN}/g" /opt/openclaw-data/con
 DOCKER_GID=$(getent group docker | cut -d: -f3)
 cat > /opt/openclaw/docker-compose.override.yml << OVERRIDE
 services:
- openclaw-gateway:
- volumes:
- - /var/run/docker.sock:/var/run/docker.sock
- - /usr/bin/docker:/usr/bin/docker:ro
- - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
- - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
- group_add:
- - "${DOCKER_GID}"
- extra_hosts:
- - "host.docker.internal:host-gateway"
- environment:
- OPENAI_API_KEY: \${OPENAI_API_KEY}
- BRAVE_API_KEY: \${BRAVE_API_KEY}
- CHROME_PATH: /usr/bin/google-chrome-stable
- CHROMIUM_PATH: /usr/bin/google-chrome-stable
- PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
- OPENCLAW_BROWSER_EXECUTABLE: /usr/bin/google-chrome-stable
- CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
- user: "0:0"
- entrypoint: ["/bin/bash", "/opt/startup.sh"]
- command: ["${GATEWAY_PORT}"]
+  openclaw-gateway:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
+      - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
+    group_add:
+      - "${DOCKER_GID}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      OPENAI_API_KEY: \${OPENAI_API_KEY}
+      BRAVE_API_KEY: \${BRAVE_API_KEY}
+      CHROME_PATH: /usr/bin/google-chrome-stable
+      CHROMIUM_PATH: /usr/bin/google-chrome-stable
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
+      OPENCLAW_BROWSER_EXECUTABLE: /usr/bin/google-chrome-stable
+      CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
+    user: "0:0"
+    entrypoint: ["/bin/bash", "/opt/startup.sh"]
+    command: ["${GATEWAY_PORT}"]
 OVERRIDE
 
 # Startup script that ensures Chrome is installed before starting the gateway
