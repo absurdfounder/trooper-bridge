@@ -25,7 +25,6 @@ GATEWAY_PORT=18789
 MEDIA_PORT=18791
 API_URL="{{API_URL}}"
 CAPTCHA_2CAPTCHA_API_KEY="{{CAPTCHA_2CAPTCHA_API_KEY}}"
-TWOCAPTCHA_PROXY_KEY="{{TWOCAPTCHA_PROXY_KEY}}"
 COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
 
 # Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
@@ -238,7 +237,6 @@ OPENAI_API_KEY=${OPENAI_API_KEY}
 BRAVE_API_KEY=${BRAVE_API_KEY}
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 CAPTCHA_2CAPTCHA_API_KEY=${CAPTCHA_2CAPTCHA_API_KEY}
-TWOCAPTCHA_PROXY_KEY=${TWOCAPTCHA_PROXY_KEY}
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 ENV
 
@@ -422,7 +420,6 @@ services:
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
       OPENCLAW_BROWSER_EXECUTABLE: /usr/bin/google-chrome-stable
       CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
-      TWOCAPTCHA_PROXY_KEY: \${TWOCAPTCHA_PROXY_KEY}
       COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/startup.sh"]
@@ -521,24 +518,37 @@ if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
 fi
 export DISPLAY=:99
 
-# ── Residential proxy via 2captcha (when TWOCAPTCHA_PROXY_KEY is set) ──
-# Routes ALL Chrome traffic through residential IP to avoid bot detection
+# ── Residential proxy via 2captcha (auto-detected from CAPTCHA_2CAPTCHA_API_KEY) ──
+# Calls the 2captcha proxy API to get the proxy username, then routes ALL Chrome
+# traffic through a residential IP to avoid bot detection by Google/Cloudflare/etc.
 PROXY_ARGS=""
 EXT_DIRS="/opt/openclaw-data/2captcha-extension"
-if [ -n "${TWOCAPTCHA_PROXY_KEY:-}" ]; then
-  # Generate fresh session ID for a new residential IP each launch
-  SESSION_ID=$(head -c 12 /dev/urandom | base64 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 9)
-  PROXY_USER="${TWOCAPTCHA_PROXY_KEY}-zone-custom-session-${SESSION_ID}-sessTime-120"
-  PROXY_PASS="${TWOCAPTCHA_PROXY_KEY}"
-  PROXY_ARGS="--proxy-server=http://na.proxy.2captcha.com:2334"
+PROXY_CACHE=/tmp/.2captcha-proxy-user
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+  # Fetch proxy username from 2captcha API (cached — only calls API once per container)
+  if [ ! -f "$PROXY_CACHE" ]; then
+    PROXY_USERNAME=$(curl -sf "https://api.2captcha.com/proxy?key=${CAPTCHA_2CAPTCHA_API_KEY}" 2>/dev/null \
+      | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+    if [ -n "$PROXY_USERNAME" ]; then
+      echo "$PROXY_USERNAME" > "$PROXY_CACHE"
+    fi
+  fi
+  PROXY_KEY=$(cat "$PROXY_CACHE" 2>/dev/null || echo "")
 
-  # Create a small MV3 extension that handles proxy authentication
-  PROXY_EXT_DIR=/tmp/proxy-auth-ext
-  mkdir -p "$PROXY_EXT_DIR"
-  cat > "$PROXY_EXT_DIR/manifest.json" << 'PMANI'
+  if [ -n "$PROXY_KEY" ]; then
+    # Generate fresh session ID for a new residential IP each Chrome launch
+    SESSION_ID=$(head -c 12 /dev/urandom | base64 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 9)
+    PROXY_USER="${PROXY_KEY}-zone-custom-session-${SESSION_ID}-sessTime-120"
+    PROXY_PASS="${PROXY_KEY}"
+    PROXY_ARGS="--proxy-server=http://na.proxy.2captcha.com:2334"
+
+    # Create a small MV3 extension that handles proxy authentication
+    PROXY_EXT_DIR=/tmp/proxy-auth-ext
+    mkdir -p "$PROXY_EXT_DIR"
+    cat > "$PROXY_EXT_DIR/manifest.json" << 'PMANI'
 {"manifest_version":3,"name":"Proxy Auth","version":"1.0","permissions":["webRequest","webRequestAuthProvider"],"host_permissions":["<all_urls>"],"background":{"service_worker":"background.js"}}
 PMANI
-  cat > "$PROXY_EXT_DIR/background.js" << PBGJS
+    cat > "$PROXY_EXT_DIR/background.js" << PBGJS
 chrome.webRequest.onAuthRequired.addListener(
   (details, callback) => {
     callback({ authCredentials: { username: "${PROXY_USER}", password: "${PROXY_PASS}" } });
@@ -547,7 +557,8 @@ chrome.webRequest.onAuthRequired.addListener(
   ["asyncBlocking"]
 );
 PBGJS
-  EXT_DIRS="${EXT_DIRS},${PROXY_EXT_DIR}"
+    EXT_DIRS="${EXT_DIRS},${PROXY_EXT_DIR}"
+  fi
 fi
 
 exec /usr/bin/google-chrome-stable \
