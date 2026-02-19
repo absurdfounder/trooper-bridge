@@ -17,6 +17,25 @@ function isBrowserTool(tool) {
   return tool && BROWSER_TOOLS.some(t => String(tool).toLowerCase().includes(t));
 }
 
+// ── VNC Live View ─────────────────────────────────────────────────────
+// When Xvnc + noVNC/websockify are running (2captcha mode), send the client
+// a live VNC URL instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
+function getVNCLiveViewUrl() {
+  const orgId = process.env.ORG_ID || '';
+  if (!orgId) return null;
+  const orgShort = orgId.toLowerCase().substring(0, 12);
+  const domain = `org-${orgShort}.crabhq.com`;
+  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
+}
+
+function isVNCAvailable() {
+  try {
+    // Check if websockify is listening on port 6080 (host-side, quick TCP check)
+    execSync('ss -tlnp | grep -q ":6080"', { timeout: 2000 });
+    return true;
+  } catch { return false; }
+}
+
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const IDENTITY_PATH = '/opt/openclaw-bridge/device-identity.json';
@@ -169,7 +188,7 @@ class OpenClawGateway {
  this._pendingRequests.clear();
  this._eventListeners.clear();
  this._reconnectTimer = setTimeout(() => this.connect(), this._reconnectDelay);
- this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 10000);
+ this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 30000);
  });
 
  this.ws.on('error', (err) => {
@@ -722,26 +741,35 @@ async function handleIncomingTaskStream(req, res) {
  // Forward each event to SSE as it arrives
  sendSSE(event, data);
 
- // Start screenshot poller when browser tool begins
+ // Start live browser view when browser tool begins
  if (event === 'tool_start' && isBrowserTool(data?.tool)) {
    if (screenshotPollerInterval) {
      clearInterval(screenshotPollerInterval);
    }
-   screenshotPollerInterval = setInterval(() => {
-     if (res.writableEnded) {
-       if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
-       return;
-     }
-     try {
-       const out = execSync(
-         `docker exec openclaw-openclaw-gateway-1 bash -c 'ls -t /home/node/.openclaw/media/browser/*.{png,jpg,jpeg,webp} 2>/dev/null | head -1 | xargs -I{} cat {} | base64 -w0'`,
-         { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
-       ).toString().trim();
-       if (out && out.length > 100) {
-         sendSSE('screenshot_frame', { base64: out, timestamp: Date.now() });
+
+   // Try VNC live view first (real-time), fall back to screenshot polling (1.5s flipbook)
+   const vncUrl = getVNCLiveViewUrl();
+   if (vncUrl && isVNCAvailable()) {
+     sendSSE('browser_session', { liveViewUrl: vncUrl });
+     console.log(`[VNC] Sent live view URL to client`);
+   } else {
+     // Fallback: poll screenshots from container every 1.5s
+     screenshotPollerInterval = setInterval(() => {
+       if (res.writableEnded) {
+         if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
+         return;
        }
-     } catch (e) { /* ignore */ }
-   }, 1500);
+       try {
+         const out = execSync(
+           `docker exec openclaw-openclaw-gateway-1 bash -c 'ls -t /home/node/.openclaw/media/browser/*.{png,jpg,jpeg,webp} 2>/dev/null | head -1 | xargs -I{} cat {} | base64 -w0'`,
+           { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
+         ).toString().trim();
+         if (out && out.length > 100) {
+           sendSSE('screenshot_frame', { base64: out, timestamp: Date.now() });
+         }
+       } catch (e) { /* ignore */ }
+     }, 1500);
+   }
  }
 
  // Stop screenshot poller when tool completes or stream ends
@@ -804,32 +832,14 @@ app.get('/files', (req, res) => {
       if (!name || name === '.' || name === '..') continue;
       const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
       let type = 'file';
-      let size = 0;
-      let modified = null;
-      let childCount = null;
       try {
-        // Get type, size, and modification time in one stat call
         const statOut = execSync(
-          `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
+          `docker exec openclaw-openclaw-gateway-1 stat -c "%F" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
           { encoding: 'utf8', timeout: 2000 }
         );
-        const [fileType, fileSize, mtime] = statOut.trim().split('|');
-        if (fileType === 'directory') {
-          type = 'dir';
-          // Get child count for directories
-          try {
-            const countOut = execSync(
-              `docker exec openclaw-openclaw-gateway-1 sh -c "ls -1A '${fullPath.replace(/'/g, "\\'")}' 2>/dev/null | wc -l"`,
-              { encoding: 'utf8', timeout: 2000 }
-            );
-            childCount = parseInt(countOut.trim()) || 0;
-          } catch { childCount = 0; }
-        } else {
-          size = parseInt(fileSize) || 0;
-        }
-        modified = mtime ? parseInt(mtime) * 1000 : null; // Convert Unix epoch seconds to ms
+        if (statOut.trim() === 'directory') type = 'dir';
       } catch {}
-      entries.push({ name, type, path: fullPath, size, modified, childCount });
+      entries.push({ name, type, path: fullPath, size: 0 });
     }
     res.json({ files: entries });
   } catch (e) {
@@ -1630,6 +1640,92 @@ app.post('/config/api-keys', async (req, res) => {
  } finally { keysUpdateInProgress = false; }
 });
 
+// ── Composio connections (proxies to Composio API) ────────────────────
+function getComposioKey() {
+ try {
+ const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+ const m = envContent.match(/^COMPOSIO_API_KEY=(.*)$/m);
+ return m ? m[1].trim() : '';
+ } catch { return ''; }
+}
+app.get('/composio/connections', async (req, res) => {
+ try {
+ const composioKey = getComposioKey();
+ if (!composioKey) return res.status(400).json({ error: 'Composio API key not configured' });
+ const resp = await fetch('https://backend.composio.dev/api/v3/connected_accounts?limit=50', {
+  headers: { 'x-api-key': composioKey },
+  signal: AbortSignal.timeout(10000),
+ });
+ if (!resp.ok) {
+  const errText = await resp.text();
+  return res.status(resp.status).json({ error: errText || 'Composio API error' });
+ }
+ const data = await resp.json();
+ res.json({ items: data.items || data.connected_accounts || [], cursor: data.next_cursor || data.cursor });
+ } catch (err) {
+ console.error('Composio connections error:', err.message);
+ res.status(500).json({ error: err.message });
+ }
+});
+
+app.get('/composio/toolkits', async (req, res) => {
+ try {
+ const composioKey = getComposioKey();
+ if (!composioKey) return res.status(400).json({ error: 'Composio API key not configured' });
+ const limit = Math.min(parseInt(req.query.limit, 10) || 100, 200);
+ const search = (req.query.search || '').trim();
+ const category = (req.query.category || '').trim();
+ const cursor = (req.query.cursor || '').trim();
+ let url = `https://backend.composio.dev/api/v3/toolkits?limit=${limit}`;
+ if (search) url += `&search=${encodeURIComponent(search)}`;
+ if (category) url += `&category=${encodeURIComponent(category)}`;
+ if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
+ const resp = await fetch(url, {
+  headers: { 'x-api-key': composioKey },
+  signal: AbortSignal.timeout(15000),
+ });
+ if (!resp.ok) {
+  const errText = await resp.text();
+  return res.status(resp.status).json({ error: errText || 'Composio API error' });
+ }
+ const data = await resp.json();
+ const items = data.items || data.toolkits || [];
+ res.json({ items, cursor: data.next_cursor || data.cursor });
+ } catch (err) {
+ console.error('Composio toolkits error:', err.message);
+ res.status(500).json({ error: err.message });
+ }
+});
+
+app.get('/composio/tools', async (req, res) => {
+ try {
+ const composioKey = getComposioKey();
+ if (!composioKey) return res.status(400).json({ error: 'Composio API key not configured' });
+ const limit = Math.min(parseInt(req.query.limit, 10) || 500, 1000);
+ const cursor = (req.query.cursor || '').trim();
+ const query = (req.query.query || req.query.search || '').trim();
+ const toolkitSlug = (req.query.toolkit_slug || '').trim();
+ let url = `https://backend.composio.dev/api/v3/tools?limit=${limit}`;
+ if (cursor) url += `&cursor=${encodeURIComponent(cursor)}`;
+ if (query) url += `&query=${encodeURIComponent(query)}`;
+ if (toolkitSlug) url += `&toolkit_slug=${encodeURIComponent(toolkitSlug)}`;
+ const resp = await fetch(url, {
+  headers: { 'x-api-key': composioKey },
+  signal: AbortSignal.timeout(20000),
+ });
+ if (!resp.ok) {
+  const errText = await resp.text();
+  return res.status(resp.status).json({ error: errText || 'Composio API error' });
+ }
+ const data = await resp.json();
+ const items = data.items || [];
+ res.json({ items, cursor: data.next_cursor || data.cursor, total_items: data.total_items, total_pages: data.total_pages });
+ } catch (err) {
+ console.error('Composio tools error:', err.message);
+ res.status(500).json({ error: err.message });
+ }
+});
+
 // ── Update OpenClaw ──────────────────────────────────────────────────
 
 let updateInProgress = false;
@@ -1817,61 +1913,6 @@ wss.on('connection', (clientWs) => {
  console.log(`[WS-Relay] Frontend disconnected`);
  });
 });
-
-// ── Browser Config Initialization ────────────────────────────────────
-// Ensure OpenClaw browser has proper viewport, stealth flags, and anti-detection
-// on first startup. This patches openclaw.json so the container picks it up.
-function ensureBrowserConfig() {
- const configPath = '/opt/openclaw-data/config/openclaw.json';
- try {
-  const config = JSON.parse(readFileSync(configPath, 'utf8'));
-  if (!config.browser) config.browser = {};
-  let changed = false;
-
-  // Enable browser if not explicitly configured
-  if (config.browser.enabled === undefined) {
-   config.browser.enabled = true;
-   changed = true;
-  }
-
-  // Set headless mode (needed in Docker — no display server)
-  if (config.browser.headless === undefined) {
-   config.browser.headless = true;
-   changed = true;
-  }
-
-  // Ensure noSandbox for Docker (no suid sandbox in containers)
-  if (config.browser.noSandbox === undefined) {
-   config.browser.noSandbox = true;
-   changed = true;
-  }
-
-  // Set proper viewport + stealth via extraArgs
-  // NOTE: removed — older OpenClaw images don't recognize browser.extraArgs
-  // and it causes a crash loop. Clean up if present from a prior run.
-  if (config.browser.extraArgs) {
-   delete config.browser.extraArgs;
-   changed = true;
-  }
-
-  if (changed) {
-   writeFileSync(configPath, JSON.stringify(config, null, 2));
-   console.log('[Browser] Patched openclaw.json with browser config');
-   // Run doctor --fix to clean up any remaining unrecognized keys
-   try { execSync('docker exec openclaw-openclaw-gateway-1 openclaw doctor --fix 2>/dev/null', { timeout: 15000 }); console.log('[Browser] Ran openclaw doctor --fix'); } catch {}
-   // Signal OpenClaw to reload config
-   try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
-  } else {
-   console.log('[Browser] Browser config already up to date');
-  }
- } catch (err) {
-  // Config file may not exist yet (first boot) — that's fine, the gateway will create it
-  console.log('[Browser] Could not patch browser config (may not exist yet):', err.message);
- }
-}
-
-// Run browser config check on startup (delayed to let container boot)
-setTimeout(ensureBrowserConfig, 5000);
 
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
