@@ -25,6 +25,7 @@ GATEWAY_PORT=18789
 MEDIA_PORT=18791
 API_URL="{{API_URL}}"
 CAPTCHA_2CAPTCHA_API_KEY="{{CAPTCHA_2CAPTCHA_API_KEY}}"
+COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
 
 # Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
 DEPLOY_LOG=/tmp/deploy.log
@@ -233,6 +234,7 @@ OPENAI_API_KEY=${OPENAI_API_KEY}
 BRAVE_API_KEY=${BRAVE_API_KEY}
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 CAPTCHA_2CAPTCHA_API_KEY=${CAPTCHA_2CAPTCHA_API_KEY}
+COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 ENV
 
 # Derive hook token from gateway token
@@ -413,6 +415,7 @@ services:
       PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome-stable
       OPENCLAW_BROWSER_EXECUTABLE: /usr/bin/google-chrome-stable
       CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
+      COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/startup.sh"]
     command: ["${GATEWAY_PORT}"]
@@ -431,6 +434,16 @@ if ! command -v google-chrome-stable &>/dev/null; then
  echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
 else
  echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
+fi
+# Install Composio CLI if API key is set and not already installed
+if [ -n "${COMPOSIO_API_KEY:-}" ] && ! command -v composio &>/dev/null; then
+ echo "[startup] Installing Composio CLI..."
+ apt-get update -qq 2>/dev/null
+ apt-get install -y -qq python3 python3-pip 2>/dev/null
+ pip install --break-system-packages composio-core 2>/dev/null || pip install composio-core 2>/dev/null
+ echo "[startup] Composio installed: $(composio --version 2>/dev/null || echo FAILED)"
+elif [ -n "${COMPOSIO_API_KEY:-}" ]; then
+ echo "[startup] Composio already installed: $(composio --version 2>/dev/null)"
 fi
 GATEWAY_PORT="${1:-18789}"
 # Drop back to node user for the gateway process

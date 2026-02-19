@@ -1545,9 +1545,11 @@ app.get('/config/api-keys', (req, res) => {
  };
  const openaiKey = getEnvVal('OPENAI_API_KEY');
  const braveKey = getEnvVal('BRAVE_API_KEY');
+ const composioKey = getEnvVal('COMPOSIO_API_KEY');
  res.json({ keys: {
  openai: { present: !!openaiKey, masked: mask(openaiKey) },
  brave: { present: !!braveKey, masked: mask(braveKey) },
+ composio: { present: !!composioKey, masked: mask(composioKey) },
  }});
  } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1557,8 +1559,8 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { openaiKey, braveKey } = req.body;
- if (openaiKey === undefined && braveKey === undefined) {
+ const { openaiKey, braveKey, composioKey } = req.body;
+ if (openaiKey === undefined && braveKey === undefined && composioKey === undefined) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
  }
@@ -1569,6 +1571,13 @@ app.post('/config/api-keys', async (req, res) => {
  let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
  if (openaiKey !== undefined) envContent = envContent.replace(/^OPENAI_API_KEY=.*$/m, `OPENAI_API_KEY=${openaiKey}`);
  if (braveKey !== undefined) envContent = envContent.replace(/^BRAVE_API_KEY=.*$/m, `BRAVE_API_KEY=${braveKey}`);
+ if (composioKey !== undefined) {
+ if (envContent.match(/^COMPOSIO_API_KEY=/m)) {
+ envContent = envContent.replace(/^COMPOSIO_API_KEY=.*$/m, `COMPOSIO_API_KEY=${composioKey}`);
+ } else {
+ envContent += `\nCOMPOSIO_API_KEY=${composioKey}\n`;
+ }
+ }
  writeFileSync('/opt/openclaw/.env', envContent);
 
  if (braveKey !== undefined) {
