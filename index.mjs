@@ -131,7 +131,18 @@ class OpenClawGateway {
  this._connectNonce = null;
  this._authResolve = null;
  this._authReject = null;
+ this._pingInterval = null;
  this.connect();
+ }
+
+ // Attempt reconnect if not connected; returns true if ready
+ async ensureConnected() {
+ if (this.isReady) return true;
+ // Cancel any pending slow reconnect timer and try immediately
+ if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+ this._reconnectDelay = 5000;
+ console.log('[OpenClaw] Eager reconnect attempt (request triggered)...');
+ return await this.connect();
  }
 
  async connect() {
@@ -160,6 +171,8 @@ class OpenClawGateway {
  }
  this.connected = true;
  this._reconnectDelay = 5000;
+ // Start ping/pong heartbeat to keep connection alive
+ this._startPing();
  console.log('[OpenClaw] Connected — native protocol (full workspace + tools)');
  resolve(true);
  })
@@ -181,6 +194,7 @@ class OpenClawGateway {
  this.ws.on('close', (code) => {
  this.connected = false;
  this._connectPromise = null;
+ this._stopPing();
  console.log('[OpenClaw] Disconnected (code=' + code + '), reconnecting in ' + (this._reconnectDelay / 1000) + 's...');
  for (const [id, pending] of this._pendingRequests) {
  pending.reject(new Error('WebSocket disconnected'));
@@ -199,6 +213,24 @@ class OpenClawGateway {
  if (!this.connected) { this._connectPromise = null; resolve(false); }
  }, 15000);
  });
+ }
+
+ _startPing() {
+ this._stopPing();
+ this._pingInterval = setInterval(() => {
+ if (this.ws?.readyState === WebSocket.OPEN) {
+ try { this.ws.ping(); } catch {}
+ } else {
+ // Connection died without close event — force reconnect
+ console.log('[OpenClaw] Ping failed (ws not open), forcing reconnect...');
+ this._stopPing();
+ if (this.ws) try { this.ws.terminate(); } catch {}
+ }
+ }, 30000); // Ping every 30 seconds
+ }
+
+ _stopPing() {
+ if (this._pingInterval) { clearInterval(this._pingInterval); this._pingInterval = null; }
  }
 
  async _authenticate() {
@@ -668,7 +700,10 @@ async function handleIncomingTask(req, res) {
  const fullTask = buildTaskMessage(req.body);
 
  if (!gateway.isReady) {
+ const reconnected = await gateway.ensureConnected();
+ if (!reconnected) {
  return res.status(503).json({ error: 'OpenClaw gateway not connected', requestId: id });
+ }
  }
 
  try {
@@ -709,7 +744,10 @@ async function handleIncomingTaskStream(req, res) {
  const fullTask = buildTaskMessage(req.body);
 
  if (!gateway.isReady) {
+ const reconnected = await gateway.ensureConnected();
+ if (!reconnected) {
  return res.status(503).json({ error: 'OpenClaw gateway not connected' });
+ }
  }
 
  // Set up SSE headers
@@ -1293,7 +1331,10 @@ app.post('/dm', async (req, res) => {
  const sessionKey = `hook:dm:${slug}:${userId || 'anon'}`;
 
  if (!gateway.isReady) {
+ const reconnected = await gateway.ensureConnected();
+ if (!reconnected) {
  return res.status(503).json({ error: 'OpenClaw gateway not connected' });
+ }
  }
 
  try {
