@@ -1682,7 +1682,7 @@ app.post('/config/api-keys', async (req, res) => {
 
  setEnvVar('ANTHROPIC_API_KEY', anthropicKey);
  setEnvVar('OPENAI_API_KEY', openaiKey);
- setEnvVar('GOOGLE_API_KEY', geminiKey);
+ setEnvVar('GEMINI_API_KEY', geminiKey);
  setEnvVar('BRAVE_API_KEY', braveKey);
  setEnvVar('COMPOSIO_API_KEY', composioKey);
  setEnvVar('OPENROUTER_API_KEY', openrouterKey);
@@ -1715,25 +1715,115 @@ app.post('/config/api-keys', async (req, res) => {
  } catch (e) { console.error('Failed to update default model in openclaw.json:', e.message); }
  }
 
- // Update auth-profiles.json for OpenAI and Anthropic
- if (openaiKey !== undefined || anthropicKey !== undefined) {
+ // Update auth-profiles.json for ALL providers
+ {
+ const providerKeyMap = [
+ { key: anthropicKey, profileId: 'anthropic:default', provider: 'anthropic' },
+ { key: openaiKey, profileId: 'openai:default', provider: 'openai' },
+ { key: openrouterKey, profileId: 'openrouter:default', provider: 'openrouter' },
+ { key: geminiKey, profileId: 'google:default', provider: 'google' },
+ { key: mistralKey, profileId: 'mistral:default', provider: 'mistral' },
+ ];
+ const keysToUpdate = providerKeyMap.filter(entry => entry.key !== undefined);
+
+ if (keysToUpdate.length > 0) {
  try {
  const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
- const auth = JSON.parse(readFileSync(authPath, 'utf8'));
+ let auth;
+ try {
+ auth = JSON.parse(readFileSync(authPath, 'utf8'));
+ } catch {
+ auth = { version: 1, profiles: {}, lastGood: {} };
+ }
  if (!auth.profiles) auth.profiles = {};
- if (openaiKey !== undefined && auth.profiles['openai:default']) {
- auth.profiles['openai:default'].key = openaiKey;
+ if (!auth.lastGood) auth.lastGood = {};
+
+ for (const { key, profileId, provider } of keysToUpdate) {
+ if (provider === 'anthropic') {
+   const isApiKey = key.startsWith('sk-ant-api');
+   auth.profiles[profileId] = isApiKey
+    ? { type: 'api_key', provider: 'anthropic', key }
+    : { type: 'token', provider: 'anthropic', token: key };
+ } else {
+   auth.profiles[profileId] = { type: 'api_key', provider, key };
  }
- if (anthropicKey !== undefined) {
- const isApiKey = anthropicKey.startsWith('sk-ant-api');
- const profile = isApiKey
-   ? { type: 'key', provider: 'anthropic', key: anthropicKey }
-   : { type: 'token', provider: 'anthropic', token: anthropicKey };
- auth.profiles['anthropic:default'] = profile;
+ auth.lastGood[provider] = profileId;
  }
+
  writeFileSync(authPath, JSON.stringify(auth, null, 2));
  await run(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`);
+ console.log(`[bridge] Updated auth-profiles.json for: ${keysToUpdate.map(e => e.provider).join(', ')}`);
+
+ // Propagate updated auth-profiles to any existing sub-agent directories
+ try {
+ const agentsDir = '/opt/openclaw-data/config/agents';
+ const agentDirs = readdirSync(agentsDir, { withFileTypes: true })
+   .filter(d => d.isDirectory() && d.name !== 'main');
+ const updatedAuth = readFileSync(authPath, 'utf8');
+ for (const dir of agentDirs) {
+   const subAuthPath = `${agentsDir}/${dir.name}/agent/auth-profiles.json`;
+   if (existsSync(subAuthPath)) {
+    writeFileSync(subAuthPath, updatedAuth);
+    await run(`chown 1000:1000 ${subAuthPath} && chmod 600 ${subAuthPath}`);
+   }
+ }
+ } catch (e) { console.error('Failed to propagate auth to sub-agents:', e.message); }
  } catch (e) { console.error('Failed to update auth-profiles.json:', e.message); }
+ }
+ }
+
+ // Ensure openclaw.json has models.providers entries for providers with keys
+ {
+ const providerConfigs = {
+ anthropic: { key: anthropicKey, config: {
+   baseUrl: 'https://api.anthropic.com/v1', api: 'anthropic-messages',
+   models: [
+    { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', contextWindow: 200000 },
+    { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', contextWindow: 200000 },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', contextWindow: 200000 },
+    { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', contextWindow: 200000 },
+   ] }},
+ openai: { key: openaiKey, config: {
+   baseUrl: 'https://api.openai.com/v1', api: 'openai-completions',
+   models: [
+    { id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 128000 },
+    { id: 'gpt-5.0', name: 'GPT-5.0', contextWindow: 128000 },
+   ] }},
+ google: { key: geminiKey, config: {
+   baseUrl: 'https://generativelanguage.googleapis.com/v1beta', api: 'google-generative-ai',
+   models: [
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000 },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1000000 },
+   ] }},
+ openrouter: { key: openrouterKey, config: {
+   baseUrl: 'https://openrouter.ai/api/v1', api: 'openai-completions',
+   models: [
+    { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (OR)', contextWindow: 200000 },
+    { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
+    { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
+   ] }},
+ };
+ const newProviders = Object.entries(providerConfigs).filter(([, entry]) => entry.key !== undefined);
+ if (newProviders.length > 0) {
+ try {
+ const configPath = '/opt/openclaw-data/config/openclaw.json';
+ const config = JSON.parse(readFileSync(configPath, 'utf8'));
+ if (!config.models) config.models = {};
+ if (!config.models.providers) config.models.providers = {};
+ let changed = false;
+ for (const [providerName, entry] of newProviders) {
+   if (!config.models.providers[providerName]) {
+    config.models.providers[providerName] = entry.config;
+    changed = true;
+    console.log(`[bridge] Added models.providers.${providerName} to openclaw.json`);
+   }
+ }
+ if (changed) {
+   writeFileSync(configPath, JSON.stringify(config, null, 2));
+   await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
+ }
+ } catch (e) { console.error('Failed to update openclaw.json providers:', e.message); }
+ }
  }
 
  console.log('Restarting OpenClaw containers after key update...');
