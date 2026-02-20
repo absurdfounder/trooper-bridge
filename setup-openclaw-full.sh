@@ -253,10 +253,10 @@ resolve_primary_model() {
  elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
   echo "google/gemini-2.5-pro"
  elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
-  echo "openrouter/anthropic/claude-sonnet-4-5"
+  echo "openrouter/openai/gpt-5-mini"
  else
-  # Fallback — no keys found, default to anthropic
-  echo "anthropic/claude-sonnet-4-5"
+  # Fallback — no keys found, default to cheap model
+  echo "openrouter/openai/gpt-5-mini"
  fi
 }
 
@@ -288,8 +288,7 @@ if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}"
  build_fallback "google/gemini-2.5-pro"
 fi
 if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
- build_fallback "openrouter/anthropic/claude-sonnet-4-5"
- build_fallback "openrouter/openai/gpt-4o-mini"
+ build_fallback "openrouter/openai/gpt-5-mini"
 fi
 
 # Build fallbacks JSON (may be empty)
