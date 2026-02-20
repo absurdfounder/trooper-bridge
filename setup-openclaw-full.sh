@@ -715,10 +715,88 @@ When you receive a task:
 
 ## Context & Memory
 - **Read COMPANY.md first** — know the company, its products, its voice
+- **Read CAPABILITIES.md** — model routing slots & API reference for all capabilities (image gen, video, TTS, social search, web search, etc.)
 - **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings)
 - **Use memory_search before starting work** — check if the team has done related work before
 - **Write daily notes to memory/YYYY-MM-DD.md** — log delegations, outcomes, key decisions
 AGENTSMD
+
+# ── CAPABILITIES.md — Model routing & API reference for Lead + SPCs ──────
+cat > /opt/openclaw-data/workspace/CAPABILITIES.md << 'CAPMD'
+# Capabilities — Model Routing & API Reference
+
+This file documents the AI capabilities available to ALL agents (Lead + SPCs).
+When a task requires one of these capabilities, use the corresponding API via curl.
+The org's `modelRouting` settings in Firestore determine which model/provider to use per slot.
+
+## How Model Routing Works
+Each org has `settings.modelRouting` with slot→model mappings. When performing a task, check
+which model is assigned to the relevant slot. If unset, fall back to the default chat model.
+
+## Capability Slots
+
+### 💬 Chat & Reasoning (`chat`)
+General conversation, task execution, code generation. This is the default model.
+- Used for: all standard agent tasks, planning, writing, coding
+- API: OpenRouter / Anthropic / OpenAI depending on org's configured model
+
+### 🎨 Image Generation (`image_gen`)
+Create images from text prompts.
+- **OpenAI DALL-E**: `curl -X POST https://api.openai.com/v1/images/generations -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"dall-e-3","prompt":"...","size":"1024x1024"}'`
+- **OpenRouter (if available)**: route through OpenRouter with image model
+- Use for: SPC social media posts needing visuals, marketing assets, product mockups
+
+### 🎬 Video Generation (`video_gen`)
+Generate video clippings based on prompts.
+- **Runway**: `curl -X POST https://api.runwayml.com/v1/generations -H "Authorization: Bearer $KEY" -d '{"prompt":"..."}'`
+- **Luma AI**: `curl -X POST https://api.lumalabs.ai/dream-machine/v1/generations -H "Authorization: Bearer $KEY" -d '{"prompt":"..."}'`
+- Use for: SPC social content videos, product demos, short-form content
+
+### 🔊 Text-to-Speech (`tts`)
+Convert text to natural-sounding audio.
+- **OpenAI TTS**: `curl -X POST https://api.openai.com/v1/audio/speech -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"tts-1","input":"...","voice":"alloy"}' --output speech.mp3`
+- **ElevenLabs**: `curl -X POST "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}" -H "xi-api-key: $KEY" -H "Content-Type: application/json" -d '{"text":"...","model_id":"eleven_multilingual_v2"}'`
+- Use for: podcast generation, audio content, voiceovers for video
+
+### 🎙️ Speech-to-Text (`stt`)
+Transcribe audio and voice to text.
+- **OpenAI Whisper**: `curl -X POST https://api.openai.com/v1/audio/transcriptions -H "Authorization: Bearer $KEY" -F file=@audio.mp3 -F model=whisper-1`
+- Use for: meeting transcription, voice note processing, audio analysis
+
+### 🎵 Music Generation (`music_gen`)
+Generate music and audio from text prompts.
+- **Suno**: `curl -X POST https://api.suno.ai/v1/generations -H "Authorization: Bearer $KEY" -d '{"prompt":"...","duration":30}'`
+- **Udio**: via their API when available
+- Use for: SPC social content background music, jingles, brand audio
+
+### 🔍 Social Search (`social_search`)
+Search trends and what's happening on X/Twitter.
+- **Twitter/X API v2**: `curl "https://api.twitter.com/2/tweets/search/recent?query=..." -H "Authorization: Bearer $TWITTER_BEARER"`
+- **Twitter Trends**: `curl "https://api.twitter.com/2/trends/by/woeid/1" -H "Authorization: Bearer $TWITTER_BEARER"`
+- **SocialData.tools**: `curl "https://api.socialdata.tools/twitter/search?query=..." -H "Authorization: Bearer $KEY"`
+- Use for: LEADS — finding potential customers talking about relevant topics; SPC — trending content ideas, competitor monitoring, engagement opportunities
+
+### 🌐 Web Search (`web_search`)
+Search the web using AI providers.
+- **Brave Search**: `curl "https://api.search.brave.com/res/v1/web/search?q=..." -H "X-Subscription-Token: $BRAVE_KEY"`
+- **Perplexity (AI search)**: `curl -X POST https://api.perplexity.ai/chat/completions -H "Authorization: Bearer $KEY" -d '{"model":"sonar","messages":[{"role":"user","content":"..."}]}'`
+- **Tavily**: `curl -X POST https://api.tavily.com/search -d '{"api_key":"$KEY","query":"..."}'`
+- Use for: LEADS — researching companies, finding contact info, market analysis; SPC — fact-checking, competitive research, content sourcing
+
+## Usage for SPC Tasks
+- **SPC (Social Post Content)**: Use `image_gen` for post visuals, `video_gen` for reels/clips, `social_search` for trending topics & engagement, `music_gen` for audio content, `web_search` for research & sourcing
+- **LEADS (Lead Generation)**: Use `social_search` to find prospects discussing relevant pain points, `web_search` to research companies & contacts, `chat` for composing outreach messages
+
+## API Key Locations
+Keys are stored in the org's Firestore doc under `keys.*` and in the VPS environment:
+- `OPENAI_API_KEY` — OpenAI (DALL-E, TTS, Whisper)
+- `ANTHROPIC_API_KEY` — Anthropic Claude
+- `OPENROUTER_API_KEY` — OpenRouter (200+ models)
+- `TWITTER_BEARER_TOKEN` — X/Twitter API
+- `BRAVE_SEARCH_API_KEY` — Brave Search
+- `ELEVENLABS_API_KEY` — ElevenLabs TTS
+- Check org's Firestore `keys` for any additional provider keys
+CAPMD
 
 # ── 2Captcha extension (when API key is set) ─────────────────────────────
 mkdir -p /opt/openclaw-data/2captcha-extension
