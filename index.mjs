@@ -2144,6 +2144,39 @@ wss.on('connection', (clientWs) => {
  });
 });
 
+// ── OpenClaw Config (read/write openclaw.json) ──────────────────────
+const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
+
+app.get('/config/openclaw', (req, res) => {
+  try {
+    const data = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
+    res.json(JSON.parse(data));
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.json({});
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/config/openclaw', (req, res) => {
+  try {
+    const data = req.body;
+    if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
+    // Backup existing
+    try {
+      const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
+      writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
+    } catch {}
+    writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(data, null, 2));
+    // Fix permissions
+    try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+    // Restart OpenClaw gateway to pick up changes
+    try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Auth Profiles (read/write OpenClaw auth-profiles.json) ───────────
 const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
 
