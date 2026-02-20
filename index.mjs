@@ -1658,8 +1658,8 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey } = req.body;
- const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey].some(k => k !== undefined);
+ const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, defaultModel } = req.body;
+ const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, defaultModel].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
@@ -1699,6 +1699,20 @@ app.post('/config/api-keys', async (req, res) => {
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
  }
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
+ }
+
+ // Update default model in openclaw.json
+ if (defaultModel) {
+ try {
+ const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
+ if (!config.agents) config.agents = {};
+ if (!config.agents.defaults) config.agents.defaults = {};
+ if (!config.agents.defaults.model) config.agents.defaults.model = {};
+ config.agents.defaults.model.primary = defaultModel;
+ console.log(`[bridge] Updating default model to: ${defaultModel}`);
+ writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
+ } catch (e) { console.error('Failed to update default model in openclaw.json:', e.message); }
  }
 
  // Update auth-profiles.json for OpenAI and Anthropic
