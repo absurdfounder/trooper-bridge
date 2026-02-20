@@ -926,6 +926,18 @@ app.post('/agents', (req, res) => {
  writeFileSync(`${agentDir}/agent/auth-profiles.json`, mainAuth);
  } catch {}
 
+ // Copy COMPANY.md from main workspace so SPC has company context
+ try {
+ const companyMd = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8');
+ if (companyMd) writeFileSync(`${workspacePath}/COMPANY.md`, companyMd);
+ } catch {}
+
+ // Copy MEMORIES.md from main workspace so SPC has team knowledge
+ try {
+ const memoriesMd = readFileSync('/opt/openclaw-data/workspace/MEMORIES.md', 'utf8');
+ if (memoriesMd) writeFileSync(`${workspacePath}/MEMORIES.md`, memoriesMd);
+ } catch {}
+
  // Fix permissions
  execSync(`chown -R 1000:1000 ${agentDir}`, { timeout: 5000 });
 
