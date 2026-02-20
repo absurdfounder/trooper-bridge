@@ -370,6 +370,7 @@ class OpenClawGateway {
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
  thinking: opts.thinking || undefined,
+ model: opts.model || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
  deliver: false,
  },
@@ -479,6 +480,7 @@ class OpenClawGateway {
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
  thinking: opts.thinking || undefined,
+ model: opts.model || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
  deliver: false,
  },
@@ -654,7 +656,7 @@ function buildTaskMessage(body) {
 // ── Core Task Handler (JSON — backward compatible) ───────────────────
 async function handleIncomingTask(req, res) {
  const { requestId, task, type, source, agentName, context,
- agentContext, systemPrompt, installedSkills, skillCredentials, thinking, timestamp } = req.body;
+ agentContext, systemPrompt, installedSkills, skillCredentials, thinking, model, timestamp } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
 
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -674,6 +676,7 @@ async function handleIncomingTask(req, res) {
  const result = await gateway.runAgent(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
+ model: model || undefined,
  extraSystemPrompt: registered ? undefined : (systemPrompt || undefined),
  timeoutMs: 180000,
  });
@@ -695,7 +698,7 @@ async function handleIncomingTask(req, res) {
 // POST /webhook/mission-control/stream
 // Returns Server-Sent Events: tool_start, tool_result, text, thinking, done, error
 async function handleIncomingTaskStream(req, res) {
- const { requestId, task, agentName, context, systemPrompt, thinking } = req.body;
+ const { requestId, task, agentName, context, systemPrompt, thinking, model } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
 
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -735,6 +738,7 @@ async function handleIncomingTaskStream(req, res) {
  const { response, toolLog } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
+ model: model || undefined,
  extraSystemPrompt: registered ? undefined : (systemPrompt || undefined),
  timeoutMs: 180000,
  }, (event, data) => {
@@ -1161,6 +1165,7 @@ app.post('/webhook/background', async (req, res) => {
  agentName: agentName || 'CrabsHQ',
  sessionKey: sessionKey || `hook:crabhq:bg:${Date.now()}`,
  thinking: thinking || undefined,
+ model: model || undefined,
  }).catch(err => console.error('Background agent failed:', err.message));
  return res.status(202).json({ status: 'accepted', via: 'websocket' });
  } catch {}
@@ -1571,13 +1576,21 @@ app.get('/config/api-keys', (req, res) => {
  if (!key || key.length < 8) return key ? '****' : '';
  return key.substring(0, 4) + '****' + key.substring(key.length - 4);
  };
+ const anthropicKey = getEnvVal('ANTHROPIC_API_KEY');
  const openaiKey = getEnvVal('OPENAI_API_KEY');
+ const geminiKey = getEnvVal('GOOGLE_API_KEY') || getEnvVal('GEMINI_API_KEY');
  const braveKey = getEnvVal('BRAVE_API_KEY');
  const composioKey = getEnvVal('COMPOSIO_API_KEY');
+ const openrouterKey = getEnvVal('OPENROUTER_API_KEY');
+ const mistralKey = getEnvVal('MISTRAL_API_KEY');
  res.json({ keys: {
+ anthropic: { present: !!anthropicKey, masked: mask(anthropicKey) },
  openai: { present: !!openaiKey, masked: mask(openaiKey) },
+ gemini: { present: !!geminiKey, masked: mask(geminiKey) },
  brave: { present: !!braveKey, masked: mask(braveKey) },
  composio: { present: !!composioKey, masked: mask(composioKey) },
+ openrouter: { present: !!openrouterKey, masked: mask(openrouterKey) },
+ mistral: { present: !!mistralKey, masked: mask(mistralKey) },
  }});
  } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1587,8 +1600,9 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { openaiKey, braveKey, composioKey } = req.body;
- if (openaiKey === undefined && braveKey === undefined && composioKey === undefined) {
+ const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey } = req.body;
+ const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey].some(k => k !== undefined);
+ if (!hasAnyKey) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
  }
@@ -1597,15 +1611,25 @@ app.post('/config/api-keys', async (req, res) => {
  const run = promisify(exec);
 
  let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
- if (openaiKey !== undefined) envContent = envContent.replace(/^OPENAI_API_KEY=.*$/m, `OPENAI_API_KEY=${openaiKey}`);
- if (braveKey !== undefined) envContent = envContent.replace(/^BRAVE_API_KEY=.*$/m, `BRAVE_API_KEY=${braveKey}`);
- if (composioKey !== undefined) {
- if (envContent.match(/^COMPOSIO_API_KEY=/m)) {
- envContent = envContent.replace(/^COMPOSIO_API_KEY=.*$/m, `COMPOSIO_API_KEY=${composioKey}`);
+
+ // Helper: update or append env var
+ const setEnvVar = (name, value) => {
+ if (value === undefined) return;
+ if (envContent.match(new RegExp(`^${name}=`, 'm'))) {
+ envContent = envContent.replace(new RegExp(`^${name}=.*$`, 'm'), `${name}=${value}`);
  } else {
- envContent += `\nCOMPOSIO_API_KEY=${composioKey}\n`;
+ envContent += `\n${name}=${value}\n`;
  }
- }
+ };
+
+ setEnvVar('ANTHROPIC_API_KEY', anthropicKey);
+ setEnvVar('OPENAI_API_KEY', openaiKey);
+ setEnvVar('GOOGLE_API_KEY', geminiKey);
+ setEnvVar('BRAVE_API_KEY', braveKey);
+ setEnvVar('COMPOSIO_API_KEY', composioKey);
+ setEnvVar('OPENROUTER_API_KEY', openrouterKey);
+ setEnvVar('MISTRAL_API_KEY', mistralKey);
+
  writeFileSync('/opt/openclaw/.env', envContent);
 
  if (braveKey !== undefined) {
@@ -1619,15 +1643,24 @@ app.post('/config/api-keys', async (req, res) => {
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
- if (openaiKey !== undefined) {
+ // Update auth-profiles.json for OpenAI and Anthropic
+ if (openaiKey !== undefined || anthropicKey !== undefined) {
  try {
  const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
  const auth = JSON.parse(readFileSync(authPath, 'utf8'));
- if (auth.profiles?.['openai:default']) {
+ if (!auth.profiles) auth.profiles = {};
+ if (openaiKey !== undefined && auth.profiles['openai:default']) {
  auth.profiles['openai:default'].key = openaiKey;
+ }
+ if (anthropicKey !== undefined) {
+ if (auth.profiles['anthropic:default']) {
+ auth.profiles['anthropic:default'].key = anthropicKey;
+ } else {
+ auth.profiles['anthropic:default'] = { provider: 'anthropic', key: anthropicKey };
+ }
+ }
  writeFileSync(authPath, JSON.stringify(auth, null, 2));
  await run(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`);
- }
  } catch (e) { console.error('Failed to update auth-profiles.json:', e.message); }
  }
 
