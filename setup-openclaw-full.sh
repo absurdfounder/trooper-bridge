@@ -408,11 +408,11 @@ if [ -z "$MODELS_PROVIDERS" ]; then
    }'
 fi
 
-# Resolve memorySearch config — OpenRouter for embeddings, or OpenAI if key exists
-if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
- MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true, "provider": "openai", "model": "text-embedding-3-small" }'
-elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
+# Resolve memorySearch config — always use OpenRouter for embeddings (platform key)
+if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
  MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true, "provider": "openai", "model": "text-embedding-3-small", "remote": { "baseUrl": "https://openrouter.ai/api/v1/", "apiKey": "'"${OPENROUTER_API_KEY}"'" } }'
+elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
+ MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true, "provider": "openai", "model": "text-embedding-3-small" }'
 else
  MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true }'
 fi
