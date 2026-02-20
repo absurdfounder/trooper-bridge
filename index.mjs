@@ -1725,11 +1725,11 @@ app.post('/config/api-keys', async (req, res) => {
  auth.profiles['openai:default'].key = openaiKey;
  }
  if (anthropicKey !== undefined) {
- if (auth.profiles['anthropic:default']) {
- auth.profiles['anthropic:default'].key = anthropicKey;
- } else {
- auth.profiles['anthropic:default'] = { provider: 'anthropic', key: anthropicKey };
- }
+ const isApiKey = anthropicKey.startsWith('sk-ant-api');
+ const profile = isApiKey
+   ? { type: 'key', provider: 'anthropic', key: anthropicKey }
+   : { type: 'token', provider: 'anthropic', token: anthropicKey };
+ auth.profiles['anthropic:default'] = profile;
  }
  writeFileSync(authPath, JSON.stringify(auth, null, 2));
  await run(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`);
