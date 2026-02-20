@@ -2131,6 +2131,50 @@ wss.on('connection', (clientWs) => {
  });
 });
 
+// ── Auth Profiles (read/write OpenClaw auth-profiles.json) ───────────
+const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
+
+app.get('/config/auth-profiles', (req, res) => {
+  try {
+    const data = readFileSync(AUTH_PROFILES_PATH, 'utf8');
+    res.json(JSON.parse(data));
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.json({ version: 1, profiles: {} });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/config/auth-profiles', (req, res) => {
+  try {
+    const data = req.body;
+    if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
+    // Backup existing
+    try { 
+      const existing = readFileSync(AUTH_PROFILES_PATH, 'utf8');
+      writeFileSync(AUTH_PROFILES_PATH + '.bak', existing);
+    } catch {}
+    writeFileSync(AUTH_PROFILES_PATH, JSON.stringify(data, null, 2));
+    // Fix permissions
+    try { execSync(`chown 1000:1000 ${AUTH_PROFILES_PATH}`, { timeout: 3000 }); } catch {}
+    // Also copy to all SPC agents
+    try {
+      const agentsDir = '/opt/openclaw-data/config/agents';
+      const dirs = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
+      for (const dir of dirs) {
+        const dest = `${agentsDir}/${dir}/agent/auth-profiles.json`;
+        try { mkdirSync(`${agentsDir}/${dir}/agent`, { recursive: true }); } catch {}
+        writeFileSync(dest, JSON.stringify(data, null, 2));
+        try { execSync(`chown -R 1000:1000 ${agentsDir}/${dir}/agent`, { timeout: 3000 }); } catch {}
+      }
+    } catch {}
+    // Restart OpenClaw gateway to pick up changes
+    try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
  console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'}`);
