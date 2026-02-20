@@ -1955,6 +1955,11 @@ app.post('/update', async (req, res) => {
  const { promisify } = await import('util');
  const run = promisify(exec);
  try {
+ // Self-update bridge from git
+ try {
+ await run('cd /opt/openclaw-bridge && git pull origin main 2>&1');
+ console.log('[Update] Bridge code updated from git');
+ } catch (e) { console.warn('[Update] Bridge git pull failed (non-fatal):', e.message); }
  await run('cd /opt/openclaw && git pull origin main');
  const dockerImage = process.env.OPENCLAW_DOCKER_IMAGE || '';
  if (dockerImage) {
