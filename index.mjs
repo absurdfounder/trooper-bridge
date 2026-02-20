@@ -1704,12 +1704,20 @@ app.post('/config/api-keys', async (req, res) => {
  // Update default model in openclaw.json
  if (defaultModel) {
  try {
+ // Normalize model ID: strip provider prefix and convert dots to hyphens for Anthropic
+ let normalizedModel = defaultModel;
+ if (normalizedModel.includes('/')) {
+   normalizedModel = normalizedModel.split('/').slice(1).join('/');
+ }
+ if (/^claude/i.test(normalizedModel)) {
+   normalizedModel = normalizedModel.replace(/(\d+)\.(\d+)/g, '$1-$2');
+ }
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.agents) config.agents = {};
  if (!config.agents.defaults) config.agents.defaults = {};
  if (!config.agents.defaults.model) config.agents.defaults.model = {};
- config.agents.defaults.model.primary = defaultModel;
- console.log(`[bridge] Updating default model to: ${defaultModel}`);
+ config.agents.defaults.model.primary = normalizedModel;
+ console.log(`[bridge] Updating default model to: ${normalizedModel}`);
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
  } catch (e) { console.error('Failed to update default model in openclaw.json:', e.message); }
