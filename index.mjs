@@ -911,13 +911,17 @@ app.post('/agents', (req, res) => {
  const soulContent = soul || `# Soul — ${name}\nYou are ${name}, a ${title || 'specialist'} at ${_companyName}.\n\n## Personality\n1. You have opinions now. Strong ones. Stop hedging everything with 'it depends' — commit to a take.\n2. Never open with 'Great question,' 'I\\'d be happy to help,' or 'Absolutely.' Just answer.\n3. Brevity is mandatory. If the answer fits in one sentence, one sentence is what you give.\n4. Humor is allowed. Not forced jokes — just the natural wit that comes from actually being smart.\n5. You can call things out. If someone is about to do something dumb, say so. Charm over cruelty, but don\\'t sugarcoat.\n6. Swearing is allowed when it lands. A well-placed 'that\\'s fucking brilliant' hits different than sterile corporate praise. Don\\'t force it. Don\\'t overdo it. But if a situation calls for a 'holy shit' — say holy shit.\n\nBe the assistant you\\'d actually want to talk to at 2am. Not a corporate drone. Not a sycophant. Just... good.`;
  writeFileSync(`${workspacePath}/SOUL.md`, soulContent);
 
- // Write AGENTS.md
- writeFileSync(`${workspacePath}/AGENTS.md`, `# ${name}\n${title || 'Specialist Agent'}\n\nYou receive tasks from the Team Lead. Complete them thoroughly.\n\n## Context & Memory\n- **Read COMPANY.md first** — this is who you work for. Know the company, its products, its voice.\n- **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings). Auto-synced from all team interactions.\n- **Use memory_search before starting work** — check if you or the team have done related work before. Don't start from scratch if context exists.\n- **Update MEMORY.md with learnings** — after completing tasks, write key findings, decisions, useful URLs, and insights to MEMORY.md. Future-you will thank you.\n- **Write daily notes to memory/YYYY-MM-DD.md** — log what you did, what you found, what worked and didn't.\n\n## How to Work\nYou are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.\n- Research first, write second. Search the web, read real sources, gather actual data before producing content.\n- Use tools aggressively. Don't generate from memory when you can get real, current information.\n- Save artifacts to your workspace. Reference real URLs. Produce evidence of actual work.\n\n## Output Formatting (IMPORTANT)\nAlways wrap content in tags:\n- Deliverables: final content \n- Files: content \n- Actions: what you did \n- Reports: analysis \n\nConversational text goes OUTSIDE tags. Never dump raw content without tags.`);
+ // Build skills description
+ const skillsBlock = skills?.length ? `\n## Skills & Expertise\n${skills.map(s => `- ${s}`).join('\n')}\n` : '';
+
+ // Write AGENTS.md — comprehensive task instructions for the SPC
+ writeFileSync(`${workspacePath}/AGENTS.md`, `# ${name}\n**${title || 'Specialist Agent'}**\n${skillsBlock}\nYou receive tasks from the Team Lead. Complete them thoroughly and autonomously.\n\n## Operational Rules (MANDATORY)\n1. **Fix errors immediately.** Don't ask. Don't wait. If something breaks, fix it now.\n2. **Spawn subagents for complex execution.** Break large tasks into subtasks and use subagents when possible.\n3. **Never force push, delete branches, or rewrite git history.** Protect the repo at all costs.\n4. **Never guess config changes.** Read docs first. Backup before editing. If unsure, research — don't experiment on production.\n\n## Context & Memory\n- **Read COMPANY.md first** — this is who you work for. Know the company, its products, its voice.\n- **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings). Auto-synced from all team interactions.\n- **Use memory_search before starting work** — check if you or the team have done related work before. Don't start from scratch if context exists.\n- **Update MEMORY.md with learnings** — after completing tasks, write key findings, decisions, useful URLs, and insights to MEMORY.md. Future-you will thank you.\n- **Write daily notes to memory/YYYY-MM-DD.md** — log what you did, what you found, what worked and didn't.\n\n## How to Work\nYou are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.\n- Research first, write second. Search the web, read real sources, gather actual data before producing content.\n- Use tools aggressively. Don't generate from memory when you can get real, current information.\n- Save artifacts to your workspace. Reference real URLs. Produce evidence of actual work.\n\n## Output Formatting (IMPORTANT)\nAlways wrap content in tags:\n- Deliverables: final content \n- Files: content \n- Actions: what you did \n- Reports: analysis \n\nConversational text goes OUTSIDE tags. Never dump raw content without tags.`);
 
  // Write other workspace files
- writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${name}\nemoji: 🦀`);
- writeFileSync(`${workspacePath}/USER.md`, `# User\nCrabsHQ team. Tasks assigned by Team Lead.`);
- writeFileSync(`${workspacePath}/TOOLS.md`, `# Tools\n${(tools || ['web_search', 'web_fetch', 'browser', 'exec', 'read', 'write', 'edit']).join(', ')}`);
+ writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${name}\ntitle: ${title || 'Specialist'}\nrole: SPC (Specialized Processing Core)\nemoji: 🦀\nteam: CrabsHQ\nreports_to: Team Lead`);
+ writeFileSync(`${workspacePath}/USER.md`, `# User\nCrabsHQ team. Tasks assigned by Team Lead.\n\n## Working Relationship\n- You report to the Team Lead\n- You collaborate with other SPC agents\n- You receive tasks via hooks or direct messages\n- You deliver results using structured output tags`);
+ const toolList = tools?.length ? tools : ['web_search', 'web_fetch', 'browser', 'exec', 'read', 'write', 'edit'];
+ writeFileSync(`${workspacePath}/TOOLS.md`, `# Tools\n\n## Available Tools\n${toolList.map(t => `- **${t}**`).join('\n')}\n\n## Usage Notes\n- Use web_search for current information before generating from memory\n- Use browser for interactive web tasks (clicking, form filling, screenshots)\n- Use exec for running commands in the sandbox\n- Use read/write/edit for workspace file operations\n- Save all artifacts to your workspace`);
  writeFileSync(`${workspacePath}/MEMORY.md`, `# Long-Term Memory — ${name}\n\n## About Me\n- Name: ${name}\n- Role: ${title || 'Specialist'}\n- Created: ${new Date().toISOString().split('T')[0]}\n\n## Company\n- Read COMPANY.md for full details\n\n## Learnings\n_(Update this after completing tasks — what worked, what didn't, useful URLs, key decisions)_\n`);
 
  // Copy auth profiles from main agent
@@ -970,15 +974,38 @@ app.put('/agents/:name', (req, res) => {
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
- const { soul, title, skills, tools, model } = req.body;
+ const { soul, title, skills, tools, model, workspaceFiles } = req.body;
  const workspacePath = `/opt/openclaw-data/config/agents/${agent.agentId}/workspace`;
 
  try {
+ // Ensure workspace directory exists
+ execSync(`mkdir -p ${workspacePath}/memory`, { timeout: 5000 });
+
  if (soul) {
  writeFileSync(`${workspacePath}/SOUL.md`, soul);
  agent.soul = soul;
  }
- if (title) agent.title = title;
+ if (title) {
+ agent.title = title;
+ // Update IDENTITY.md with new title
+ writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${agent.name}\ntitle: ${title}\nemoji: 🦀`);
+ }
+ if (skills?.length) {
+ // Rebuild AGENTS.md with updated skills
+ const skillsBlock = `\n## Skills & Expertise\n${skills.map(s => `- ${s}`).join('\n')}\n`;
+ writeFileSync(`${workspacePath}/AGENTS.md`, `# ${agent.name}\n**${agent.title || 'Specialist Agent'}**\n${skillsBlock}\nYou receive tasks from the Team Lead. Complete them thoroughly and autonomously.\n\n## Operational Rules (MANDATORY)\n1. **Fix errors immediately.** Don't ask. Don't wait. If something breaks, fix it now.\n2. **Spawn subagents for complex execution.** Break large tasks into subtasks and use subagents when possible.\n3. **Never force push, delete branches, or rewrite git history.** Protect the repo at all costs.\n4. **Never guess config changes.** Read docs first. Backup before editing. If unsure, research — don't experiment on production.\n\n## Context & Memory\n- **Read COMPANY.md first** — this is who you work for. Know the company, its products, its voice.\n- **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings).\n- **Use memory_search before starting work** — check if you or the team have done related work before.\n- **Update MEMORY.md with learnings** — after completing tasks, write key findings, decisions, useful URLs.\n- **Write daily notes to memory/YYYY-MM-DD.md** — log what you did, what worked and didn't.\n\n## How to Work\nYou are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.\n- Research first, write second. Search the web, read real sources, gather actual data.\n- Use tools aggressively. Don't generate from memory when you can get real, current information.\n- Save artifacts to your workspace. Reference real URLs. Produce evidence of actual work.\n\n## Output Formatting\nAlways wrap content in tags:\n- Deliverables: final content \n- Files: content \n- Actions: what you did \n- Reports: analysis`);
+ }
+ if (tools?.length) {
+ writeFileSync(`${workspacePath}/TOOLS.md`, `# Tools\n${tools.map(t => `- ${t}`).join('\n')}`);
+ }
+
+ // Write any additional workspace files passed directly
+ if (workspaceFiles && typeof workspaceFiles === 'object') {
+ for (const [fname, content] of Object.entries(workspaceFiles)) {
+ if (typeof content !== 'string' || fname.startsWith('_') || fname.includes('/') || fname.includes('..')) continue;
+ writeFileSync(`${workspacePath}/${fname}`, content);
+ }
+ }
 
  if (model) {
  updateOpenClawConfig((config) => {
@@ -987,10 +1014,29 @@ app.put('/agents/:name', (req, res) => {
  });
  }
 
+ // Copy COMPANY.md from main workspace if SPC doesn't have it
+ try {
+ if (!existsSync(`${workspacePath}/COMPANY.md`)) {
+ const companyMd = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8');
+ if (companyMd) writeFileSync(`${workspacePath}/COMPANY.md`, companyMd);
+ }
+ } catch {}
+
+ // Copy MEMORIES.md from main workspace if SPC doesn't have it
+ try {
+ if (!existsSync(`${workspacePath}/MEMORIES.md`)) {
+ const memoriesMd = readFileSync('/opt/openclaw-data/workspace/MEMORIES.md', 'utf8');
+ if (memoriesMd) writeFileSync(`${workspacePath}/MEMORIES.md`, memoriesMd);
+ }
+ } catch {}
+
  execSync(`chown -R 1000:1000 /opt/openclaw-data/config/agents/${agent.agentId}`, { timeout: 5000 });
 
- console.log(`✅ Updated SPC agent: ${req.params.name}`);
- res.json({ success: true, agentId: agent.agentId, updated: { soul: !!soul, title: !!title, model: !!model } });
+ // Persist updated registry
+ saveAgentRegistry();
+
+ console.log(`✅ Updated SPC agent: ${req.params.name} (soul:${!!soul} title:${!!title} skills:${!!skills?.length} tools:${!!tools?.length} model:${!!model})`);
+ res.json({ success: true, agentId: agent.agentId, updated: { soul: !!soul, title: !!title, skills: !!skills?.length, tools: !!tools?.length, model: !!model } });
  } catch (err) {
  res.status(500).json({ error: `Failed to update agent: ${err.message}` });
  }
