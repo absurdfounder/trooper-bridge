@@ -347,6 +347,9 @@ OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 BRAVE_API_KEY=${BRAVE_API_KEY}
 CAPTCHA_2CAPTCHA_API_KEY=${CAPTCHA_2CAPTCHA_API_KEY}
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
+CLAUDE_AI_SESSION_KEY=
+CLAUDE_WEB_SESSION_KEY=
+CLAUDE_WEB_COOKIE=
 ENV
 
 # Conditionally add provider API keys to .env (only if set)
@@ -620,13 +623,21 @@ OVERRIDE
 cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 #!/bin/bash
 # Ensure Chrome is installed (survives container restarts)
+# Uses curl (always available in node:22-bookworm) instead of wget
 if ! command -v google-chrome-stable &>/dev/null; then
  echo "[startup] Chrome not found, installing..."
  dpkg --configure -a 2>/dev/null
- wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
- dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
- rm -f /tmp/chrome.deb
- echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
+ for _ca in 1 2 3; do
+   if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
+     apt-get update -qq 2>/dev/null
+     dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
+     rm -f /tmp/chrome.deb
+     echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
+     break
+   fi
+   echo "[startup] Chrome download attempt ${_ca} failed, retrying in 5s..."
+   sleep 5
+ done
 else
  echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
 fi
@@ -1010,25 +1021,41 @@ for _cw in $(seq 1 20); do
 done
 sleep 2
 
-dlog "Installing Chrome in container..."
+# Wait for startup.sh to finish Chrome install (it runs as the container entrypoint)
+dlog "Waiting for Chrome install in container..."
+for _chrome_wait in $(seq 1 30); do
+  if docker compose exec -T openclaw-gateway bash -c 'command -v google-chrome-stable' >/dev/null 2>&1; then
+    echo "Chrome ready after ${_chrome_wait}s"
+    break
+  fi
+  sleep 2
+done
+
+# Fallback: if startup.sh didn't install Chrome, install it now using curl
 docker compose exec -T openclaw-gateway bash -c '
+ if command -v google-chrome-stable &>/dev/null; then
+   echo "Chrome: $(google-chrome-stable --version 2>/dev/null)"
+   exit 0
+ fi
+ echo "Chrome not found, installing via curl..."
  for _cr in 1 2 3; do
-   if wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb 2>/dev/null; then
-     apt-get update -qq && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null && \
-     rm -f /tmp/chrome.deb && \
-     echo "Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo unknown)" && \
+   if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
+     apt-get update -qq 2>/dev/null
+     dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
+     rm -f /tmp/chrome.deb
+     echo "Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo unknown)"
      exit 0
    fi
    echo "Chrome download attempt ${_cr} failed, retrying..."
-   sleep 3
+   sleep 5
  done
- echo "Chrome install failed after retries"
-' || echo "Chrome install skipped (non-fatal)"
+ echo "WARNING: Chrome install failed (non-fatal — startup.sh will retry on next restart)"
+' || echo "Chrome exec skipped (non-fatal)"
 docker image prune -f 2>/dev/null || true
 
-# Run openclaw setup to seed any missing workspace files, then doctor for diagnostics
-docker compose exec -T openclaw-gateway openclaw setup --workspace /opt/openclaw-data/workspace 2>/dev/null || true
-docker compose exec -T openclaw-gateway openclaw doctor --fix 2>/dev/null || true
+# Run openclaw setup/doctor (use node directly — openclaw CLI is not in PATH)
+docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
+docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null || true
 
 # ── [6/9] Bridge ────────────────────────────────────────────────────
 dlog "Setting up Bridge..."
