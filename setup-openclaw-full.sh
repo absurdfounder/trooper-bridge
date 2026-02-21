@@ -912,14 +912,41 @@ dlog "Host arch: ${HOST_ARCH} → Docker platform: ${DOCKER_PLATFORM}"
 OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/openclaw/openclaw:latest}"
 dlog "Pulling Docker image: ${OPENCLAW_DOCKER_IMAGE}..."
 echo "Pulling pre-built image: ${OPENCLAW_DOCKER_IMAGE} (${DOCKER_PLATFORM})..."
-if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}"; then
- docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
- dlog "Docker image ready"
- echo "Image pulled and tagged as openclaw:local"
-else
- dlog "Pull failed, building from source as fallback..."
- echo "Pull failed, falling back to local build (this takes several minutes)..."
- docker build --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .
+
+IMAGE_READY=false
+for attempt in 1 2 3; do
+  if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}"; then
+    docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
+    dlog "Docker image ready (pull attempt ${attempt})"
+    echo "Image pulled and tagged as openclaw:local"
+    IMAGE_READY=true
+    break
+  fi
+  dlog "Pull attempt ${attempt} failed, cleaning up and retrying..."
+  docker system prune -f 2>/dev/null || true
+  sleep $((attempt * 3))
+done
+
+if [ "$IMAGE_READY" = false ]; then
+  dlog "All pull attempts failed, building from source as fallback..."
+  echo "Pull failed after 3 attempts, falling back to local build (this takes several minutes)..."
+  for attempt in 1 2; do
+    if docker build --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .; then
+      IMAGE_READY=true
+      dlog "Docker image built from source (attempt ${attempt})"
+      break
+    fi
+    dlog "Build attempt ${attempt} failed, cleaning up..."
+    docker system prune -f 2>/dev/null || true
+    docker builder prune -f 2>/dev/null || true
+    sleep $((attempt * 5))
+  done
+fi
+
+if [ "$IMAGE_READY" = false ]; then
+  dlog "FATAL: Could not pull or build Docker image after retries"
+  echo "ERROR: Failed to obtain Docker image after multiple attempts. This is usually a transient disk I/O issue — please retry deployment."
+  exit 1
 fi
 
 dlog "Starting containers..."
