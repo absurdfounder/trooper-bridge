@@ -16,7 +16,7 @@
 
 set -e
 
-trap 'dlog "Setup failed (line $LINENO, exit $?)" "installing"' ERR
+trap 'EXIT_CODE=$?; FAIL_LINE=$LINENO; dlog "Setup failed at line ${FAIL_LINE} (exit ${EXIT_CODE}). Disk: $(df -h /var/lib/docker 2>/dev/null | tail -1 | awk "{print \$4}") free. Docker: $(docker ps -q 2>/dev/null | wc -l) containers." "failed"; exit ${EXIT_CODE}' ERR
 
 GATEWAY_TOKEN="{{GATEWAY_TOKEN}}"
 OPENAI_API_KEY="{{OPENAI_API_KEY}}"
@@ -141,6 +141,20 @@ if ! command -v docker &> /dev/null; then
 else
  echo "Docker already installed"
 fi
+
+# Configure Docker daemon for reliability (overlay2 + write buffer settings)
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json << 'DOCKERCFG'
+{
+  "storage-driver": "overlay2",
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" },
+  "max-concurrent-downloads": 3,
+  "max-concurrent-uploads": 2
+}
+DOCKERCFG
+systemctl restart docker
+sleep 2
 
 # ── [3/8] Node.js 22 ───────────────────────────────────────────────
 # OpenClaw requires Node 22+ (https://docs.openclaw.ai/)
@@ -304,9 +318,16 @@ echo "Fallback chain: ${MODEL_FALLBACKS:-none}"
 # Shallow clone for docker-compose.yml only — the actual image comes from GHCR
 dlog "Fetching OpenClaw compose files..."
 if [ ! -d /opt/openclaw ]; then
- git clone --depth 1 https://github.com/openclaw/openclaw.git /opt/openclaw
+ for _git_attempt in 1 2 3; do
+  if git clone --depth 1 https://github.com/openclaw/openclaw.git /opt/openclaw; then
+    break
+  fi
+  dlog "Git clone attempt ${_git_attempt} failed, retrying..."
+  rm -rf /opt/openclaw 2>/dev/null || true
+  sleep $((${_git_attempt} * 3))
+ done
 else
- cd /opt/openclaw && git pull --depth 1 origin main
+ cd /opt/openclaw && git pull --depth 1 origin main || true
 fi
 
 mkdir -p /opt/openclaw-data/config /opt/openclaw-data/workspace
@@ -912,28 +933,97 @@ dlog "Host arch: ${HOST_ARCH} → Docker platform: ${DOCKER_PLATFORM}"
 OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/openclaw/openclaw:latest}"
 dlog "Pulling Docker image: ${OPENCLAW_DOCKER_IMAGE}..."
 echo "Pulling pre-built image: ${OPENCLAW_DOCKER_IMAGE} (${DOCKER_PLATFORM})..."
-if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}"; then
- docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
- dlog "Docker image ready"
- echo "Image pulled and tagged as openclaw:local"
-else
- dlog "Pull failed, building from source as fallback..."
- echo "Pull failed, falling back to local build (this takes several minutes)..."
- docker build --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .
+
+# Check available disk space (need at least 4GB for Docker image + layers)
+AVAIL_KB=$(df /var/lib/docker 2>/dev/null | tail -1 | awk '{print $4}')
+AVAIL_GB=$((${AVAIL_KB:-0} / 1024 / 1024))
+dlog "Disk available: ${AVAIL_GB}GB on /var/lib/docker"
+if [ "${AVAIL_GB}" -lt 4 ] 2>/dev/null; then
+  dlog "Low disk space (${AVAIL_GB}GB). Cleaning up Docker and apt caches..."
+  docker system prune -a -f 2>/dev/null || true
+  docker builder prune -a -f 2>/dev/null || true
+  apt-get clean 2>/dev/null || true
+  rm -rf /tmp/*.deb /var/cache/apt/archives/*.deb 2>/dev/null || true
+fi
+
+# Clean any stale/corrupted Docker state before first pull attempt
+docker system prune -f 2>/dev/null || true
+
+IMAGE_READY=false
+for attempt in 1 2 3; do
+  dlog "Docker pull attempt ${attempt}/3..."
+  if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}" 2>&1; then
+    docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
+    dlog "Docker image ready (pull attempt ${attempt})"
+    echo "Image pulled and tagged as openclaw:local"
+    IMAGE_READY=true
+    break
+  fi
+  dlog "Pull attempt ${attempt} failed"
+
+  # The "failed to send write: must occur at current offset" error is overlay2
+  # storage corruption. Fix: remove corrupted layers, restart Docker daemon.
+  echo "Cleaning Docker state and restarting daemon (attempt ${attempt})..."
+  docker system prune -a -f 2>/dev/null || true
+  docker builder prune -a -f 2>/dev/null || true
+  systemctl restart docker 2>/dev/null || true
+  sleep $((attempt * 4))
+done
+
+if [ "$IMAGE_READY" = false ]; then
+  dlog "All pull attempts failed, building from source..."
+  echo "Pull failed after 3 attempts, falling back to local build..."
+  for attempt in 1 2; do
+    dlog "Docker build attempt ${attempt}/2..."
+    if docker build --no-cache --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .; then
+      IMAGE_READY=true
+      dlog "Docker image built from source (attempt ${attempt})"
+      break
+    fi
+    dlog "Build attempt ${attempt} failed"
+    docker system prune -a -f 2>/dev/null || true
+    docker builder prune -a -f 2>/dev/null || true
+    systemctl restart docker 2>/dev/null || true
+    sleep $((attempt * 5))
+  done
+fi
+
+if [ "$IMAGE_READY" = false ]; then
+  dlog "FATAL: Could not pull or build Docker image after retries" "failed"
+  echo "ERROR: Failed to obtain Docker image after multiple attempts."
+  echo "Disk: ${AVAIL_GB}GB available. Check server disk health."
+  exit 1
 fi
 
 dlog "Starting containers..."
 # Start containers (clean up any partial state first)
 docker compose down 2>/dev/null || true
 docker compose up -d
-sleep 3
-dlog "Installing Chrome..."
+# Wait for container to be healthy before running exec commands
+dlog "Waiting for container to start..."
+for _cw in $(seq 1 20); do
+  if docker compose ps --format json 2>/dev/null | grep -q '"running"'; then
+    echo "Container running after ${_cw}s"
+    break
+  fi
+  sleep 1
+done
+sleep 2
+
+dlog "Installing Chrome in container..."
 docker compose exec -T openclaw-gateway bash -c '
- wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb 2>/dev/null && \
- apt-get update -qq && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null && \
- rm -f /tmp/chrome.deb && \
- echo "Google Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo unknown)"
-' || echo "Chrome install skipped"
+ for _cr in 1 2 3; do
+   if wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb 2>/dev/null; then
+     apt-get update -qq && apt-get install -y -qq /tmp/chrome.deb 2>/dev/null && \
+     rm -f /tmp/chrome.deb && \
+     echo "Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo unknown)" && \
+     exit 0
+   fi
+   echo "Chrome download attempt ${_cr} failed, retrying..."
+   sleep 3
+ done
+ echo "Chrome install failed after retries"
+' || echo "Chrome install skipped (non-fatal)"
 docker image prune -f 2>/dev/null || true
 
 # Run openclaw setup to seed any missing workspace files, then doctor for diagnostics
@@ -944,12 +1034,21 @@ docker compose exec -T openclaw-gateway openclaw doctor --fix 2>/dev/null || tru
 dlog "Setting up Bridge..."
 mkdir -p /opt/openclaw-bridge
 dlog "Downloading bridge from GitHub..."
-curl -fsSL "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/package.json" -o /opt/openclaw-bridge/package.json
-curl -fsSL "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/index.mjs" -o /opt/openclaw-bridge/index.mjs
-dlog "Bridge downloaded ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
+for _dl_attempt in 1 2 3; do
+  if curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/package.json" -o /opt/openclaw-bridge/package.json && \
+     curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/index.mjs" -o /opt/openclaw-bridge/index.mjs; then
+    dlog "Bridge downloaded ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
+    break
+  fi
+  dlog "Bridge download attempt ${_dl_attempt} failed, retrying..."
+  sleep $((${_dl_attempt} * 3))
+done
 
-
-cd /opt/openclaw-bridge && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
+cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
+  dlog "npm install failed, retrying with clean cache..."
+  npm cache clean --force 2>/dev/null || true
+  timeout 180 npm install 2>&1
+}
 
 # ── [7/9] Poller (minimal stub — bridge handles everything now) ─────
 dlog "Setting up Poller..."
