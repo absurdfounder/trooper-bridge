@@ -222,6 +222,28 @@ ${HTTPS_DOMAIN} {
  handle /files/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
+ # Bridge API paths — used by provisioner for workspace/config push and health checks
+ handle /health {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /agents/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /config/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /stats {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /requests/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /deploy-logs {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /deploy-logs-raw {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
  }
