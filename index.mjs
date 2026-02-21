@@ -17,6 +17,25 @@ function isBrowserTool(tool) {
   return tool && BROWSER_TOOLS.some(t => String(tool).toLowerCase().includes(t));
 }
 
+// ── VNC Live View ─────────────────────────────────────────────────────
+// When Xvnc + noVNC/websockify are running (2captcha mode), send the client
+// a live VNC URL instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
+function getVNCLiveViewUrl() {
+  const orgId = process.env.ORG_ID || '';
+  if (!orgId) return null;
+  const orgShort = orgId.toLowerCase().substring(0, 12);
+  const domain = `org-${orgShort}.crabhq.com`;
+  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
+}
+
+function isVNCAvailable() {
+  try {
+    // Check if websockify is listening on port 6080 (host-side, quick TCP check)
+    execSync('ss -tlnp | grep -q ":6080"', { timeout: 2000 });
+    return true;
+  } catch { return false; }
+}
+
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const IDENTITY_PATH = '/opt/openclaw-bridge/device-identity.json';
@@ -578,30 +597,6 @@ class OpenClawGateway {
  console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
  }
  }
- // Synthesize tool events for OpenClaw native tools (browser, web_search, etc.)
- // that don't emit tool_use/tool_result in the stream protocol
- if (toolLog.length === 0 && response) {
-   const hasBrowserScreenshot = /!\[screenshot\]\(data:image\//.test(response) || /MEDIA:/.test(response);
-   const hasBrowsing = /navigat|screenshot|browser|visited|opened|clicked|page|scroll/i.test(response);
-   const hasWebSearch = /search results|searched for|web search|found.*online/i.test(response);
-
-   if (hasBrowserScreenshot || hasBrowsing) {
-     toolLog.push({ tool: 'browser', params: {}, status: 'ok', summary: 'Browser session completed' });
-     if (onEvent) {
-       onEvent('tool_start', { tool: 'browser', params: {}, index: 0 });
-       onEvent('tool_result', { tool: 'browser', success: true, summary: 'Browser session completed', index: 0 });
-     }
-   }
-   if (hasWebSearch) {
-     const idx = toolLog.length;
-     toolLog.push({ tool: 'web_search', params: {}, status: 'ok', summary: 'Web search completed' });
-     if (onEvent) {
-       onEvent('tool_start', { tool: 'web_search', params: {}, index: idx });
-       onEvent('tool_result', { tool: 'web_search', success: true, summary: 'Web search completed', index: idx });
-     }
-   }
- }
-
  const formattedToolLog = toolLog.map(t => ({
  tool: t.tool,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
@@ -855,17 +850,16 @@ async function handleIncomingTaskStream(req, res) {
 
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
 
+ let screenshotPollerInterval = null;
  let browserbaseAcquired = false;
 
- // Acquire Browserbase session upfront if configured — gateway hot-reloads the
- // profile so the agent's first browser tool call will already target Browserbase.
- // Sessions auto-expire after 10 min so there's minimal waste for non-browser tasks.
+ // Pre-acquire Browserbase session if configured (so CDP URL is ready when browser tool fires)
  if (isBrowserbaseConfigured()) {
    try {
      const bbSession = await acquireBrowserbaseSession();
      if (bbSession) browserbaseAcquired = true;
    } catch (e) {
-     console.error(`[${id}] Browserbase session failed, falling back to local browser: ${e.message}`);
+     console.warn(`[browserbase] On-demand session failed, falling back to built-in Chrome: ${e.message}`);
    }
  }
 
@@ -883,20 +877,52 @@ async function handleIncomingTaskStream(req, res) {
 
  // Start live browser view when browser tool begins
  if (event === 'tool_start' && isBrowserTool(data?.tool)) {
+   if (screenshotPollerInterval) {
+     clearInterval(screenshotPollerInterval);
+   }
+
    // Extract domain from browser tool params (url, query, etc.)
    const params = data?.params || data?.input || {};
    const navUrl = params.url || params.uri || '';
    let domain = '';
    try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
 
-   // Send Browserbase live view URL to client
+   // Priority: Browserbase live view > VNC > screenshot polling
    const bbLiveUrl = getBrowserbaseLiveViewUrl();
    const bbSessionId = browserbaseSession?.id || null;
    if (bbLiveUrl) {
      sendSSE('browser_session', { liveViewUrl: bbLiveUrl, sessionId: bbSessionId, domain, provider: 'browserbase' });
      console.log(`[browserbase] Sent live view URL to client: ${bbLiveUrl}`);
+   } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
+     sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
+     console.log(`[VNC] Sent live view URL to client`);
+   } else {
+     // Fallback: poll screenshots from container every 1.5s
+     // Search both the media root and common subdirs where screenshots may be saved
+     screenshotPollerInterval = setInterval(() => {
+       if (res.writableEnded) {
+         if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
+         return;
+       }
+       try {
+         const out = execSync(
+           `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
+           { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
+         ).toString().trim();
+         if (out && out.length > 100) {
+           sendSSE('screenshot_frame', { base64: out, timestamp: Date.now() });
+         }
+       } catch (e) { /* ignore */ }
+     }, 1500);
    }
  }
+
+ // Stop screenshot poller when tool completes or stream ends
+ if (event === 'tool_result' || event === 'done' || event === 'error') {
+   if (screenshotPollerInterval) {
+     clearInterval(screenshotPollerInterval);
+     screenshotPollerInterval = null;
+   }
  }
  });
 
@@ -922,6 +948,10 @@ async function handleIncomingTaskStream(req, res) {
  console.error(`[${id}] SSE agent failed: ${err.message}`);
  sendSSE('error', { message: err.message, requestId: id });
  } finally {
+ if (screenshotPollerInterval) {
+   clearInterval(screenshotPollerInterval);
+   screenshotPollerInterval = null;
+ }
  clearInterval(keepAlive);
  // Signal browser session end and release Browserbase session
  if (browserbaseAcquired) {
@@ -2377,9 +2407,7 @@ function writeBrowserbaseProfile(connectUrl) {
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
     if (!config.browser) config.browser = {};
     if (!config.browser.profiles) config.browser.profiles = {};
-    // OpenClaw expects http(s):// for CDP, but Browserbase returns wss:// — convert protocol
-    const cdpUrl = connectUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
-    config.browser.profiles.browserbase = { cdpUrl, color: '#00AA00' };
+    config.browser.profiles.browserbase = { cdpUrl: connectUrl, color: '#00AA00' };
     config.browser.defaultProfile = 'browserbase';
     config.browser.remoteCdpTimeoutMs = 5000;
     config.browser.remoteCdpHandshakeTimeoutMs = 10000;
@@ -2478,7 +2506,7 @@ async function releaseBrowserbaseSession() {
 
   console.log(`[browserbase] Releasing session ${sessionId}`);
   try {
-    await browserbaseApiRequest('POST', `/sessions/${sessionId}`, { projectId: BROWSERBASE_PROJECT_ID, status: 'REQUEST_RELEASE' });
+    await browserbaseApiRequest('POST', `/sessions/${sessionId}/stop`, {});
   } catch (e) {
     console.warn(`[browserbase] Failed to stop session: ${e.message}`);
   }
