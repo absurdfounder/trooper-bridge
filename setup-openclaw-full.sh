@@ -36,6 +36,8 @@ CAPTCHA_2CAPTCHA_API_KEY="{{CAPTCHA_2CAPTCHA_API_KEY}}"
 COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
 PRIMARY_PROVIDER="{{PRIMARY_PROVIDER}}"
 PRIMARY_MODEL="{{PRIMARY_MODEL}}"
+BROWSERBASE_API_KEY="{{BROWSERBASE_API_KEY}}"
+BROWSERBASE_PROJECT_ID="{{BROWSERBASE_PROJECT_ID}}"
 
 # Deploy log — writes to /tmp/deploy.log, served via HTTP on BRIDGE_PORT
 DEPLOY_LOG=/tmp/deploy.log
@@ -1139,7 +1141,8 @@ DSVC
 cat > /etc/systemd/system/openclaw-bridge.service << BSVC
 [Unit]
 Description=OpenClaw Bridge
-After=network.target
+After=network.target openclaw-docker.service
+Requires=openclaw-docker.service
 
 [Service]
 Type=simple
@@ -1155,6 +1158,8 @@ Environment=OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
 Environment=MISSION_CONTROL_URL=https://control-center-bot.onrender.com
 Environment=ORG_ID=${ORG_ID}
 Environment=NODE_ENV=production
+Environment=BROWSERBASE_API_KEY=${BROWSERBASE_API_KEY}
+Environment=BROWSERBASE_PROJECT_ID=${BROWSERBASE_PROJECT_ID}
 
 [Install]
 WantedBy=multi-user.target
@@ -1214,6 +1219,14 @@ fi
 dlog "Starting services..."
 # Kill the temporary log server so the real bridge can use the port
 kill $LOG_SERVER_PID 2>/dev/null; sleep 1
+# Start docker first — openclaw-bridge depends on it (After=openclaw-docker.service)
+systemctl start openclaw-docker
+# Wait for OpenClaw gateway to be listening before starting bridge
+dlog "Waiting for OpenClaw gateway..."
+for i in $(seq 1 30); do
+  curl -sf --max-time 2 http://127.0.0.1:${GATEWAY_PORT}/ >/dev/null 2>&1 && break
+  sleep 2
+done
 systemctl start openclaw-bridge
 systemctl start openclaw-poller
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
