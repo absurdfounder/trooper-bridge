@@ -1077,8 +1077,6 @@ dlog "Downloading bridge from GitHub..."
 for _dl_attempt in 1 2 3; do
   if curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/package.json" -o /opt/openclaw-bridge/package.json && \
      curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/index.mjs" -o /opt/openclaw-bridge/index.mjs; then
-    # Optional: download package-lock.json for faster npm ci (non-fatal if missing)
-    curl -fsSL --retry 1 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/package-lock.json" -o /opt/openclaw-bridge/package-lock.json 2>/dev/null || true
     dlog "Bridge downloaded ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
     break
   fi
@@ -1087,20 +1085,11 @@ for _dl_attempt in 1 2 3; do
 done
 
 dlog "Installing bridge dependencies..."
-# Use npm ci if lockfile exists (faster), otherwise npm install
-if [ -f /opt/openclaw-bridge/package-lock.json ]; then
-  cd /opt/openclaw-bridge && timeout 120 npm ci --no-audit --no-fund 2>&1 || {
-    dlog "npm ci failed, falling back to npm install..."
-    npm cache clean --force 2>/dev/null || true
-    timeout 180 npm install --no-audit --no-fund 2>&1
-  }
-else
-  cd /opt/openclaw-bridge && timeout 180 npm install --no-audit --no-fund 2>&1 || {
-    dlog "npm install failed, retrying with clean cache..."
-    npm cache clean --force 2>/dev/null || true
-    timeout 180 npm install --no-audit --no-fund 2>&1
-  }
-fi
+cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
+  dlog "npm install failed, retrying with clean cache..."
+  npm cache clean --force 2>/dev/null || true
+  timeout 180 npm install 2>&1
+}
 dlog "Bridge dependencies installed"
 
 # ── [7/9] Poller (minimal stub — bridge handles everything now) ─────
