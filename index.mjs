@@ -1596,6 +1596,7 @@ app.get('/gateway/config', (req, res) => {
 app.put('/gateway/config', (req, res) => {
  try {
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(req.body, null, 2), 'utf8');
+ try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
  console.log('Gateway config updated, restarting...');
  execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 });
  setTimeout(() => gateway.connect(), 5000);
@@ -1828,7 +1829,7 @@ function normalizeModelId(model) {
  {
  const providerConfigs = {
  anthropic: { key: anthropicKey, config: {
-   baseUrl: 'https://api.anthropic.com/v1', api: 'anthropic-messages',
+   baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages',
    models: [
     { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', contextWindow: 200000 },
     { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', contextWindow: 200000 },

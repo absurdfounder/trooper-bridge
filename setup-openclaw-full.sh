@@ -376,7 +376,7 @@ $entry"
 
 if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
  add_provider '   "anthropic": {
-    "baseUrl": "https://api.anthropic.com/v1",
+    "baseUrl": "https://api.anthropic.com",
     "api": "anthropic-messages",
     "models": [
      { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "contextWindow": 200000 },
@@ -425,7 +425,7 @@ fi
 # Fallback: if no providers configured, add anthropic as default
 if [ -z "$MODELS_PROVIDERS" ]; then
  MODELS_PROVIDERS='   "anthropic": {
-    "baseUrl": "https://api.anthropic.com/v1",
+    "baseUrl": "https://api.anthropic.com",
     "api": "anthropic-messages",
     "models": [
      { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "contextWindow": 200000 }
@@ -661,6 +661,12 @@ elif [ -n "${COMPOSIO_API_KEY:-}" ]; then
  echo "[startup] Composio already installed: $(composio --version 2>/dev/null)"
 fi
 GATEWAY_PORT="${1:-18789}"
+# Fix permissions: ensure node user can read config files
+# (files may have been written by root via bridge or UI before container started)
+chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
+chmod 700 /home/node/.openclaw 2>/dev/null || true
+chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
+find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
 # Drop back to node user for the gateway process
 exec su -s /bin/bash node -c "node dist/index.js gateway --allow-unconfigured --bind lan --port $GATEWAY_PORT"
 STARTUP
