@@ -17,25 +17,6 @@ function isBrowserTool(tool) {
   return tool && BROWSER_TOOLS.some(t => String(tool).toLowerCase().includes(t));
 }
 
-// ── VNC Live View ─────────────────────────────────────────────────────
-// When Xvnc + noVNC/websockify are running (2captcha mode), send the client
-// a live VNC URL instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
-function getVNCLiveViewUrl() {
-  const orgId = process.env.ORG_ID || '';
-  if (!orgId) return null;
-  const orgShort = orgId.toLowerCase().substring(0, 12);
-  const domain = `org-${orgShort}.crabhq.com`;
-  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
-}
-
-function isVNCAvailable() {
-  try {
-    // Check if websockify is listening on port 6080 (host-side, quick TCP check)
-    execSync('ss -tlnp | grep -q ":6080"', { timeout: 2000 });
-    return true;
-  } catch { return false; }
-}
-
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const IDENTITY_PATH = '/opt/openclaw-bridge/device-identity.json';
@@ -874,11 +855,19 @@ async function handleIncomingTaskStream(req, res) {
 
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
 
- let screenshotPollerInterval = null;
  let browserbaseAcquired = false;
 
- // Browserbase sessions are now acquired lazily (on first browser tool_start)
- // to avoid wasting sessions on non-browser tasks
+ // Acquire Browserbase session upfront if configured — gateway hot-reloads the
+ // profile so the agent's first browser tool call will already target Browserbase.
+ // Sessions auto-expire after 10 min so there's minimal waste for non-browser tasks.
+ if (isBrowserbaseConfigured()) {
+   try {
+     const bbSession = await acquireBrowserbaseSession();
+     if (bbSession) browserbaseAcquired = true;
+   } catch (e) {
+     console.error(`[${id}] Browserbase session failed, falling back to local browser: ${e.message}`);
+   }
+ }
 
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}...`);
@@ -894,52 +883,20 @@ async function handleIncomingTaskStream(req, res) {
 
  // Start live browser view when browser tool begins
  if (event === 'tool_start' && isBrowserTool(data?.tool)) {
-   if (screenshotPollerInterval) {
-     clearInterval(screenshotPollerInterval);
-   }
-
    // Extract domain from browser tool params (url, query, etc.)
    const params = data?.params || data?.input || {};
    const navUrl = params.url || params.uri || '';
    let domain = '';
    try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
 
-   // Priority: Browserbase live view > VNC > screenshot polling
+   // Send Browserbase live view URL to client
    const bbLiveUrl = getBrowserbaseLiveViewUrl();
    const bbSessionId = browserbaseSession?.id || null;
    if (bbLiveUrl) {
      sendSSE('browser_session', { liveViewUrl: bbLiveUrl, sessionId: bbSessionId, domain, provider: 'browserbase' });
      console.log(`[browserbase] Sent live view URL to client: ${bbLiveUrl}`);
-   } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
-     sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
-     console.log(`[VNC] Sent live view URL to client`);
-   } else {
-     // Fallback: poll screenshots from container every 1.5s
-     // Search both the media root and common subdirs where screenshots may be saved
-     screenshotPollerInterval = setInterval(() => {
-       if (res.writableEnded) {
-         if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
-         return;
-       }
-       try {
-         const out = execSync(
-           `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
-           { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
-         ).toString().trim();
-         if (out && out.length > 100) {
-           sendSSE('screenshot_frame', { base64: out, timestamp: Date.now() });
-         }
-       } catch (e) { /* ignore */ }
-     }, 1500);
    }
  }
-
- // Stop screenshot poller when tool completes or stream ends
- if (event === 'tool_result' || event === 'done' || event === 'error') {
-   if (screenshotPollerInterval) {
-     clearInterval(screenshotPollerInterval);
-     screenshotPollerInterval = null;
-   }
  }
  });
 
@@ -965,10 +922,6 @@ async function handleIncomingTaskStream(req, res) {
  console.error(`[${id}] SSE agent failed: ${err.message}`);
  sendSSE('error', { message: err.message, requestId: id });
  } finally {
- if (screenshotPollerInterval) {
-   clearInterval(screenshotPollerInterval);
-   screenshotPollerInterval = null;
- }
  clearInterval(keepAlive);
  // Signal browser session end and release Browserbase session
  if (browserbaseAcquired) {
