@@ -857,8 +857,17 @@ async function handleIncomingTaskStream(req, res) {
 
  let browserbaseAcquired = false;
 
- // Browserbase sessions are now acquired lazily (on first browser tool_start)
- // to avoid wasting sessions on non-browser tasks
+ // Acquire Browserbase session upfront if configured — gateway hot-reloads the
+ // profile so the agent's first browser tool call will already target Browserbase.
+ // Sessions auto-expire after 10 min so there's minimal waste for non-browser tasks.
+ if (isBrowserbaseConfigured()) {
+   try {
+     const bbSession = await acquireBrowserbaseSession();
+     if (bbSession) browserbaseAcquired = true;
+   } catch (e) {
+     console.error(`[${id}] Browserbase session failed, falling back to local browser: ${e.message}`);
+   }
+ }
 
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}...`);
