@@ -990,7 +990,7 @@ app.post('/agents', (req, res) => {
  config.agents.list = config.agents.list.filter(a => a.id !== agentId);
  config.agents.list.push({
  id: agentId,
- ...(model ? { model: { primary: model } } : {}),
+ ...(model ? { model: { primary: normalizeModelId(model) } } : {}),
  });
  });
 
@@ -1048,7 +1048,7 @@ app.put('/agents/:name', (req, res) => {
  if (model) {
  updateOpenClawConfig((config) => {
  const entry = (config.agents.list || []).find(a => a.id === agent.agentId);
- if (entry) entry.model = { primary: model };
+ if (entry) entry.model = { primary: normalizeModelId(model) };
  });
  }
 
@@ -1742,17 +1742,19 @@ app.post('/config/api-keys', async (req, res) => {
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
+// Normalize a model ID: ensure Claude models have anthropic/ prefix, convert version dots to hyphens
+function normalizeModelId(model) {
+ if (!model) return model;
+ let m = model.replace(/(\d+)\.(\d+)/g, '$1-$2');
+ const bare = m.includes('/') ? m.split('/').slice(1).join('/') : m;
+ if (/^claude/i.test(bare) && !m.startsWith('anthropic/')) m = `anthropic/${bare}`;
+ return m;
+}
+
  // Update default model in openclaw.json
  if (defaultModel) {
  try {
- // Normalize model ID: strip provider prefix and convert dots to hyphens for Anthropic
- let normalizedModel = defaultModel;
- if (normalizedModel.includes('/')) {
-   normalizedModel = normalizedModel.split('/').slice(1).join('/');
- }
- if (/^claude/i.test(normalizedModel)) {
-   normalizedModel = normalizedModel.replace(/(\d+)\.(\d+)/g, '$1-$2');
- }
+  const normalizedModel = normalizeModelId(defaultModel);
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.agents) config.agents = {};
  if (!config.agents.defaults) config.agents.defaults = {};
@@ -1789,7 +1791,8 @@ app.post('/config/api-keys', async (req, res) => {
 
  for (const { key, profileId, provider } of keysToUpdate) {
  if (provider === 'anthropic') {
-   const isApiKey = key.startsWith('sk-ant-api');
+   // Treat sk-ant-* keys as API keys; only use token type for non-key credentials
+   const isApiKey = key.startsWith('sk-ant-');
    auth.profiles[profileId] = isApiKey
     ? { type: 'api_key', provider: 'anthropic', key }
     : { type: 'token', provider: 'anthropic', token: key };

@@ -497,7 +497,7 @@ ${MODELS_PROVIDERS}
  },
  "tools": {
  "allow": [
- "exec", "read", "write", "edit", "apply_patch", "process",
+ "exec", "read", "write", "edit", "process",
  "web_search", "web_fetch", "browser",
  "sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status",
  "agents_list", "image", "message", "cron", "gateway",
