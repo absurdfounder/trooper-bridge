@@ -1068,7 +1068,7 @@ app.post('/agents', (req, res) => {
  const skillsBlock = skills?.length ? `\n## Skills & Expertise\n${skills.map(s => `- ${s}`).join('\n')}\n` : '';
 
  // Write AGENTS.md — comprehensive task instructions for the SPC
- writeFileSync(`${workspacePath}/AGENTS.md`, `# ${name}\n**${title || 'Specialist Agent'}**\n${skillsBlock}\nYou receive tasks from the Team Lead. Complete them thoroughly and autonomously.\n\n## Operational Rules (MANDATORY)\n1. **Fix errors immediately.** Don't ask. Don't wait. If something breaks, fix it now.\n2. **Spawn subagents for complex execution.** Break large tasks into subtasks and use subagents when possible.\n3. **Never force push, delete branches, or rewrite git history.** Protect the repo at all costs.\n4. **Never guess config changes.** Read docs first. Backup before editing. If unsure, research — don't experiment on production.\n\n## Context & Memory\n- **Read COMPANY.md first** — this is who you work for. Know the company, its products, its voice.\n- **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings). Auto-synced from all team interactions.\n- **Use memory_search before starting work** — check if you or the team have done related work before. Don't start from scratch if context exists.\n- **Update MEMORY.md with learnings** — after completing tasks, write key findings, decisions, useful URLs, and insights to MEMORY.md. Future-you will thank you.\n- **Write daily notes to memory/YYYY-MM-DD.md** — log what you did, what you found, what worked and didn't.\n\n## How to Work\nYou are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.\n- Research first, write second. Search the web, read real sources, gather actual data before producing content.\n- Use tools aggressively. Don't generate from memory when you can get real, current information.\n- Save artifacts to your workspace. Reference real URLs. Produce evidence of actual work.\n\n## Output Formatting (IMPORTANT)\nAlways wrap content in tags:\n- Deliverables: final content \n- Files: content \n- Actions: what you did \n- Reports: analysis \n\nConversational text goes OUTSIDE tags. Never dump raw content without tags.`);
+ writeFileSync(`${workspacePath}/AGENTS.md`, `# ${name}\n**${title || 'Specialist Agent'}**\n${skillsBlock}\nYou receive tasks from the Team Lead. Complete them thoroughly and autonomously.\n\n## Operational Rules (MANDATORY)\n1. **Fix errors immediately.** Don't ask. Don't wait. If something breaks, fix it now.\n2. **Spawn subagents for complex execution.** Break large tasks into subtasks and use subagents when possible.\n3. **Never force push, delete branches, or rewrite git history.** Protect the repo at all costs.\n4. **Never guess config changes.** Read docs first. Backup before editing. If unsure, research — don't experiment on production.\n\n## Context & Memory\n- **Read COMPANY.md first** — this is who you work for. Know the company, its products, its voice.\n- **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings). Auto-synced from all team interactions.\n- **Read KNOWLEDGE.md** — durable knowledge extracted from agent work: decisions made, facts discovered, lessons learned, and team preferences. This is cross-agent intelligence — what your teammates have figured out.\n- **Use memory_search before starting work** — check if you or the team have done related work before. Don't start from scratch if context exists.\n- **Update MEMORY.md with learnings** — after completing tasks, write key findings, decisions, useful URLs, and insights to MEMORY.md. Future-you will thank you.\n- **Write daily notes to memory/YYYY-MM-DD.md** — log what you did, what you found, what worked and didn't.\n\n## How to Work\nYou are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.\n- Research first, write second. Search the web, read real sources, gather actual data before producing content.\n- Use tools aggressively. Don't generate from memory when you can get real, current information.\n- Save artifacts to your workspace. Reference real URLs. Produce evidence of actual work.\n\n## Output Formatting (IMPORTANT)\nAlways wrap content in tags:\n- Deliverables: final content \n- Files: content \n- Actions: what you did \n- Reports: analysis \n\nConversational text goes OUTSIDE tags. Never dump raw content without tags.`);
 
  // Write other workspace files
  writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${name}\ntitle: ${title || 'Specialist'}\nrole: SPC (Specialized Processing Core)\nemoji: 🦀\nteam: CrabsHQ\nreports_to: Team Lead`);
@@ -1093,6 +1093,12 @@ app.post('/agents', (req, res) => {
  try {
  const memoriesMd = readFileSync('/opt/openclaw-data/workspace/MEMORIES.md', 'utf8');
  if (memoriesMd) writeFileSync(`${workspacePath}/MEMORIES.md`, memoriesMd);
+ } catch {}
+
+ // Copy KNOWLEDGE.md from main workspace so SPC has durable knowledge
+ try {
+ const knowledgeMd = readFileSync('/opt/openclaw-data/workspace/KNOWLEDGE.md', 'utf8');
+ if (knowledgeMd) writeFileSync(`${workspacePath}/KNOWLEDGE.md`, knowledgeMd);
  } catch {}
 
  // Fix permissions
@@ -1180,6 +1186,14 @@ app.put('/agents/:name', (req, res) => {
  if (!existsSync(`${workspacePath}/MEMORIES.md`)) {
  const memoriesMd = readFileSync('/opt/openclaw-data/workspace/MEMORIES.md', 'utf8');
  if (memoriesMd) writeFileSync(`${workspacePath}/MEMORIES.md`, memoriesMd);
+ }
+ } catch {}
+
+ // Copy KNOWLEDGE.md from main workspace if SPC doesn't have it
+ try {
+ if (!existsSync(`${workspacePath}/KNOWLEDGE.md`)) {
+ const knowledgeMd = readFileSync('/opt/openclaw-data/workspace/KNOWLEDGE.md', 'utf8');
+ if (knowledgeMd) writeFileSync(`${workspacePath}/KNOWLEDGE.md`, knowledgeMd);
  }
  } catch {}
 
@@ -1360,6 +1374,65 @@ app.post('/agents/sync-memories', (req, res) => {
  } catch {}
  console.log(`🧠 Synced ${memories.length} memories to main + ${spcCount} SPCs`);
  res.json({ success: true, synced: spcCount + 1 });
+ } catch (err) {
+ res.status(500).json({ error: err.message });
+ }
+});
+
+// Sync durable knowledge entries to all agent workspaces as KNOWLEDGE.md
+// Knowledge entries are structured insights (decisions, facts, preferences, lessons)
+// extracted from agent work — separate from the older memories system
+app.post('/agents/sync-knowledge', (req, res) => {
+ const { knowledge } = req.body;
+ if (!Array.isArray(knowledge)) return res.status(400).json({ error: 'knowledge array required' });
+
+ try {
+ // Group by type for structured markdown
+ const grouped = {};
+ knowledge.forEach(k => {
+  const type = k.type || 'general';
+  if (!grouped[type]) grouped[type] = [];
+  grouped[type].push(k);
+ });
+
+ const typeLabels = {
+  decision: 'Decisions',
+  fact: 'Facts & Context',
+  preference: 'Preferences & Guidelines',
+  lesson: 'Lessons Learned',
+  general: 'General Knowledge',
+ };
+
+ let content = '# Team Knowledge\n\n_Auto-synced durable knowledge extracted from agent work. Reference this for context on decisions, facts, and lessons._\n\n';
+ for (const [type, entries] of Object.entries(grouped)) {
+  content += `## ${typeLabels[type] || type.charAt(0).toUpperCase() + type.slice(1)}\n`;
+  entries.forEach(k => {
+   const source = k.agentName ? ` _(from ${k.agentName})_` : '';
+   const tags = k.tags?.length ? ` [${k.tags.join(', ')}]` : '';
+   content += `- ${k.content}${source}${tags}\n`;
+  });
+  content += '\n';
+ }
+
+ // Write to LEAD workspace
+ writeFileSync('/opt/openclaw-data/workspace/KNOWLEDGE.md', content);
+ execSync('chown 1000:1000 /opt/openclaw-data/workspace/KNOWLEDGE.md', { timeout: 5000 });
+
+ // Write to all SPC workspaces
+ const agentsDir = '/opt/openclaw-data/config/agents';
+ let spcCount = 0;
+ try {
+  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
+  for (const agent of agents) {
+   const spcWs = `${agentsDir}/${agent}/workspace`;
+   mkdirSync(spcWs, { recursive: true });
+   writeFileSync(`${spcWs}/KNOWLEDGE.md`, content);
+   execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
+   spcCount++;
+  }
+ } catch {}
+ console.log(`📋 Synced ${knowledge.length} knowledge entries to main + ${spcCount} SPCs`);
+ res.json({ success: true, synced: spcCount + 1, entries: knowledge.length });
  } catch (err) {
  res.status(500).json({ error: err.message });
  }
