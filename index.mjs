@@ -1880,6 +1880,11 @@ app.get('/config/api-keys', (req, res) => {
  const composioKey = getEnvVal('COMPOSIO_API_KEY');
  const openrouterKey = getEnvVal('OPENROUTER_API_KEY');
  const mistralKey = getEnvVal('MISTRAL_API_KEY');
+ const perplexityKey = getEnvVal('PERPLEXITY_API_KEY');
+ const exaKey = getEnvVal('EXA_API_KEY');
+ const tavilyKey = getEnvVal('TAVILY_API_KEY');
+ const serpapiKey = getEnvVal('SERPAPI_API_KEY');
+ const searchapiKey = getEnvVal('SEARCHAPI_API_KEY');
  res.json({ keys: {
  anthropic: { present: !!anthropicKey, masked: mask(anthropicKey) },
  openai: { present: !!openaiKey, masked: mask(openaiKey) },
@@ -1888,6 +1893,11 @@ app.get('/config/api-keys', (req, res) => {
  composio: { present: !!composioKey, masked: mask(composioKey) },
  openrouter: { present: !!openrouterKey, masked: mask(openrouterKey) },
  mistral: { present: !!mistralKey, masked: mask(mistralKey) },
+ perplexity: { present: !!perplexityKey, masked: mask(perplexityKey) },
+ exa: { present: !!exaKey, masked: mask(exaKey) },
+ tavily: { present: !!tavilyKey, masked: mask(tavilyKey) },
+ serpapi: { present: !!serpapiKey, masked: mask(serpapiKey) },
+ searchapi: { present: !!searchapiKey, masked: mask(searchapiKey) },
  }});
  } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1897,8 +1907,8 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, defaultModel } = req.body;
- const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, defaultModel].some(k => k !== undefined);
+ const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, defaultModel } = req.body;
+ const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, defaultModel].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
@@ -1926,6 +1936,11 @@ app.post('/config/api-keys', async (req, res) => {
  setEnvVar('COMPOSIO_API_KEY', composioKey);
  setEnvVar('OPENROUTER_API_KEY', openrouterKey);
  setEnvVar('MISTRAL_API_KEY', mistralKey);
+ setEnvVar('PERPLEXITY_API_KEY', perplexityKey);
+ setEnvVar('EXA_API_KEY', exaKey);
+ setEnvVar('TAVILY_API_KEY', tavilyKey);
+ setEnvVar('SERPAPI_API_KEY', serpapiKey);
+ setEnvVar('SEARCHAPI_API_KEY', searchapiKey);
 
  writeFileSync('/opt/openclaw/.env', envContent);
 
@@ -2105,6 +2120,163 @@ function normalizeModelId(model) {
  console.error('API key update failed:', err.message);
  if (!res.headersSent) res.status(500).json({ error: err.message });
  } finally { keysUpdateInProgress = false; }
+});
+
+// ── Deep Research (Librarium) ─────────────────────────────────────────
+
+// Read research-related API keys from the .env file
+function getResearchEnv() {
+  let envContent = '';
+  try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+  const get = (name) => {
+    const m = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
+    return m ? m[1].trim() : '';
+  };
+  return {
+    PERPLEXITY_API_KEY: get('PERPLEXITY_API_KEY'),
+    OPENAI_API_KEY: get('OPENAI_API_KEY'),
+    GEMINI_API_KEY: get('GEMINI_API_KEY') || get('GOOGLE_API_KEY'),
+    BRAVE_API_KEY: get('BRAVE_API_KEY'),
+    EXA_API_KEY: get('EXA_API_KEY'),
+    TAVILY_API_KEY: get('TAVILY_API_KEY'),
+    SERPAPI_API_KEY: get('SERPAPI_API_KEY'),
+    SEARCHAPI_API_KEY: get('SEARCHAPI_API_KEY'),
+  };
+}
+
+// GET /deep-research/status — check if librarium is installed and which providers are configured
+app.get('/deep-research/status', (req, res) => {
+  try {
+    let installed = false;
+    try { execSync('which librarium', { timeout: 3000 }); installed = true; } catch {}
+    const env = getResearchEnv();
+    const providers = {};
+    // Map env vars to librarium provider names
+    const providerMap = {
+      'perplexity-deep': env.PERPLEXITY_API_KEY,
+      'openai-deep': env.OPENAI_API_KEY,
+      'gemini-deep': env.GEMINI_API_KEY,
+      'perplexity-sonar': env.PERPLEXITY_API_KEY,
+      'brave-search': env.BRAVE_API_KEY,
+      'brave-answers': env.BRAVE_API_KEY,
+      'exa': env.EXA_API_KEY,
+      'tavily': env.TAVILY_API_KEY,
+      'serpapi': env.SERPAPI_API_KEY,
+      'searchapi': env.SEARCHAPI_API_KEY,
+    };
+    for (const [name, key] of Object.entries(providerMap)) {
+      providers[name] = !!key;
+    }
+    const configuredCount = Object.values(providers).filter(Boolean).length;
+    res.json({ installed, providers, configuredCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /deep-research — run librarium with SSE streaming
+app.post('/deep-research', async (req, res) => {
+  const { query, providers: requestedProviders, mode = 'sync', timeout = 60 } = req.body;
+  if (!query || typeof query !== 'string' || query.trim().length === 0) {
+    return res.status(400).json({ error: 'Query is required' });
+  }
+
+  // Check librarium is installed
+  try { execSync('which librarium', { timeout: 3000 }); } catch {
+    return res.status(503).json({ error: 'Librarium is not installed. Reprovision the server or run: npm install -g librarium' });
+  }
+
+  // Build env vars from .env file
+  const env = { ...process.env, ...getResearchEnv() };
+
+  // Build command
+  const args = ['run', query.trim()];
+  if (requestedProviders && Array.isArray(requestedProviders) && requestedProviders.length > 0) {
+    args.push('-p', requestedProviders.join(','));
+  }
+  args.push('-m', mode === 'async' ? 'async' : mode === 'mixed' ? 'mixed' : 'sync');
+  args.push('--timeout', String(Math.min(Math.max(parseInt(timeout, 10) || 60, 10), 300)));
+  args.push('--json');
+
+  const outputDir = `/tmp/librarium-${Date.now()}`;
+  args.push('-o', outputDir);
+
+  console.log(`[deep-research] Running: librarium ${args.join(' ')}`);
+
+  // SSE streaming
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+  });
+  const sendSSE = (event, data) => {
+    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  sendSSE('start', { query: query.trim(), outputDir });
+
+  try {
+    const { spawn: spawnProcess } = await import('child_process');
+    const child = spawnProcess('librarium', args, {
+      env,
+      cwd: '/tmp',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: Math.min((parseInt(timeout, 10) || 60) + 30, 330) * 1000,
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk;
+      sendSSE('progress', { chunk: chunk.toString() });
+    });
+
+    child.stderr?.on('data', (chunk) => {
+      stderr += chunk;
+      // Parse progress lines from stderr (librarium outputs progress there)
+      const line = chunk.toString().trim();
+      if (line) sendSSE('log', { message: line });
+    });
+
+    child.on('close', (code) => {
+      if (code === 0) {
+        // Try to parse the JSON manifest from stdout
+        let manifest = null;
+        try { manifest = JSON.parse(stdout); } catch {}
+
+        // Also try to read summary.md from output dir
+        let summary = null;
+        try {
+          // librarium creates a timestamped subdir inside outputDir
+          const subdirs = readdirSync(outputDir, { withFileTypes: true }).filter(d => d.isDirectory());
+          const resultDir = subdirs.length ? `${outputDir}/${subdirs[0].name}` : outputDir;
+          try { summary = readFileSync(`${resultDir}/summary.md`, 'utf8'); } catch {}
+          if (!summary) try { summary = readFileSync(`${outputDir}/summary.md`, 'utf8'); } catch {}
+        } catch {}
+
+        sendSSE('done', {
+          success: true,
+          manifest,
+          summary,
+          providerCount: manifest?.providers ? Object.keys(manifest.providers).length : 0,
+          sourceCount: manifest?.sources?.length || 0,
+        });
+      } else {
+        sendSSE('done', { success: false, error: `Librarium exited with code ${code}`, stderr: stderr.slice(-2000) });
+      }
+      res.end();
+    });
+
+    child.on('error', (err) => {
+      sendSSE('done', { success: false, error: err.message });
+      res.end();
+    });
+
+  } catch (err) {
+    sendSSE('done', { success: false, error: err.message });
+    res.end();
+  }
 });
 
 // ── Composio connections (proxies to Composio API) ────────────────────

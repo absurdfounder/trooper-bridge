@@ -1114,6 +1114,12 @@ cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
   timeout 180 npm install 2>&1
 }
 
+# Install librarium globally for deep research (multi-provider parallel search)
+dlog "Installing librarium for deep research..."
+timeout 120 npm install -g librarium 2>&1 || {
+  dlog "librarium install failed (non-fatal, deep research will be unavailable)"
+}
+
 # ── [7/9] Poller (minimal stub — bridge handles everything now) ─────
 dlog "Setting up Poller..."
 mkdir -p /opt/openclaw-poller
