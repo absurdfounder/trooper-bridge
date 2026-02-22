@@ -909,6 +909,9 @@ async function handleIncomingTaskStream(req, res) {
      sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
      console.log(`[VNC] Sent live view URL to client`);
    } else {
+     // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
+     sendSSE('browser_session', { domain, provider: 'screenshot', sessionId: null, liveViewUrl: null });
+     console.log(`[screenshot] Browser session started — polling screenshots from container`);
      // Fallback: poll screenshots from container every 1.5s
      // Search both the media root and common subdirs where screenshots may be saved
      screenshotPollerInterval = setInterval(() => {
