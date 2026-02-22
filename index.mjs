@@ -796,7 +796,13 @@ async function handleIncomingTask(req, res) {
  const taskId = context?.taskId;
  const isAsyncCall = context?.notificationType === 'async' || context?.notificationType === 'chat_mention' || context?.notificationType === 'chat_followup';
  if (taskId && isAsyncCall) forwardToMissionControl(taskId, agentName, result, id);
- return res.json({ success: true, result, requestId: id, via: 'websocket', agentId });
+ // Include Browserbase session info so Crabs-HQ can show live view in frontend
+ const bbSession = browserbaseSession ? {
+   liveViewUrl: browserbaseSession.liveViewUrl,
+   sessionId: browserbaseSession.id,
+   provider: 'browserbase',
+ } : null;
+ return res.json({ success: true, result, requestId: id, via: 'websocket', agentId, browserSession: bbSession });
  }
  res.status(502).json({ error: 'Agent returned empty response', requestId: id });
  } catch (err) {
