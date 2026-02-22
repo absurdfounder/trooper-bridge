@@ -1319,7 +1319,27 @@ systemctl restart openclaw-bridge
 sleep 3
 # Gateway needs to reload paired.json — restart container
 cd /opt/openclaw && docker compose restart openclaw-gateway
-sleep 5
+
+# Wait for gateway to be alive after restart
+_gw_alive=0
+for _gw_check in $(seq 1 20); do
+  if curl -sf --max-time 2 http://127.0.0.1:${GATEWAY_PORT}/ >/dev/null 2>&1; then
+    echo "Gateway: ALIVE (ready after ${_gw_check}s)"
+    _gw_alive=1
+    break
+  fi
+  sleep 2
+done
+if [ "$_gw_alive" -eq 0 ]; then
+  echo "Gateway: NOT ALIVE after 40s"
+  echo "--- Gateway container logs ---"
+  docker compose logs --tail 30 openclaw-gateway 2>/dev/null || true
+  echo "--- Port check ---"
+  netstat -tlnp 2>/dev/null | grep ${GATEWAY_PORT} || echo "Port ${GATEWAY_PORT} not listening"
+  echo "--- Container status ---"
+  docker compose ps 2>/dev/null || true
+fi
+
 # Bridge should now connect without pairing dance
 systemctl restart openclaw-bridge
 sleep 5
