@@ -336,6 +336,7 @@ mkdir -p /opt/openclaw-data/config /opt/openclaw-data/workspace
 mkdir -p /opt/openclaw-data/config/media/browser
 mkdir -p /opt/openclaw-data/config/agents/main/agent
 mkdir -p /opt/openclaw-data/config/hooks
+mkdir -p /opt/openclaw-data/config/credentials
 
 # .env for docker compose — pass all available provider keys
 cat > /opt/openclaw/.env << ENV
@@ -565,6 +566,7 @@ ${MODELS_PROVIDERS}
  "enabled": true
  },
  "gateway": {
+ "mode": "local",
  "port": ${GATEWAY_PORT},
  "auth": { "mode": "token", "token": "GATEWAY_TOKEN_PLACEHOLDER" },
  "trustedProxies": ["127.0.0.1", "172.16.0.0/12"],
