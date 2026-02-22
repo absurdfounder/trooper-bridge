@@ -1085,6 +1085,15 @@ fi
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
 docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null || true
 
+# Build sandbox base image (needed for skills that run in isolated containers)
+dlog "Building sandbox base image..."
+if cd /opt/openclaw && bash scripts/sandbox-setup.sh 2>&1; then
+  echo "Sandbox image built: openclaw-sandbox:bookworm-slim"
+else
+  echo "WARNING: Sandbox image build failed (non-fatal — skills requiring sandbox will be unavailable)"
+fi
+cd /opt/openclaw
+
 # ── [6/9] Bridge ────────────────────────────────────────────────────
 dlog "Setting up Bridge..."
 mkdir -p /opt/openclaw-bridge
