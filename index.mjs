@@ -505,6 +505,7 @@ class OpenClawGateway {
  }
  if (onEvent) onEvent('tool_result', {
  tool: last?.tool || 'unknown',
+ params: last?.params || {},
  success: !data.is_error,
  summary: last?.summary || '',
  index: toolLog.length - 1,
@@ -863,7 +864,12 @@ async function handleIncomingTaskStream(req, res) {
  if (isBrowserbaseConfigured()) {
    try {
      const bbSession = await acquireBrowserbaseSession();
-     if (bbSession) browserbaseAcquired = true;
+     if (bbSession) {
+       browserbaseAcquired = true;
+       console.log(`[browserbase] Session acquired — browser tools will use Browserbase`);
+     } else {
+       console.log(`[browserbase] acquireBrowserbaseSession() returned null — using built-in Chrome`);
+     }
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed, falling back to built-in Chrome: ${e.message}`);
    }
@@ -2599,9 +2605,11 @@ function getBrowserbaseLiveViewUrl() {
 }
 
 function isBrowserbaseConfigured() {
-  return !!(BROWSERBASE_API_KEY && BROWSERBASE_PROJECT_ID);
+  // Reject template placeholders like "{{BROWSERBASE_API_KEY}}" that weren't substituted
+  const isTemplate = (v) => !v || /^\{\{.*\}\}$/.test(v.trim());
+  return !!(BROWSERBASE_API_KEY && BROWSERBASE_PROJECT_ID && !isTemplate(BROWSERBASE_API_KEY) && !isTemplate(BROWSERBASE_PROJECT_ID));
 }
 
 server.listen(PORT, '0.0.0.0', () => {
- console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browserbase: ${isBrowserbaseConfigured() ? 'ready' : 'not configured'}`);
+ console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browserbase: ${isBrowserbaseConfigured() ? 'configured' : 'not configured (will use local Chrome)'}`);
 });
