@@ -1992,11 +1992,17 @@ app.post('/config/api-keys', async (req, res) => {
  if (braveKey !== undefined) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
- if (config.tools?.web?.search) {
+ // Ensure tools.web.search section exists (create if missing)
+ if (!config.tools) config.tools = {};
+ if (!config.tools.web) config.tools.web = {};
+ if (!config.tools.web.search) config.tools.web.search = { enabled: true, provider: 'brave', maxResults: 5, cacheTtlMinutes: 15 };
  config.tools.web.search.apiKey = braveKey;
+ // Ensure web_search is in the tools.allow list
+ if (Array.isArray(config.tools.allow) && !config.tools.allow.includes('web_search')) {
+   config.tools.allow.push('web_search');
+ }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
- }
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
