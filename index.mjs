@@ -174,6 +174,7 @@ app.use((req, res, next) => {
 class OpenClawGateway {
  constructor(url, token) {
  this.url = url.replace(/^http/, 'ws');
+ this.httpUrl = url.replace(/^ws/, 'http');
  this.token = token;
  this.ws = null;
  this.connected = false;
@@ -186,6 +187,33 @@ class OpenClawGateway {
  this._authResolve = null;
  this._authReject = null;
  this._pingInterval = null;
+ this._waitForGatewayThenConnect();
+ }
+
+ // Wait for the gateway HTTP endpoint to be reachable before the first WS connect.
+ // During provisioning the gateway installs Chrome + TigerVNC, which can take 1–2 minutes.
+ // Without this, the bridge spams connection errors with exponential backoff.
+ async _waitForGatewayThenConnect() {
+ const maxWait = 180000; // 3 minutes
+ const interval = 3000;  // check every 3 seconds
+ const start = Date.now();
+ while (Date.now() - start < maxWait) {
+   try {
+     const ctrl = new AbortController();
+     const t = setTimeout(() => ctrl.abort(), 2500);
+     const res = await fetch(`${this.httpUrl}/health`, { signal: ctrl.signal }).catch(() => null);
+     clearTimeout(t);
+     if (res && (res.ok || res.status === 401 || res.status === 404)) {
+       // Gateway is up (any HTTP response means it's listening)
+       console.log('[OpenClaw] Gateway reachable, connecting...');
+       this.connect();
+       return;
+     }
+   } catch {}
+   await new Promise(r => setTimeout(r, interval));
+ }
+ // Timed out waiting — try connecting anyway
+ console.log('[OpenClaw] Gateway readiness wait timed out, connecting anyway...');
  this.connect();
  }
 
@@ -2832,8 +2860,10 @@ function writeBrowserbaseProfile(connectUrl) {
     if (!config.browser.profiles) config.browser.profiles = {};
     config.browser.profiles.browserbase = { cdpUrl: localCdpUrl, color: '#00AA00' };
     config.browser.defaultProfile = 'browserbase';
-    config.browser.remoteCdpTimeoutMs = 5000;
-    config.browser.remoteCdpHandshakeTimeoutMs = 8000;
+    // Browserbase cloud sessions have higher latency than local Chrome.
+    // The default 1500/3000ms is for local; 5000/8000 still too low for remote.
+    config.browser.remoteCdpTimeoutMs = 15000;
+    config.browser.remoteCdpHandshakeTimeoutMs = 25000;
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
     // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)

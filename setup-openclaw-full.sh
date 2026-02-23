@@ -240,6 +240,9 @@ echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS created by provision.js)"
 
 if [ -n "$SERVER_PUBLIC_IP" ]; then
  # Caddyfile: reverse proxy HTTPS → gateway on localhost
+ # Root path redirects to /chat with gateway token hash so the Control UI
+ # webchat can authenticate without the user manually pasting a token.
+ # The gateway dashboard JS reads #token=xxx from the URL hash.
  cat > /etc/caddy/Caddyfile << CADDYFILE
 ${HTTPS_DOMAIN} {
  handle /ws {
@@ -253,6 +256,12 @@ ${HTTPS_DOMAIN} {
  }
  handle_path /vnc/* {
  reverse_proxy 127.0.0.1:6080
+ }
+ @rootExact {
+ path /
+ }
+ handle @rootExact {
+ redir /chat#token=${GATEWAY_TOKEN} temporary
  }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
