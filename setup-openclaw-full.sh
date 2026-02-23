@@ -254,6 +254,12 @@ ${HTTPS_DOMAIN} {
  handle_path /vnc/* {
  reverse_proxy 127.0.0.1:6080
  }
+ handle_path /n8n/* {
+ reverse_proxy 127.0.0.1:5678
+ }
+ handle /webhook/* {
+ reverse_proxy 127.0.0.1:5678
+ }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
  }
@@ -1184,6 +1190,17 @@ dlog "Installing noVNC + websockify for live browser streaming..."
 apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
 echo "[setup] noVNC + websockify installed for VNC live view"
 
+# ── n8n Workflow Automation ──────────────────────────────────────────
+dlog "Setting up n8n workflow automation..."
+mkdir -p /opt/n8n-data
+docker pull n8nio/n8n:latest &
+N8N_PULL_PID=$!
+
+# Wait for n8n Docker image pull
+dlog "Waiting for n8n image pull..."
+wait $N8N_PULL_PID 2>/dev/null || true
+echo "[setup] n8n image ready"
+
 # Wait for parallel tasks to complete
 dlog "Waiting for bridge npm install..."
 wait $BRIDGE_NPM_PID 2>/dev/null || {
@@ -1269,6 +1286,37 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 PSVC
 
+# n8n workflow automation service
+cat > /etc/systemd/system/openclaw-n8n.service << N8NSVC
+[Unit]
+Description=n8n Workflow Automation
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStartPre=-/usr/bin/docker rm -f n8n
+ExecStart=/usr/bin/docker run --rm --name n8n \
+  -p 127.0.0.1:5678:5678 \
+  -v /opt/n8n-data:/home/node/.n8n \
+  -e N8N_HOST=0.0.0.0 \
+  -e N8N_PORT=5678 \
+  -e N8N_PROTOCOL=https \
+  -e N8N_SECURE_COOKIE=false \
+  -e WEBHOOK_URL=https://${HTTPS_DOMAIN}/webhook/ \
+  -e N8N_EDITOR_BASE_URL=https://${HTTPS_DOMAIN}/n8n/ \
+  -e N8N_PATH=/n8n/ \
+  -e VUE_APP_URL_BASE_API=https://${HTTPS_DOMAIN}/n8n/ \
+  -e N8N_IFRAME_ALLOW_FROM=* \
+  n8nio/n8n
+Restart=always
+RestartSec=10
+ExecStop=/usr/bin/docker stop n8n
+
+[Install]
+WantedBy=multi-user.target
+N8NSVC
+
 # Websockify service — bridges noVNC WebSocket to Xvnc inside the container
 # Xvnc runs inside the container on :99 (port 5999), websockify exposes it via WebSocket on 6080
 cat > /etc/systemd/system/openclaw-vnc.service << VNCSVC
@@ -1320,7 +1368,7 @@ console.log('Pre-approved device: ' + deviceId.substring(0, 12) + '...');
 chown -R 1000:1000 /opt/openclaw-data
 
 systemctl daemon-reload
-systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc
+systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc openclaw-n8n
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
@@ -1346,10 +1394,11 @@ if [ "$_gw_alive" -eq 0 ]; then
   docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
 fi
 
-# Start bridge, poller, caddy (bridge has pre-approved identity, connects on first try)
+# Start bridge, poller, n8n, caddy (bridge has pre-approved identity, connects on first try)
 systemctl start openclaw-bridge
 systemctl start openclaw-poller
 systemctl start openclaw-vnc
+systemctl start openclaw-n8n
 systemctl restart caddy 2>/dev/null || true
 
 # Brief settle time, then verify
@@ -1376,6 +1425,12 @@ if systemctl is-active --quiet caddy; then
 else
  echo "Caddy: NOT RUNNING"
  journalctl -u caddy --no-pager -n 10
+fi
+
+if curl -s http://127.0.0.1:5678/healthz 2>/dev/null | grep -q ok 2>/dev/null || docker ps | grep -q n8n; then
+ echo "n8n: RUNNING (port 5678)"
+else
+ echo "n8n: NOT RUNNING (may need a few more seconds)"
 fi
 
 echo done
