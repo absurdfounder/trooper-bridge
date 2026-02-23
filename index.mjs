@@ -1684,7 +1684,7 @@ app.post('/skills/:slug/install', async (req, res) => {
  try {
  console.log(`📦 Installing skill "${slug}" via clawhub...`);
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/openclaw/.openclaw && npx clawhub install ${slug} 2>&1'`,
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub install ${slug} 2>&1'`,
  { timeout: 60000 }
  ).toString();
  console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
@@ -1707,7 +1707,7 @@ app.delete('/skills/:slug', async (req, res) => {
  try {
  console.log(`🗑️ Uninstalling skill "${slug}" via clawhub...`);
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/openclaw/.openclaw && npx clawhub uninstall ${slug} 2>&1'`,
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub uninstall ${slug} 2>&1'`,
  { timeout: 30000 }
  ).toString();
  console.log(`✅ Skill "${slug}" uninstalled`);
