@@ -776,6 +776,40 @@ function buildTaskMessage(body) {
  return taskParts.join('\n');
 }
 
+// Persist skill credentials to the container .env file so they're available to the gateway process
+function ensureSkillCredentials(skillCredentials) {
+ if (!skillCredentials || typeof skillCredentials !== 'object') return;
+ const entries = Object.entries(skillCredentials).filter(([k, v]) => k && v && typeof v === 'string');
+ if (entries.length === 0) return;
+
+ try {
+ let envContent = '';
+ try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+
+ let changed = false;
+ for (const [key, value] of entries) {
+ const regex = new RegExp(`^${key}=(.*)$`, 'm');
+ const existing = envContent.match(regex);
+ if (existing && existing[1].trim() === value) continue; // Already set correctly
+ if (existing) {
+ envContent = envContent.replace(regex, `${key}=${value}`);
+ } else {
+ envContent += `\n${key}=${value}`;
+ }
+ changed = true;
+ }
+
+ if (changed) {
+ writeFileSync('/opt/openclaw/.env', envContent);
+ console.log(`[skills] Updated ${entries.length} skill credential(s) in .env`);
+ // Signal gateway to reload config
+ try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
+ }
+ } catch (err) {
+ console.warn(`[skills] Failed to write skill credentials: ${err.message}`);
+ }
+}
+
 // ── Core Task Handler (JSON — backward compatible) ───────────────────
 async function handleIncomingTask(req, res) {
  const { requestId, task, type, source, agentName, context,
@@ -789,6 +823,9 @@ async function handleIncomingTask(req, res) {
  // Unique session per agent name (prevents LEADs sharing one session)
  const sessionKey = `hook:crabhq:${agentId}:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
+
+ // Persist any skill credentials to the container environment
+ if (skillCredentials) ensureSkillCredentials(skillCredentials);
 
  if (!gateway.isReady) {
  const reconnected = await gateway.ensureConnected();
@@ -831,7 +868,7 @@ async function handleIncomingTask(req, res) {
 // POST /webhook/mission-control/stream
 // Returns Server-Sent Events: tool_start, tool_result, text, thinking, done, error
 async function handleIncomingTaskStream(req, res) {
- const { requestId, task, agentName, context, systemPrompt, thinking, model } = req.body;
+ const { requestId, task, agentName, context, systemPrompt, skillCredentials, thinking, model } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
 
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -840,6 +877,9 @@ async function handleIncomingTaskStream(req, res) {
  const agentId = registered ? registered.agentId : 'main';
  const sessionKey = `hook:crabhq:${agentId}:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
+
+ // Persist any skill credentials to the container environment
+ if (skillCredentials) ensureSkillCredentials(skillCredentials);
 
  if (!gateway.isReady) {
  const reconnected = await gateway.ensureConnected();
@@ -1046,7 +1086,7 @@ app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
 
 // Create a new SPC agent
 app.post('/agents', (req, res) => {
- const { name, title, soul, skills, tools, model } = req.body;
+ const { name, title, soul, skills, tools, model, installedSkillIds } = req.body;
  if (!name) return res.status(400).json({ error: 'Agent name required' });
 
  const id = agentSlug(name);
@@ -1119,7 +1159,7 @@ app.post('/agents', (req, res) => {
  });
 
  // Register in memory and persist
- agentRegistry.set(id, { agentId, role: 'SPC', title: title || 'Specialist', soul: soulContent, name });
+ agentRegistry.set(id, { agentId, role: 'SPC', title: title || 'Specialist', soul: soulContent, name, installedSkillIds: installedSkillIds || [] });
  saveAgentRegistry();
 
  console.log(`✅ Created SPC agent: ${name} (${agentId})`);
@@ -1136,7 +1176,7 @@ app.put('/agents/:name', (req, res) => {
  const agent = agentRegistry.get(slug);
  if (!agent) return res.status(404).json({ error: `Agent "${req.params.name}" not found` });
 
- const { soul, title, skills, tools, model, workspaceFiles } = req.body;
+ const { soul, title, skills, tools, model, workspaceFiles, installedSkillIds } = req.body;
  const workspacePath = `/opt/openclaw-data/config/agents/${agent.agentId}/workspace`;
 
  try {
@@ -1167,6 +1207,11 @@ app.put('/agents/:name', (req, res) => {
  if (typeof content !== 'string' || fname.startsWith('_') || fname.includes('/') || fname.includes('..')) continue;
  writeFileSync(`${workspacePath}/${fname}`, content);
  }
+ }
+
+ if (installedSkillIds) {
+ agent.installedSkillIds = installedSkillIds;
+ saveAgentRegistry();
  }
 
  if (model) {
@@ -1684,7 +1729,7 @@ app.post('/skills/:slug/install', async (req, res) => {
  try {
  console.log(`📦 Installing skill "${slug}" via clawhub...`);
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/openclaw/.openclaw && npx clawhub install ${slug} 2>&1'`,
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub install ${slug} 2>&1'`,
  { timeout: 60000 }
  ).toString();
  console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
@@ -1707,7 +1752,7 @@ app.delete('/skills/:slug', async (req, res) => {
  try {
  console.log(`🗑️ Uninstalling skill "${slug}" via clawhub...`);
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/openclaw/.openclaw && npx clawhub uninstall ${slug} 2>&1'`,
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub uninstall ${slug} 2>&1'`,
  { timeout: 30000 }
  ).toString();
  console.log(`✅ Skill "${slug}" uninstalled`);
@@ -1947,11 +1992,17 @@ app.post('/config/api-keys', async (req, res) => {
  if (braveKey !== undefined) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
- if (config.tools?.web?.search) {
+ // Ensure tools.web.search section exists (create if missing)
+ if (!config.tools) config.tools = {};
+ if (!config.tools.web) config.tools.web = {};
+ if (!config.tools.web.search) config.tools.web.search = { enabled: true, provider: 'brave', maxResults: 5, cacheTtlMinutes: 15 };
  config.tools.web.search.apiKey = braveKey;
+ // Ensure web_search is in the tools.allow list
+ if (Array.isArray(config.tools.allow) && !config.tools.allow.includes('web_search')) {
+   config.tools.allow.push('web_search');
+ }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json');
- }
  } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
  }
 
