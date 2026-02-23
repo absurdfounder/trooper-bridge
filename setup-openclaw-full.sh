@@ -112,41 +112,56 @@ sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/ssh
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
 
-# Automatic security updates
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends unattended-upgrades
-echo 'Unattended-Upgrade::Automatic-Reboot "false";' > /etc/apt/apt.conf.d/51auto-upgrades
-
-# Add 2GB swap to prevent OOM kills under load (Chrome + Docker + Node.js)
+# Add 2GB swap in background (doesn't block anything)
 if [ ! -f /swapfile ]; then
- fallocate -l 2G /swapfile
- chmod 600 /swapfile
- mkswap /swapfile
- swapon /swapfile
- echo '/swapfile none swap sw 0 0' >> /etc/fstab
- echo "Swap enabled: $(swapon --show)"
+ (fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile \
+  && echo '/swapfile none swap sw 0 0' >> /etc/fstab && echo "Swap enabled: $(swapon --show)") &
+ SWAP_PID=$!
 fi
 
-# ── [2/8] Docker ────────────────────────────────────────────────────
-dlog "Installing Docker engine..."
+# ── [2/8] Docker + Node.js + Caddy (batched repo setup + single install) ──
+# Instead of 3 separate apt-get update cycles, set up ALL repos first, then install once
+dlog "Installing Docker, Node.js, Caddy..."
+
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg unattended-upgrades debian-keyring debian-archive-keyring apt-transport-https
+echo 'Unattended-Upgrade::Automatic-Reboot "false";' > /etc/apt/apt.conf.d/51auto-upgrades
+
+# Add Docker repo
 if ! command -v docker &> /dev/null; then
- apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
  install -m 0755 -d /etc/apt/keyrings
  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes
  chmod a+r /etc/apt/keyrings/docker.gpg
  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
- apt-get update -qq
- apt-get install -y -qq --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
- systemctl enable docker
- systemctl start docker
- echo "Docker installed"
-else
- echo "Docker already installed"
 fi
 
-# Configure Docker daemon for reliability (overlay2 + write buffer settings)
-mkdir -p /etc/docker
-cat > /etc/docker/daemon.json << 'DOCKERCFG'
+# Add Node.js 22 repo
+if ! command -v node &> /dev/null; then
+ curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1
+fi
+
+# Add Caddy repo
+if ! command -v caddy &> /dev/null; then
+ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg --yes
+ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+fi
+
+# Single apt-get update + install for ALL packages (saves ~30-45s vs 3 separate rounds)
+apt-get update -qq
+PACKAGES=""
+command -v docker &>/dev/null || PACKAGES="$PACKAGES docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+command -v node &>/dev/null || PACKAGES="$PACKAGES nodejs"
+command -v caddy &>/dev/null || PACKAGES="$PACKAGES caddy"
+if [ -n "$PACKAGES" ]; then
+ apt-get install -y -qq --no-install-recommends $PACKAGES
+fi
+
+# Docker setup
+if command -v docker &>/dev/null; then
+ systemctl enable docker
+ systemctl start docker
+ mkdir -p /etc/docker
+ cat > /etc/docker/daemon.json << 'DOCKERCFG'
 {
   "storage-driver": "overlay2",
   "log-driver": "json-file",
@@ -155,32 +170,46 @@ cat > /etc/docker/daemon.json << 'DOCKERCFG'
   "max-concurrent-uploads": 2
 }
 DOCKERCFG
-systemctl restart docker
-sleep 2
-
-# ── [3/8] Node.js 22 ───────────────────────────────────────────────
-# OpenClaw requires Node 22+ (https://docs.openclaw.ai/)
-if ! command -v node &> /dev/null; then
- curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
- apt-get install -y -qq --no-install-recommends nodejs
- echo "Node.js installed: $(node --version)"
-else
- echo "Node.js already installed: $(node --version)"
+ systemctl restart docker
+ echo "Docker installed"
 fi
+echo "Node.js installed: $(node --version 2>/dev/null || echo 'N/A')"
+echo "Caddy installed: $(caddy version 2>/dev/null || echo 'N/A')"
 
-# ── [3.5/8] Caddy (HTTPS reverse proxy) ──────────────────────────
-# Provides automatic HTTPS for the OpenClaw gateway using sslip.io
-dlog "Installing Caddy..."
-if ! command -v caddy &> /dev/null; then
- apt-get install -y -qq --no-install-recommends debian-keyring debian-archive-keyring apt-transport-https
- curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg --yes
- curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
- apt-get update -qq
- apt-get install -y -qq --no-install-recommends caddy
- echo "Caddy installed: $(caddy version)"
-else
- echo "Caddy already installed: $(caddy version)"
+# Wait for swap to finish
+[ -n "${SWAP_PID:-}" ] && wait $SWAP_PID 2>/dev/null || true
+
+# ── Start Docker image pull in BACKGROUND (biggest bottleneck: 2-3 GB download) ──
+# While the image downloads, we continue with config generation, git clone, etc.
+HOST_ARCH=$(uname -m)
+DOCKER_PLATFORM="linux/amd64"
+if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
+ DOCKER_PLATFORM="linux/arm64"
 fi
+OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/openclaw/openclaw:latest}"
+dlog "Pulling Docker image in background: ${OPENCLAW_DOCKER_IMAGE}..."
+echo "Starting background pull: ${OPENCLAW_DOCKER_IMAGE} (${DOCKER_PLATFORM})..."
+
+# Clean stale Docker state
+docker system prune -f 2>/dev/null || true
+
+# Background pull — we'll wait for it later before docker compose up
+DOCKER_PULL_LOG=/tmp/docker-pull.log
+(
+  for attempt in 1 2 3; do
+    if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}" > "$DOCKER_PULL_LOG" 2>&1; then
+      docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
+      echo "IMAGE_READY=true" > /tmp/docker-pull-status
+      exit 0
+    fi
+    echo "Pull attempt ${attempt} failed" >> "$DOCKER_PULL_LOG"
+    docker system prune -a -f 2>/dev/null || true
+    systemctl restart docker 2>/dev/null || true
+    sleep $((attempt * 4))
+  done
+  echo "IMAGE_READY=false" > /tmp/docker-pull-status
+) &
+DOCKER_PULL_PID=$!
 
 # Get public IP (validate it's actually an IP, not an error page)
 _get_ip() {
@@ -960,58 +989,26 @@ chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
 
 cd /opt/openclaw
 
-# ── Docker image: pull official release from GHCR ─────────────────────
-HOST_ARCH=$(uname -m)
-DOCKER_PLATFORM="linux/amd64"
-if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
- DOCKER_PLATFORM="linux/arm64"
-fi
-dlog "Host arch: ${HOST_ARCH} → Docker platform: ${DOCKER_PLATFORM}"
+# ── Wait for background Docker image pull ─────────────────────────────
+dlog "Waiting for Docker image pull to complete..."
+echo "Waiting for background Docker pull (PID: ${DOCKER_PULL_PID})..."
+wait $DOCKER_PULL_PID 2>/dev/null || true
 
-# Default to official GHCR image if not specified by provision.js
-OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/openclaw/openclaw:latest}"
-dlog "Pulling Docker image: ${OPENCLAW_DOCKER_IMAGE}..."
-echo "Pulling pre-built image: ${OPENCLAW_DOCKER_IMAGE} (${DOCKER_PLATFORM})..."
-
-# Check available disk space (need at least 4GB for Docker image + layers)
-AVAIL_KB=$(df /var/lib/docker 2>/dev/null | tail -1 | awk '{print $4}')
-AVAIL_GB=$((${AVAIL_KB:-0} / 1024 / 1024))
-dlog "Disk available: ${AVAIL_GB}GB on /var/lib/docker"
-if [ "${AVAIL_GB}" -lt 4 ] 2>/dev/null; then
-  dlog "Low disk space (${AVAIL_GB}GB). Cleaning up Docker and apt caches..."
-  docker system prune -a -f 2>/dev/null || true
-  docker builder prune -a -f 2>/dev/null || true
-  apt-get clean 2>/dev/null || true
-  rm -rf /tmp/*.deb /var/cache/apt/archives/*.deb 2>/dev/null || true
-fi
-
-# Clean any stale/corrupted Docker state before first pull attempt
-docker system prune -f 2>/dev/null || true
-
+# Check pull result
 IMAGE_READY=false
-for attempt in 1 2 3; do
-  dlog "Docker pull attempt ${attempt}/3..."
-  if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}" 2>&1; then
-    docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
-    dlog "Docker image ready (pull attempt ${attempt})"
-    echo "Image pulled and tagged as openclaw:local"
-    IMAGE_READY=true
-    break
-  fi
-  dlog "Pull attempt ${attempt} failed"
+if [ -f /tmp/docker-pull-status ]; then
+  source /tmp/docker-pull-status
+fi
+cat "$DOCKER_PULL_LOG" 2>/dev/null || true
 
-  # The "failed to send write: must occur at current offset" error is overlay2
-  # storage corruption. Fix: remove corrupted layers, restart Docker daemon.
-  echo "Cleaning Docker state and restarting daemon (attempt ${attempt})..."
-  docker system prune -a -f 2>/dev/null || true
-  docker builder prune -a -f 2>/dev/null || true
-  systemctl restart docker 2>/dev/null || true
-  sleep $((attempt * 4))
-done
-
-if [ "$IMAGE_READY" = false ]; then
-  dlog "All pull attempts failed, building from source..."
-  echo "Pull failed after 3 attempts, falling back to local build..."
+if [ "$IMAGE_READY" = "true" ]; then
+  dlog "Docker image ready"
+  echo "Image pulled and tagged as openclaw:local"
+else
+  dlog "Pull failed, falling back to local build..."
+  echo "Pull failed, falling back to local build..."
+  AVAIL_KB=$(df /var/lib/docker 2>/dev/null | tail -1 | awk '{print $4}')
+  AVAIL_GB=$((${AVAIL_KB:-0} / 1024 / 1024))
   for attempt in 1 2; do
     dlog "Docker build attempt ${attempt}/2..."
     if docker build --no-cache --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .; then
@@ -1021,16 +1018,14 @@ if [ "$IMAGE_READY" = false ]; then
     fi
     dlog "Build attempt ${attempt} failed"
     docker system prune -a -f 2>/dev/null || true
-    docker builder prune -a -f 2>/dev/null || true
     systemctl restart docker 2>/dev/null || true
     sleep $((attempt * 5))
   done
 fi
 
-if [ "$IMAGE_READY" = false ]; then
+if [ "$IMAGE_READY" != "true" ]; then
   dlog "FATAL: Could not pull or build Docker image after retries" "failed"
   echo "ERROR: Failed to obtain Docker image after multiple attempts."
-  echo "Disk: ${AVAIL_GB}GB available. Check server disk health."
   exit 1
 fi
 
@@ -1103,16 +1098,10 @@ fi
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
 docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null || true
 
-# Build sandbox base image (needed for skills that run in isolated containers)
-dlog "Building sandbox base image..."
-if cd /opt/openclaw && bash scripts/sandbox-setup.sh 2>&1; then
-  echo "Sandbox image built: openclaw-sandbox:bookworm-slim"
-else
-  echo "WARNING: Sandbox image build failed (non-fatal — skills requiring sandbox will be unavailable)"
-fi
-cd /opt/openclaw
+# ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
+# Download bridge, create poller, and start sandbox build concurrently
 
-# ── [6/9] Bridge ────────────────────────────────────────────────────
+# Download bridge files first (fast, needed for npm install)
 dlog "Setting up Bridge..."
 mkdir -p /opt/openclaw-bridge
 dlog "Downloading bridge from GitHub..."
@@ -1126,20 +1115,7 @@ for _dl_attempt in 1 2 3; do
   sleep $((${_dl_attempt} * 3))
 done
 
-cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
-  dlog "npm install failed, retrying with clean cache..."
-  npm cache clean --force 2>/dev/null || true
-  timeout 180 npm install 2>&1
-}
-
-# Install librarium globally for deep research (multi-provider parallel search)
-dlog "Installing librarium for deep research..."
-timeout 120 npm install -g librarium 2>&1 || {
-  dlog "librarium install failed (non-fatal, deep research will be unavailable)"
-}
-
-# ── [7/9] Poller (minimal stub — bridge handles everything now) ─────
-dlog "Setting up Poller..."
+# Create poller stub (fast)
 mkdir -p /opt/openclaw-poller
 cat > /opt/openclaw-poller/package.json << 'PPKG'
 {"name":"openclaw-poller","version":"1.0.0","type":"module","dependencies":{}}
@@ -1159,16 +1135,51 @@ while (true) {
 }
 POLLER
 
-cd /opt/openclaw-poller && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
+# Start 3 parallel tasks: bridge npm install, sandbox build, and poller npm + librarium
+dlog "Installing bridge, sandbox, and dependencies in parallel..."
 
-# ── [7.5/9] noVNC + websockify (live browser view via VNC) ────────────
-# Installs on the HOST (not in container). Websockify bridges WebSocket → VNC protocol.
-# Caddy proxies /vnc/* → websockify:6080 → Xvnc:5999 (inside container, mapped to host).
+# Task 1: Bridge npm install (background)
+(cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
+  npm cache clean --force 2>/dev/null || true
+  timeout 180 npm install 2>&1
+}) &
+BRIDGE_NPM_PID=$!
+
+# Task 2: Sandbox base image build (background)
+(
+  cd /opt/openclaw
+  dlog "Building sandbox base image..."
+  if bash scripts/sandbox-setup.sh 2>&1; then
+    echo "Sandbox image built: openclaw-sandbox:bookworm-slim"
+  else
+    echo "WARNING: Sandbox image build failed (non-fatal)"
+  fi
+) &
+SANDBOX_PID=$!
+
+# Task 3: Poller npm + librarium + noVNC (foreground — fastest)
+cd /opt/openclaw-poller && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
+timeout 120 npm install -g librarium 2>&1 || {
+  dlog "librarium install failed (non-fatal, deep research will be unavailable)"
+}
+
+# noVNC install (only if 2captcha is set)
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
   dlog "Installing noVNC + websockify for live browser streaming..."
   apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
   echo "[setup] noVNC + websockify installed for VNC live view"
 fi
+
+# Wait for parallel tasks to complete
+dlog "Waiting for bridge npm install..."
+wait $BRIDGE_NPM_PID 2>/dev/null || {
+  dlog "Bridge npm install may have failed, retrying..."
+  cd /opt/openclaw-bridge && npm cache clean --force 2>/dev/null; timeout 180 npm install 2>&1
+}
+dlog "Waiting for sandbox build..."
+wait $SANDBOX_PID 2>/dev/null || true
+
+cd /opt/openclaw
 
 # ── [8/9] Systemd services ──────────────────────────────────────────
 
@@ -1264,63 +1275,21 @@ WantedBy=multi-user.target
 VNCSVC
 fi
 
-systemctl daemon-reload
-systemctl enable openclaw-docker openclaw-bridge openclaw-poller
-if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
-  systemctl enable openclaw-vnc
-fi
-dlog "Starting services..."
-# Kill the temporary log server so the real bridge can use the port
-kill $LOG_SERVER_PID 2>/dev/null; sleep 1
-# Start docker first — openclaw-bridge depends on it (After=openclaw-docker.service)
-systemctl start openclaw-docker
-# Wait for OpenClaw gateway to be listening before starting bridge
-dlog "Waiting for OpenClaw gateway..."
-for i in $(seq 1 30); do
-  curl -sf --max-time 2 http://127.0.0.1:${GATEWAY_PORT}/ >/dev/null 2>&1 && break
-  sleep 2
-done
-systemctl start openclaw-bridge
-systemctl start openclaw-poller
-if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
-  systemctl start openclaw-vnc
-fi
-# Start Caddy (HTTPS reverse proxy) — needs gateway container to be up
-systemctl restart caddy 2>/dev/null || true
-
-# ── [9/9] Verify ────────────────────────────────────────────────────
-sleep 5
-
-# Check docker
-if docker ps | grep -q openclaw; then
- echo "Container up"
-else
- echo "Container down"
- docker ps -a
-fi
-
-# Pre-approve bridge device — generate identity BEFORE starting bridge, write it into gateway config
-# This eliminates the pairing race condition entirely
+# ── Pre-approve bridge device BEFORE starting any services ──────────
+# Generate identity + paired.json first, so bridge connects on first start (no restarts needed)
 echo "Pre-generating bridge device identity and approving in gateway config..."
 mkdir -p /opt/openclaw-data/config/devices /opt/openclaw-bridge
 
-# Generate ed25519 keypair and device identity using Node.js (same as bridge does internally)
 node -e "
 const crypto = require('crypto');
 const fs = require('fs');
 const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
-
-// Bridge identity uses PEM format (same as bridge's own loadOrCreateDeviceIdentity)
 const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
 const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
 const pubRaw = publicKey.export({ type: 'spki', format: 'der' }).slice(-32);
 const deviceId = crypto.createHash('sha256').update(pubRaw).digest('hex');
-
-// Bridge identity file — PEM format as bridge expects
 const identity = { version: 1, deviceId, publicKeyPem, privateKeyPem, createdAtMs: Date.now() };
 fs.writeFileSync('/opt/openclaw-bridge/device-identity.json', JSON.stringify(identity, null, 2), { mode: 0o600 });
-
-// Gateway paired.json — base64url public key as gateway expects
 const pubB64 = pubRaw.toString('base64url');
 const paired = {};
 paired[deviceId] = {
@@ -1338,44 +1307,56 @@ console.log('Pre-approved device: ' + deviceId.substring(0, 12) + '...');
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
 
-# Restart services so they pick up pre-approved identity
-systemctl restart openclaw-bridge
-sleep 3
-# Gateway needs to reload paired.json — restart container
-cd /opt/openclaw && docker compose restart openclaw-gateway
+systemctl daemon-reload
+systemctl enable openclaw-docker openclaw-bridge openclaw-poller
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+  systemctl enable openclaw-vnc
+fi
 
-# Wait for gateway to be alive after restart
+# ── [9/9] Start all services (single clean startup) ──────────────────
+dlog "Starting services..."
+# Kill the temporary log server so the real bridge can use the port
+kill $LOG_SERVER_PID 2>/dev/null; sleep 1
+
+# Start docker containers
+systemctl start openclaw-docker
+
+# Wait for gateway to be ready (single wait, not 3 separate loops)
+dlog "Waiting for OpenClaw gateway..."
 _gw_alive=0
-for _gw_check in $(seq 1 20); do
+for i in $(seq 1 30); do
   if curl -sf --max-time 2 http://127.0.0.1:${GATEWAY_PORT}/ >/dev/null 2>&1; then
-    echo "Gateway: ALIVE (ready after ${_gw_check}s)"
+    echo "Gateway: ALIVE (ready after ${i}s)"
     _gw_alive=1
     break
   fi
   sleep 2
 done
 if [ "$_gw_alive" -eq 0 ]; then
-  echo "Gateway: NOT ALIVE after 40s"
-  echo "--- Gateway container logs ---"
-  docker compose logs --tail 30 openclaw-gateway 2>/dev/null || true
-  echo "--- Port check ---"
-  netstat -tlnp 2>/dev/null | grep ${GATEWAY_PORT} || echo "Port ${GATEWAY_PORT} not listening"
-  echo "--- Container status ---"
-  docker compose ps 2>/dev/null || true
+  echo "WARNING: Gateway did not respond after 60s"
+  docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
 fi
 
-# Bridge should now connect without pairing dance
-systemctl restart openclaw-bridge
-sleep 5
+# Start bridge, poller, caddy (bridge has pre-approved identity, connects on first try)
+systemctl start openclaw-bridge
+systemctl start openclaw-poller
+if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
+  systemctl start openclaw-vnc
+fi
+systemctl restart caddy 2>/dev/null || true
 
-# Check bridge
+# Brief settle time, then verify
+sleep 3
+
+# ── Verify ──
+if docker ps | grep -q openclaw; then echo "Container: UP"; else echo "Container: DOWN"; docker ps -a; fi
+
 if curl -s http://127.0.0.1:${BRIDGE_PORT}/health | grep -q ok; then
  echo "Bridge: HEALTHY"
 else
- echo "Bridge: NOT HEALTHY"
+ echo "Bridge: NOT HEALTHY (may need a few more seconds)"
 fi
 
-# Check poller
 if systemctl is-active --quiet openclaw-poller; then
  echo "Poller: RUNNING"
 else
@@ -1383,7 +1364,6 @@ else
  journalctl -u openclaw-poller --no-pager -n 10
 fi
 
-# Check Caddy (HTTPS)
 if systemctl is-active --quiet caddy; then
  echo "Caddy: RUNNING (HTTPS via ${SSLIP_DOMAIN:-unknown})"
 else
