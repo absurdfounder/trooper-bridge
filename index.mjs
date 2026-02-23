@@ -36,6 +36,60 @@ function isVNCAvailable() {
   } catch { return false; }
 }
 
+// ── Chrome Proxy Health Check ─────────────────────────────────────────
+// When falling back from Browserbase to built-in Chrome, the chrome-wrapper
+// may route ALL traffic through a 2Captcha residential proxy. If the proxy
+// credentials are invalid/expired, Chrome fails with ERR_INVALID_AUTH_CREDENTIALS.
+// This function ensures the wrapper has proxy validation and patches it if not.
+let _proxyHealthChecked = false;
+
+async function ensureChromeProxyHealthy() {
+  if (_proxyHealthChecked) return;
+  _proxyHealthChecked = true;
+
+  const wrapperPath = '/opt/openclaw-data/chrome-wrapper.sh';
+  try {
+    const wrapper = readFileSync(wrapperPath, 'utf8');
+    if (!wrapper.includes('proxy-server')) return; // No proxy configured
+
+    // Check if wrapper already has proxy validation (our fix)
+    if (wrapper.includes('Proxy validated OK') || wrapper.includes('Proxy validation')) {
+      console.log('[browser] Chrome wrapper already has proxy validation');
+      return;
+    }
+
+    // Patch the wrapper to add proxy validation before the exec line
+    const patchedWrapper = wrapper.replace(
+      /^(exec \/usr\/bin\/google-chrome-stable \\)$/m,
+      `# ── Proxy validation (patched by bridge) ──
+# If proxy rejects credentials, ALL Chrome traffic fails with ERR_INVALID_AUTH_CREDENTIALS.
+# Better to browse without proxy than not at all.
+if [ -n "$PROXY_ARGS" ]; then
+  if curl -x "http://\${PROXY_USER}:\${PROXY_PASS}@na.proxy.2captcha.com:2334" \\
+       -sf -o /dev/null --max-time 10 "http://httpbin.org/ip" 2>/dev/null; then
+    echo "[chrome-wrapper] Proxy validated OK" >&2
+  else
+    echo "[chrome-wrapper] WARNING: Proxy auth failed — launching without proxy" >&2
+    PROXY_ARGS=""
+    EXT_DIRS="/opt/openclaw-data/2captcha-extension"
+  fi
+fi
+
+$1`
+    );
+
+    if (patchedWrapper !== wrapper) {
+      writeFileSync(wrapperPath, patchedWrapper, { mode: 0o755 });
+      console.log('[browser] Patched chrome-wrapper.sh with proxy validation (live fix)');
+    }
+  } catch (e) {
+    // Wrapper doesn't exist or isn't writable — not a fatal error
+    if (e.code !== 'ENOENT') {
+      console.warn(`[browser] Could not patch chrome-wrapper: ${e.message}`);
+    }
+  }
+}
+
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const IDENTITY_PATH = '/opt/openclaw-bridge/device-identity.json';
@@ -780,6 +834,8 @@ async function handleIncomingTask(req, res) {
      if (bbSession) browserbaseAcquired = true;
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed: ${e.message}`);
+     // Browserbase failed — ensure built-in Chrome proxy is healthy
+     ensureChromeProxyHealthy().catch(err => console.warn(`[browser] Proxy health check failed: ${err.message}`));
    }
  }
 
@@ -872,6 +928,8 @@ async function handleIncomingTaskStream(req, res) {
      }
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed, falling back to built-in Chrome: ${e.message}`);
+     // Browserbase failed — ensure built-in Chrome proxy is healthy
+     ensureChromeProxyHealthy().catch(err => console.warn(`[browser] Proxy health check failed: ${err.message}`));
    }
  }
 
@@ -2684,10 +2742,103 @@ app.put('/config/auth-profiles', (req, res) => {
 });
 
 // ── Start Server ─────────────────────────────────────────────────────
+// ── Browserbase CDP Proxy ───────────────────────────────────────────
+// OpenClaw expects a standard HTTP CDP endpoint (http://host:port) for browser
+// profiles, but Browserbase provides a WebSocket URL (wss://connect.browserbase.com/...).
+// This lightweight proxy bridges the gap:
+//   1. Serves /json/version (so OpenClaw's reachability check passes)
+//   2. Proxies WebSocket connections to Browserbase's WSS endpoint
+//   3. Runs on the host; OpenClaw reaches it via host.docker.internal
+import { createServer as createHttpServer } from 'http';
+
+const CDP_PROXY_PORT = 18880;
+let cdpProxyServer = null;
+let cdpProxyWsTarget = null; // The Browserbase WSS connect URL
+const cdpProxyBrowserId = 'browserbase-' + Math.random().toString(36).slice(2, 10);
+
+function startCdpProxy(browserbaseConnectUrl) {
+  cdpProxyWsTarget = browserbaseConnectUrl;
+
+  if (cdpProxyServer) {
+    // Already running — just update the target URL
+    console.log(`[cdp-proxy] Updated target → ${browserbaseConnectUrl.substring(0, 60)}...`);
+    return;
+  }
+
+  const httpServer = createHttpServer((req, res) => {
+    // Serve standard Chrome DevTools JSON endpoints
+    if (req.url === '/json/version' || req.url === '/json/version/') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        Browser: 'Browserbase/1.0',
+        'Protocol-Version': '1.3',
+        'User-Agent': 'Browserbase',
+        'V8-Version': '0.0',
+        'WebKit-Version': '0.0',
+        webSocketDebuggerUrl: `ws://127.0.0.1:${CDP_PROXY_PORT}/devtools/browser/${cdpProxyBrowserId}`,
+      }));
+      return;
+    }
+    if (req.url === '/json' || req.url === '/json/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('[]');
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+
+  // Proxy WebSocket connections to Browserbase
+  const proxyWss = new WebSocketServer({ server: httpServer });
+  proxyWss.on('connection', (clientWs) => {
+    if (!cdpProxyWsTarget) {
+      clientWs.close(1011, 'No Browserbase session active');
+      return;
+    }
+    console.log(`[cdp-proxy] Proxying CDP connection → Browserbase`);
+    const remoteWs = new WebSocket(cdpProxyWsTarget);
+
+    remoteWs.on('open', () => {
+      clientWs.on('message', (data) => {
+        if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(data);
+      });
+      remoteWs.on('message', (data) => {
+        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
+      });
+    });
+
+    remoteWs.on('error', (err) => {
+      console.warn(`[cdp-proxy] Browserbase WS error: ${err.message}`);
+      clientWs.close(1011, 'Browserbase connection error');
+    });
+    remoteWs.on('close', () => clientWs.close());
+    clientWs.on('close', () => {
+      if (remoteWs.readyState === WebSocket.OPEN) remoteWs.close();
+    });
+    clientWs.on('error', () => {
+      if (remoteWs.readyState === WebSocket.OPEN) remoteWs.close();
+    });
+  });
+
+  httpServer.listen(CDP_PROXY_PORT, '0.0.0.0', () => {
+    console.log(`[cdp-proxy] CDP proxy running on :${CDP_PROXY_PORT} → Browserbase`);
+  });
+  httpServer.on('error', (err) => {
+    console.warn(`[cdp-proxy] Failed to start: ${err.message}`);
+    cdpProxyServer = null;
+  });
+  cdpProxyServer = httpServer;
+}
+
+function stopCdpProxy() {
+  cdpProxyWsTarget = null;
+  // Don't close the server — reuse for next session
+}
+
 // ── Browserbase Integration ─────────────────────────────────────────
 // On-demand managed cloud browser: proxy rotation, CAPTCHA solving, stealth.
 // Creates a session per browser task, destroys when done. Saves money.
-// OpenClaw hot-reloads config so no gateway restart needed.
+// Bridge runs a local CDP proxy (port 18880) so OpenClaw can connect via standard HTTP CDP.
 const BROWSERBASE_API_KEY = process.env.BROWSERBASE_API_KEY || '';
 const BROWSERBASE_PROJECT_ID = process.env.BROWSERBASE_PROJECT_ID || '';
 const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
@@ -2708,20 +2859,28 @@ async function browserbaseApiRequest(method, path, body) {
   return ct && ct.includes('application/json') ? res.json() : null;
 }
 
-// Write the Browserbase CDP URL into OpenClaw's config (hot-reloaded, no restart needed)
+// Write the local CDP proxy URL into OpenClaw's config (standard HTTP endpoint)
+// The proxy handles /json/version and forwards WebSocket CDP to Browserbase.
 function writeBrowserbaseProfile(connectUrl) {
   try {
+    // Start/update the local CDP proxy to target this Browserbase session
+    startCdpProxy(connectUrl);
+
+    // Point OpenClaw at the local CDP proxy via host.docker.internal
+    const localCdpUrl = `http://host.docker.internal:${CDP_PROXY_PORT}`;
     const configPath = '/opt/openclaw-data/config/openclaw.json';
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
     if (!config.browser) config.browser = {};
     if (!config.browser.profiles) config.browser.profiles = {};
-    config.browser.profiles.browserbase = { cdpUrl: connectUrl, color: '#00AA00' };
+    config.browser.profiles.browserbase = { cdpUrl: localCdpUrl, color: '#00AA00' };
     config.browser.defaultProfile = 'browserbase';
-    config.browser.remoteCdpTimeoutMs = 5000;
-    config.browser.remoteCdpHandshakeTimeoutMs = 10000;
+    config.browser.remoteCdpTimeoutMs = 8000;
+    config.browser.remoteCdpHandshakeTimeoutMs = 15000;
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
-    console.log('[browserbase] Wrote browserbase profile to openclaw.json (hot-reload)');
+    // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
+    try { execSync('docker exec openclaw-openclaw-gateway-1 touch /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+    console.log(`[browserbase] Config updated: defaultProfile=browserbase, cdpUrl=${localCdpUrl}`);
   } catch (e) {
     console.error('[browserbase] Failed to update openclaw.json:', e.message);
   }
@@ -2729,6 +2888,7 @@ function writeBrowserbaseProfile(connectUrl) {
 
 // Revert OpenClaw to built-in Chrome when no Browserbase session is active
 function revertToBuiltinBrowser() {
+  stopCdpProxy();
   try {
     const configPath = '/opt/openclaw-data/config/openclaw.json';
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -2736,6 +2896,8 @@ function revertToBuiltinBrowser() {
       config.browser.defaultProfile = 'openclaw';
       writeFileSync(configPath, JSON.stringify(config, null, 2));
       try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+      // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
+      try { execSync('docker exec openclaw-openclaw-gateway-1 touch /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
       console.log('[browserbase] Reverted to built-in Chrome profile');
     }
   } catch (e) { /* ignore */ }

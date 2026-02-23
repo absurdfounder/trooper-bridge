@@ -917,6 +917,24 @@ PBGJS
   fi
 fi
 
+# ── Proxy validation: test credentials before committing to proxy mode ──
+# If the proxy rejects our credentials, ALL Chrome traffic fails with
+# ERR_INVALID_AUTH_CREDENTIALS. Better to browse without proxy than not at all.
+if [ -n "$PROXY_ARGS" ]; then
+  PROXY_OK=false
+  if curl -x "http://${PROXY_USER}:${PROXY_PASS}@na.proxy.2captcha.com:2334" \
+       -sf -o /dev/null --max-time 10 "http://httpbin.org/ip" 2>/dev/null; then
+    PROXY_OK=true
+    echo "[chrome-wrapper] Proxy validated OK (residential IP active)" >&2
+  fi
+  if [ "$PROXY_OK" = "false" ]; then
+    echo "[chrome-wrapper] WARNING: Proxy auth failed — launching Chrome without proxy" >&2
+    PROXY_ARGS=""
+    # Keep the 2captcha solver extension (still useful for CAPTCHAs) but drop the proxy-auth ext
+    EXT_DIRS="/opt/openclaw-data/2captcha-extension"
+  fi
+fi
+
 exec /usr/bin/google-chrome-stable \
   --load-extension=${EXT_DIRS} \
   --disable-extensions-except=${EXT_DIRS} \
