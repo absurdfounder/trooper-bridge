@@ -36,58 +36,29 @@ function isVNCAvailable() {
   } catch { return false; }
 }
 
-// ── Chrome Proxy Health Check ─────────────────────────────────────────
-// When falling back from Browserbase to built-in Chrome, the chrome-wrapper
-// may route ALL traffic through a 2Captcha residential proxy. If the proxy
-// credentials are invalid/expired, Chrome fails with ERR_INVALID_AUTH_CREDENTIALS.
-// This function ensures the wrapper has proxy validation and patches it if not.
-let _proxyHealthChecked = false;
+// ── Skill-Reported Browser Sessions ──────────────────────────────────
+// Skills (e.g. browserbase, browserbase-sessions from ClawHub) report their
+// live view URLs here so the bridge can forward them to the frontend.
+// This replaces the old hardcoded Browserbase CDP proxy + session management.
+let skillBrowserSession = null; // { liveViewUrl, sessionId, provider, reportedAt }
 
-async function ensureChromeProxyHealthy() {
-  if (_proxyHealthChecked) return;
-  _proxyHealthChecked = true;
+function reportBrowserSession({ liveViewUrl, sessionId, provider }) {
+  skillBrowserSession = { liveViewUrl, sessionId, provider: provider || 'skill', reportedAt: Date.now() };
+  console.log(`[browser-session] Skill reported live view: ${liveViewUrl} (provider: ${provider || 'skill'})`);
+}
 
-  const wrapperPath = '/opt/openclaw-data/chrome-wrapper.sh';
-  try {
-    const wrapper = readFileSync(wrapperPath, 'utf8');
-    if (!wrapper.includes('proxy-server')) return; // No proxy configured
-
-    // Check if wrapper already has proxy validation (our fix)
-    if (wrapper.includes('Proxy validated OK') || wrapper.includes('Proxy validation')) {
-      console.log('[browser] Chrome wrapper already has proxy validation');
-      return;
-    }
-
-    // Patch the wrapper to add proxy validation before the exec line
-    const patchedWrapper = wrapper.replace(
-      /^(exec \/usr\/bin\/google-chrome-stable \\)$/m,
-      `# ── Proxy validation (patched by bridge) ──
-# If proxy rejects credentials, ALL Chrome traffic fails with ERR_INVALID_AUTH_CREDENTIALS.
-# Better to browse without proxy than not at all.
-if [ -n "$PROXY_ARGS" ]; then
-  if curl -x "http://\${PROXY_USER}:\${PROXY_PASS}@na.proxy.2captcha.com:2334" \\
-       -sf -o /dev/null --max-time 10 "http://httpbin.org/ip" 2>/dev/null; then
-    echo "[chrome-wrapper] Proxy validated OK" >&2
-  else
-    echo "[chrome-wrapper] WARNING: Proxy auth failed — launching without proxy" >&2
-    PROXY_ARGS=""
-    EXT_DIRS="/opt/openclaw-data/2captcha-extension"
-  fi
-fi
-
-$1`
-    );
-
-    if (patchedWrapper !== wrapper) {
-      writeFileSync(wrapperPath, patchedWrapper, { mode: 0o755 });
-      console.log('[browser] Patched chrome-wrapper.sh with proxy validation (live fix)');
-    }
-  } catch (e) {
-    // Wrapper doesn't exist or isn't writable — not a fatal error
-    if (e.code !== 'ENOENT') {
-      console.warn(`[browser] Could not patch chrome-wrapper: ${e.message}`);
-    }
+function getSkillBrowserSession() {
+  if (!skillBrowserSession) return null;
+  // Auto-expire after 15 minutes
+  if (Date.now() - skillBrowserSession.reportedAt > 15 * 60 * 1000) {
+    skillBrowserSession = null;
+    return null;
   }
+  return skillBrowserSession;
+}
+
+function clearSkillBrowserSession() {
+  skillBrowserSession = null;
 }
 
 // ── Device Identity (ed25519 keypair for gateway auth) ───────────────────────
@@ -826,23 +797,6 @@ async function handleIncomingTask(req, res) {
  }
  }
 
- // Acquire Browserbase session if configured
- let browserbaseAcquired = false;
- if (isBrowserbaseConfigured()) {
-   try {
-     const bbSession = await acquireBrowserbaseSession();
-     if (bbSession) {
-       browserbaseAcquired = true;
-       // Wait for gateway to hot-reload config after inotify touch
-       await new Promise(r => setTimeout(r, 1500));
-     }
-   } catch (e) {
-     console.warn(`[browserbase] On-demand session failed: ${e.message}`);
-     // Browserbase failed — ensure built-in Chrome proxy is healthy
-     ensureChromeProxyHealthy().catch(err => console.warn(`[browser] Proxy health check failed: ${err.message}`));
-   }
- }
-
  try {
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})...`);
  const result = await gateway.runAgent(fullTask, {
@@ -857,22 +811,19 @@ async function handleIncomingTask(req, res) {
  const taskId = context?.taskId;
  const isAsyncCall = context?.notificationType === 'async' || context?.notificationType === 'chat_mention' || context?.notificationType === 'chat_followup';
  if (taskId && isAsyncCall) forwardToMissionControl(taskId, agentName, result, id);
- // Include Browserbase session info so Crabs-HQ can show live view in frontend
- const bbSession = browserbaseSession ? {
-   liveViewUrl: browserbaseSession.liveViewUrl,
-   sessionId: browserbaseSession.id,
-   provider: 'browserbase',
+ // Include browser session info from skill-reported sessions or VNC
+ const skillSession = getSkillBrowserSession();
+ const browserSession = skillSession ? {
+   liveViewUrl: skillSession.liveViewUrl,
+   sessionId: skillSession.sessionId,
+   provider: skillSession.provider,
  } : null;
- return res.json({ success: true, result, requestId: id, via: 'websocket', agentId, browserSession: bbSession });
+ return res.json({ success: true, result, requestId: id, via: 'websocket', agentId, browserSession });
  }
  res.status(502).json({ error: 'Agent returned empty response', requestId: id });
  } catch (err) {
  console.error(`[${id}] Agent failed: ${err.message}`);
  res.status(502).json({ error: `Agent failed: ${err.message}`, requestId: id });
- } finally {
- if (browserbaseAcquired) {
-   releaseBrowserbaseSession().catch(e => console.warn(`[browserbase] Release failed: ${e.message}`));
- }
  }
 }
 
@@ -918,26 +869,6 @@ async function handleIncomingTaskStream(req, res) {
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
 
  let screenshotPollerInterval = null;
- let browserbaseAcquired = false;
-
- // Pre-acquire Browserbase session if configured (so CDP URL is ready when browser tool fires)
- if (isBrowserbaseConfigured()) {
-   try {
-     const bbSession = await acquireBrowserbaseSession();
-     if (bbSession) {
-       browserbaseAcquired = true;
-       // Wait for gateway to hot-reload config after inotify touch
-       await new Promise(r => setTimeout(r, 1500));
-       console.log(`[browserbase] Session acquired — browser tools will use Browserbase`);
-     } else {
-       console.log(`[browserbase] acquireBrowserbaseSession() returned null — using built-in Chrome`);
-     }
-   } catch (e) {
-     console.warn(`[browserbase] On-demand session failed, falling back to built-in Chrome: ${e.message}`);
-     // Browserbase failed — ensure built-in Chrome proxy is healthy
-     ensureChromeProxyHealthy().catch(err => console.warn(`[browser] Proxy health check failed: ${err.message}`));
-   }
- }
 
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}...`);
@@ -963,12 +894,11 @@ async function handleIncomingTaskStream(req, res) {
    let domain = '';
    try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
 
-   // Priority: Browserbase live view > VNC > screenshot polling
-   const bbLiveUrl = getBrowserbaseLiveViewUrl();
-   const bbSessionId = browserbaseSession?.id || null;
-   if (bbLiveUrl) {
-     sendSSE('browser_session', { liveViewUrl: bbLiveUrl, sessionId: bbSessionId, domain, provider: 'browserbase' });
-     console.log(`[browserbase] Sent live view URL to client: ${bbLiveUrl}`);
+   // Priority: skill-reported live view > VNC > screenshot polling
+   const skillSession = getSkillBrowserSession();
+   if (skillSession?.liveViewUrl) {
+     sendSSE('browser_session', { liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider });
+     console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
    } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
      sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
      console.log(`[VNC] Sent live view URL to client`);
@@ -1032,11 +962,11 @@ async function handleIncomingTaskStream(req, res) {
    screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
- // Signal browser session end and release Browserbase session
- if (browserbaseAcquired) {
-   const bbId = browserbaseSession?.id || null;
-   try { sendSSE('browser_session_end', { sessionId: bbId }); } catch {}
-   releaseBrowserbaseSession().catch(e => console.warn(`[browserbase] Release failed: ${e.message}`));
+ // Signal browser session end if a skill-reported session was active
+ const endSession = getSkillBrowserSession();
+ if (endSession) {
+   try { sendSSE('browser_session_end', { sessionId: endSession.sessionId }); } catch {}
+   clearSkillBrowserSession();
  }
  res.end();
  }
@@ -2699,266 +2629,30 @@ app.put('/config/auth-profiles', (req, res) => {
   }
 });
 
+// ── Browser Session Reporting Endpoint ────────────────────────────────
+// Skills (e.g. browserbase, browserbase-sessions) call this to report
+// their live view URL so the bridge can show it in the frontend.
+// Accessible from inside the Docker container at host.docker.internal:PORT
+app.post('/api/browser-session', (req, res) => {
+  const { liveViewUrl, sessionId, provider } = req.body;
+  if (!liveViewUrl) {
+    return res.status(400).json({ error: 'liveViewUrl is required' });
+  }
+  reportBrowserSession({ liveViewUrl, sessionId, provider });
+  res.json({ success: true });
+});
+
+app.delete('/api/browser-session', (req, res) => {
+  clearSkillBrowserSession();
+  res.json({ success: true });
+});
+
+app.get('/api/browser-session', (req, res) => {
+  const session = getSkillBrowserSession();
+  res.json(session || { active: false });
+});
+
 // ── Start Server ─────────────────────────────────────────────────────
-// ── Browserbase CDP Proxy ───────────────────────────────────────────
-// OpenClaw expects a standard HTTP CDP endpoint (http://host:port) for browser
-// profiles, but Browserbase provides a WebSocket URL (wss://connect.browserbase.com/...).
-// This lightweight proxy bridges the gap:
-//   1. Serves /json/version (so OpenClaw's reachability check passes)
-//   2. Proxies WebSocket connections to Browserbase's WSS endpoint
-//   3. Runs on the host; OpenClaw reaches it via host.docker.internal
-import { createServer as createHttpServer } from 'http';
-
-const CDP_PROXY_PORT = 18880;
-let cdpProxyServer = null;
-let cdpProxyWsTarget = null; // The Browserbase WSS connect URL
-const cdpProxyBrowserId = 'browserbase-' + Math.random().toString(36).slice(2, 10);
-
-function startCdpProxy(browserbaseConnectUrl) {
-  cdpProxyWsTarget = browserbaseConnectUrl;
-
-  if (cdpProxyServer) {
-    // Already running — just update the target URL
-    console.log(`[cdp-proxy] Updated target → ${browserbaseConnectUrl.substring(0, 60)}...`);
-    return;
-  }
-
-  const httpServer = createHttpServer((req, res) => {
-    // Serve standard Chrome DevTools JSON endpoints
-    if (req.url === '/json/version' || req.url === '/json/version/') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        Browser: 'Browserbase/1.0',
-        'Protocol-Version': '1.3',
-        'User-Agent': 'Browserbase',
-        'V8-Version': '0.0',
-        'WebKit-Version': '0.0',
-        webSocketDebuggerUrl: `ws://127.0.0.1:${CDP_PROXY_PORT}/devtools/browser/${cdpProxyBrowserId}`,
-      }));
-      return;
-    }
-    if (req.url === '/json' || req.url === '/json/list') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end('[]');
-      return;
-    }
-    res.writeHead(404);
-    res.end();
-  });
-
-  // Proxy WebSocket connections to Browserbase
-  const proxyWss = new WebSocketServer({ server: httpServer });
-  proxyWss.on('connection', (clientWs) => {
-    if (!cdpProxyWsTarget) {
-      clientWs.close(1011, 'No Browserbase session active');
-      return;
-    }
-    console.log(`[cdp-proxy] Proxying CDP connection → Browserbase`);
-    const remoteWs = new WebSocket(cdpProxyWsTarget);
-
-    remoteWs.on('open', () => {
-      clientWs.on('message', (data) => {
-        if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(data);
-      });
-      remoteWs.on('message', (data) => {
-        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
-      });
-    });
-
-    remoteWs.on('error', (err) => {
-      console.warn(`[cdp-proxy] Browserbase WS error: ${err.message}`);
-      clientWs.close(1011, 'Browserbase connection error');
-    });
-    remoteWs.on('close', () => clientWs.close());
-    clientWs.on('close', () => {
-      if (remoteWs.readyState === WebSocket.OPEN) remoteWs.close();
-    });
-    clientWs.on('error', () => {
-      if (remoteWs.readyState === WebSocket.OPEN) remoteWs.close();
-    });
-  });
-
-  httpServer.listen(CDP_PROXY_PORT, '0.0.0.0', () => {
-    console.log(`[cdp-proxy] CDP proxy running on :${CDP_PROXY_PORT} → Browserbase`);
-  });
-  httpServer.on('error', (err) => {
-    console.warn(`[cdp-proxy] Failed to start: ${err.message}`);
-    cdpProxyServer = null;
-  });
-  cdpProxyServer = httpServer;
-}
-
-function stopCdpProxy() {
-  cdpProxyWsTarget = null;
-  // Don't close the server — reuse for next session
-}
-
-// ── Browserbase Integration ─────────────────────────────────────────
-// On-demand managed cloud browser: proxy rotation, CAPTCHA solving, stealth.
-// Creates a session per browser task, destroys when done. Saves money.
-// Bridge runs a local CDP proxy (port 18880) so OpenClaw can connect via standard HTTP CDP.
-const BROWSERBASE_API_KEY = process.env.BROWSERBASE_API_KEY || '';
-const BROWSERBASE_PROJECT_ID = process.env.BROWSERBASE_PROJECT_ID || '';
-const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
-
-let browserbaseSession = null; // { id, connectUrl, liveViewUrl, createdAt, refCount }
-
-async function browserbaseApiRequest(method, path, body) {
-  const res = await fetch(`${BROWSERBASE_API_URL}${path}`, {
-    method,
-    headers: { 'Content-Type': 'application/json', 'x-bb-api-key': BROWSERBASE_API_KEY },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Browserbase ${method} ${path} failed (${res.status}): ${text}`);
-  }
-  const ct = res.headers.get('content-type');
-  return ct && ct.includes('application/json') ? res.json() : null;
-}
-
-// Write the local CDP proxy URL into OpenClaw's config (standard HTTP endpoint)
-// The proxy handles /json/version and forwards WebSocket CDP to Browserbase.
-function writeBrowserbaseProfile(connectUrl) {
-  try {
-    // Start/update the local CDP proxy to target this Browserbase session
-    startCdpProxy(connectUrl);
-
-    // Point OpenClaw at the local CDP proxy via host.docker.internal
-    const localCdpUrl = `http://host.docker.internal:${CDP_PROXY_PORT}`;
-    const configPath = '/opt/openclaw-data/config/openclaw.json';
-    const config = JSON.parse(readFileSync(configPath, 'utf8'));
-    if (!config.browser) config.browser = {};
-    if (!config.browser.profiles) config.browser.profiles = {};
-    config.browser.profiles.browserbase = { cdpUrl: localCdpUrl, color: '#00AA00' };
-    config.browser.defaultProfile = 'browserbase';
-    config.browser.remoteCdpTimeoutMs = 5000;
-    config.browser.remoteCdpHandshakeTimeoutMs = 8000;
-    writeFileSync(configPath, JSON.stringify(config, null, 2));
-    try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
-    // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
-    // Container volume: /opt/openclaw-data/config (host) → /home/node/.openclaw (container)
-    try { execSync('docker exec openclaw-openclaw-gateway-1 touch /home/node/.openclaw/openclaw.json', { timeout: 3000 }); } catch {}
-    console.log(`[browserbase] Config updated: defaultProfile=browserbase, cdpUrl=${localCdpUrl}`);
-  } catch (e) {
-    console.error('[browserbase] Failed to update openclaw.json:', e.message);
-  }
-}
-
-// Revert OpenClaw to built-in Chrome when no Browserbase session is active
-function revertToBuiltinBrowser() {
-  stopCdpProxy();
-  try {
-    const configPath = '/opt/openclaw-data/config/openclaw.json';
-    const config = JSON.parse(readFileSync(configPath, 'utf8'));
-    if (config.browser?.defaultProfile === 'browserbase') {
-      config.browser.defaultProfile = 'openclaw';
-      writeFileSync(configPath, JSON.stringify(config, null, 2));
-      try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
-      // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
-      // Container volume: /opt/openclaw-data/config (host) → /home/node/.openclaw (container)
-      try { execSync('docker exec openclaw-openclaw-gateway-1 touch /home/node/.openclaw/openclaw.json', { timeout: 3000 }); } catch {}
-      console.log('[browserbase] Reverted to built-in Chrome profile');
-    }
-  } catch (e) { /* ignore */ }
-}
-
-// Create a new Browserbase session (on-demand, per browser task)
-async function acquireBrowserbaseSession() {
-  if (!BROWSERBASE_API_KEY || !BROWSERBASE_PROJECT_ID) return null;
-
-  // Reuse existing session if still active (multiple tools in same task)
-  if (browserbaseSession && (Date.now() - browserbaseSession.createdAt) < 10 * 60 * 1000) {
-    browserbaseSession.refCount++;
-    return browserbaseSession;
-  }
-
-  console.log('[browserbase] Creating on-demand browser session...');
-  // First try with proxies (requires Hobby plan+), fall back without if 403
-  let session;
-  try {
-    session = await browserbaseApiRequest('POST', '/sessions', {
-      projectId: BROWSERBASE_PROJECT_ID,
-      keepAlive: true,
-      timeout: 600,
-      proxies: true,
-      browserSettings: { blockAds: true, viewport: { width: 1920, height: 1080 } },
-    });
-  } catch (e) {
-    if (e.message.includes('403') || e.message.includes('Forbidden') || e.message.includes('plan')) {
-      console.log('[browserbase] Proxies not available on plan, retrying without proxies...');
-      session = await browserbaseApiRequest('POST', '/sessions', {
-        projectId: BROWSERBASE_PROJECT_ID,
-        keepAlive: true,
-        timeout: 600,
-        browserSettings: { viewport: { width: 1920, height: 1080 } },
-      });
-    } else {
-      throw e;
-    }
-  }
-
-  // Get live debug URL
-  let liveViewUrl = null;
-  try {
-    const debug = await browserbaseApiRequest('GET', `/sessions/${session.id}/debug`);
-    liveViewUrl = debug?.debuggerFullscreenUrl || debug?.debuggerUrl || null;
-  } catch (e) {
-    liveViewUrl = `https://www.browserbase.com/sessions/${session.id}`;
-  }
-
-  browserbaseSession = {
-    id: session.id,
-    connectUrl: session.connectUrl,
-    liveViewUrl,
-    createdAt: Date.now(),
-    refCount: 1,
-  };
-
-  console.log(`[browserbase] Session ready: ${session.id} (10min timeout)`);
-  console.log(`[browserbase] Live view: ${liveViewUrl}`);
-
-  // Write to OpenClaw config — gateway hot-reloads, no restart needed
-  writeBrowserbaseProfile(session.connectUrl);
-
-  return browserbaseSession;
-}
-
-// Release a Browserbase session (called when browser tool completes)
-async function releaseBrowserbaseSession() {
-  if (!browserbaseSession) return;
-
-  browserbaseSession.refCount--;
-  if (browserbaseSession.refCount > 0) return; // Still in use by another tool
-
-  const sessionId = browserbaseSession.id;
-  browserbaseSession = null;
-
-  console.log(`[browserbase] Releasing session ${sessionId}`);
-  try {
-    // Browserbase API: update session status to REQUEST_RELEASE (no /stop endpoint)
-    await browserbaseApiRequest('POST', `/sessions/${sessionId}`, {
-      status: 'REQUEST_RELEASE',
-      projectId: BROWSERBASE_PROJECT_ID,
-    });
-  } catch (e) {
-    console.warn(`[browserbase] Failed to stop session: ${e.message}`);
-  }
-
-  // Revert OpenClaw to built-in Chrome
-  revertToBuiltinBrowser();
-}
-
-function getBrowserbaseLiveViewUrl() {
-  return browserbaseSession?.liveViewUrl || null;
-}
-
-function isBrowserbaseConfigured() {
-  // Reject template placeholders like "{{BROWSERBASE_API_KEY}}" that weren't substituted
-  const isTemplate = (v) => !v || /^\{\{.*\}\}$/.test(v.trim());
-  return !!(BROWSERBASE_API_KEY && BROWSERBASE_PROJECT_ID && !isTemplate(BROWSERBASE_API_KEY) && !isTemplate(BROWSERBASE_PROJECT_ID));
-}
-
 server.listen(PORT, '0.0.0.0', () => {
- console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browserbase: ${isBrowserbaseConfigured() ? 'configured' : 'not configured (will use local Chrome)'}`);
+ console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: skill-based (install browserbase skill from ClawHub)`);
 });
