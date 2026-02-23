@@ -861,8 +861,9 @@ async function handleIncomingTask(req, res) {
      const bbSession = await acquireBrowserbaseSession();
      if (bbSession) {
        browserbaseAcquired = true;
-       // Wait for gateway to hot-reload config after inotify touch
-       await new Promise(r => setTimeout(r, 1500));
+       // Wait for gateway to hot-reload config after docker touch + inotify + chokidar
+       // Observed reload latency is ~2s; 3s gives safe margin.
+       await new Promise(r => setTimeout(r, 3000));
      }
    } catch (e) {
      console.warn(`[browserbase] On-demand session failed: ${e.message}`);
@@ -954,8 +955,9 @@ async function handleIncomingTaskStream(req, res) {
      const bbSession = await acquireBrowserbaseSession();
      if (bbSession) {
        browserbaseAcquired = true;
-       // Wait for gateway to hot-reload config after inotify touch
-       await new Promise(r => setTimeout(r, 1500));
+       // Wait for gateway to hot-reload config after docker touch + inotify + chokidar
+       // Observed reload latency is ~2s; 3s gives safe margin.
+       await new Promise(r => setTimeout(r, 3000));
        console.log(`[browserbase] Session acquired — browser tools will use Browserbase`);
      } else {
        console.log(`[browserbase] acquireBrowserbaseSession() returned null — using built-in Chrome`);
@@ -2789,13 +2791,15 @@ const CDP_PROXY_PORT = 18880;
 let cdpProxyServer = null;
 let cdpProxyWsTarget = null; // The Browserbase WSS connect URL
 const cdpProxyBrowserId = 'browserbase-' + Math.random().toString(36).slice(2, 10);
+let _warmRemoteWs = null; // Pre-warmed Browserbase WebSocket connection
 
 function startCdpProxy(browserbaseConnectUrl) {
   cdpProxyWsTarget = browserbaseConnectUrl;
 
   if (cdpProxyServer) {
-    // Already running — just update the target URL
+    // Already running — just update the target URL and pre-warm
     console.log(`[cdp-proxy] Updated target → ${browserbaseConnectUrl.substring(0, 60)}...`);
+    preWarmBrowserbaseWs();
     return;
   }
 
@@ -2823,22 +2827,51 @@ function startCdpProxy(browserbaseConnectUrl) {
   });
 
   // Proxy WebSocket connections to Browserbase
+  // Uses pre-warmed connection when available to eliminate handshake latency.
+  // Buffers client messages until upstream is ready to avoid drops.
   const proxyWss = new WebSocketServer({ server: httpServer });
   proxyWss.on('connection', (clientWs) => {
     if (!cdpProxyWsTarget) {
       clientWs.close(1011, 'No Browserbase session active');
       return;
     }
-    console.log(`[cdp-proxy] Proxying CDP connection → Browserbase`);
-    const remoteWs = new WebSocket(cdpProxyWsTarget);
+
+    // Try to reuse a pre-warmed Browserbase connection (saves 2-5s handshake)
+    let remoteWs;
+    if (_warmRemoteWs && _warmRemoteWs.readyState === WebSocket.OPEN) {
+      remoteWs = _warmRemoteWs;
+      _warmRemoteWs = null;
+      console.log(`[cdp-proxy] Proxying CDP connection → Browserbase (pre-warmed)`);
+    } else {
+      if (_warmRemoteWs) { try { _warmRemoteWs.terminate(); } catch {} _warmRemoteWs = null; }
+      remoteWs = new WebSocket(cdpProxyWsTarget);
+      console.log(`[cdp-proxy] Proxying CDP connection → Browserbase (new)`);
+    }
+
+    // Buffer client messages until upstream is open
+    const pendingMessages = [];
+    let upstreamReady = remoteWs.readyState === WebSocket.OPEN;
+
+    clientWs.on('message', (data) => {
+      if (upstreamReady && remoteWs.readyState === WebSocket.OPEN) {
+        remoteWs.send(data);
+      } else {
+        pendingMessages.push(data);
+      }
+    });
 
     remoteWs.on('open', () => {
-      clientWs.on('message', (data) => {
-        if (remoteWs.readyState === WebSocket.OPEN) remoteWs.send(data);
-      });
-      remoteWs.on('message', (data) => {
-        if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
-      });
+      upstreamReady = true;
+      // Flush buffered messages
+      while (pendingMessages.length > 0) {
+        if (remoteWs.readyState === WebSocket.OPEN) {
+          remoteWs.send(pendingMessages.shift());
+        } else break;
+      }
+    });
+
+    remoteWs.on('message', (data) => {
+      if (clientWs.readyState === WebSocket.OPEN) clientWs.send(data);
     });
 
     remoteWs.on('error', (err) => {
@@ -2866,7 +2899,24 @@ function startCdpProxy(browserbaseConnectUrl) {
 
 function stopCdpProxy() {
   cdpProxyWsTarget = null;
+  if (_warmRemoteWs) { try { _warmRemoteWs.terminate(); } catch {} _warmRemoteWs = null; }
   // Don't close the server — reuse for next session
+}
+
+// Pre-warm a WebSocket connection to Browserbase so the first CDP request
+// from the gateway doesn't pay the full TLS + handshake cost (2-5s savings).
+function preWarmBrowserbaseWs() {
+  if (!cdpProxyWsTarget) return;
+  if (_warmRemoteWs) { try { _warmRemoteWs.terminate(); } catch {} _warmRemoteWs = null; }
+  _warmRemoteWs = new WebSocket(cdpProxyWsTarget);
+  _warmRemoteWs.on('open', () => {
+    console.log('[cdp-proxy] Pre-warmed WebSocket connection to Browserbase');
+  });
+  _warmRemoteWs.on('error', (err) => {
+    console.warn(`[cdp-proxy] Pre-warm WS error: ${err.message}`);
+    _warmRemoteWs = null;
+  });
+  _warmRemoteWs.on('close', () => { _warmRemoteWs = null; });
 }
 
 // ── Browserbase Integration ─────────────────────────────────────────
@@ -2909,15 +2959,21 @@ function writeBrowserbaseProfile(connectUrl) {
     config.browser.profiles.browserbase = { cdpUrl: localCdpUrl, color: '#00AA00' };
     config.browser.defaultProfile = 'browserbase';
     // Browserbase cloud sessions have higher latency than local Chrome.
-    // The default 1500/3000ms is for local; 5000/8000 still too low for remote.
-    config.browser.remoteCdpTimeoutMs = 15000;
-    config.browser.remoteCdpHandshakeTimeoutMs = 25000;
+    // The default 1500/3000ms is for local Chrome on loopback.
+    // These MUST fit within the gateway's 20s browser-tool client timeout.
+    // HTTP check (~1-3s) + WS handshake (~2-5s) + operation leaves ~8-12s headroom.
+    config.browser.remoteCdpTimeoutMs = 8000;
+    config.browser.remoteCdpHandshakeTimeoutMs = 10000;
     writeFileSync(configPath, JSON.stringify(config, null, 2));
     try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
     // Touch file from INSIDE container to trigger chokidar inotify (host writes may not propagate)
     // Container volume: /opt/openclaw-data/config (host) → /home/node/.openclaw (container)
     try { execSync('docker exec openclaw-openclaw-gateway-1 touch /home/node/.openclaw/openclaw.json', { timeout: 3000 }); } catch {}
     console.log(`[browserbase] Config updated: defaultProfile=browserbase, cdpUrl=${localCdpUrl}`);
+
+    // Pre-warm a WebSocket connection to Browserbase so the first browser tool
+    // call from the gateway doesn't pay the full handshake cost.
+    preWarmBrowserbaseWs();
   } catch (e) {
     console.error('[browserbase] Failed to update openclaw.json:', e.message);
   }
