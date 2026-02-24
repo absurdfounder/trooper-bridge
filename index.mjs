@@ -8,7 +8,8 @@ import { EventEmitter } from 'events';
 import { execSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { randomUUID, generateKeyPairSync, createHash, createPrivateKey, createPublicKey, sign } from 'crypto';
-import { dirname } from 'path';
+import path from 'path';
+const { dirname } = path;
 import WebSocket from 'ws';
 
 // Browser tool names that trigger live screenshot streaming
@@ -1255,6 +1256,48 @@ app.get('/health', (req, res) => {
  pending: pendingRequests.size, skills: skillRegistry.size,
  uptime: process.uptime(),
  });
+});
+
+// ── Write files to agent workspace (supports subdirectories) ─────────
+app.post('/files/write', (req, res) => {
+ const { agentName, files } = req.body;
+ if (!files || !Array.isArray(files) || files.length === 0) {
+   return res.status(400).json({ error: 'files array required: [{ path, content }]' });
+ }
+ const name = agentName || 'main';
+ let basePath;
+ if (name === 'main' || name === 'Team Lead') {
+   basePath = '/opt/openclaw-data/workspace';
+ } else {
+   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+   const agentId = slug.startsWith('spc-') ? slug : 'spc-' + slug;
+   basePath = `/opt/openclaw-data/config/agents/${agentId}/workspace`;
+ }
+ try {
+   let written = 0;
+   for (const file of files) {
+     const { path: filePath, content, encoding } = file;
+     if (!filePath || typeof content !== 'string') continue;
+     // Security: prevent path traversal
+     const resolved = path.resolve(basePath, filePath);
+     if (!resolved.startsWith(basePath)) continue;
+     const dir = path.dirname(resolved);
+     execSync(`mkdir -p "${dir}"`, { timeout: 5000 });
+     if (encoding === 'base64') {
+       writeFileSync(resolved, Buffer.from(content, 'base64'));
+     } else {
+       writeFileSync(resolved, content);
+     }
+     written++;
+   }
+   if (written > 0) {
+     try { execSync(`chown -R 1000:1000 "${basePath}"`, { timeout: 5000 }); } catch {}
+   }
+   console.log(`📁 Wrote ${written} files to ${name}'s workspace`);
+   res.json({ success: true, written });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
 });
 
 app.post('/webhook/crabhq', handleIncomingTask);
