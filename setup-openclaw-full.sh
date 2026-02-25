@@ -257,7 +257,7 @@ ${HTTPS_DOMAIN} {
  handle_path /desktop-vnc/* {
  reverse_proxy 127.0.0.1:6081
  }
- handle /playwright-ws/* {
+ handle_path /playwright-ws/* {
  reverse_proxy 127.0.0.1:3333
  }
  handle /desktop-api/* {
