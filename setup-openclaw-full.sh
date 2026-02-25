@@ -1184,6 +1184,108 @@ dlog "Installing noVNC + websockify for live browser streaming..."
 apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
 echo "[setup] noVNC + websockify installed for VNC live view"
 
+# ── Desktop (LXQt) setup — manual use via CrabsHQ Desktop panel ──────────────
+dlog "Installing desktop packages (LXQt, x11vnc)..."
+apt-get install -y -qq --no-install-recommends \
+  xorg openbox x11vnc xterm \
+  lxqt-core lxqt-panel lxqt-runner \
+  fonts-dejavu fonts-liberation \
+  xdg-utils 2>/dev/null || true
+echo "[setup] LXQt desktop packages installed"
+
+# Desktop start script — called by control API
+cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
+#!/bin/bash
+# Start LXQt on display :1 + x11vnc + websockify on port 6081
+# Display :99 is reserved for AI browser (existing VNC live view)
+set -e
+
+# Start Xorg on display :1
+if ! pgrep -f "Xorg :1" > /dev/null 2>&1; then
+  Xorg :1 -screen 0 1280x800x24 -ac +extension RANDR &
+  sleep 3
+fi
+
+export DISPLAY=:1
+
+# Start LXQt session
+if ! pgrep -f "lxqt-session" > /dev/null 2>&1; then
+  DISPLAY=:1 lxqt-session &
+  sleep 2
+fi
+
+# Start x11vnc on display :1, port 5901
+if ! pgrep -f "x11vnc.*5901" > /dev/null 2>&1; then
+  x11vnc -display :1 -forever -nopw -shared -rfbport 5901 -bg \
+    -o /var/log/x11vnc-desktop.log -quiet 2>/dev/null
+  sleep 1
+fi
+
+# Start websockify bridging port 6081 → VNC 5901
+if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
+  websockify --web=/usr/share/novnc 6081 localhost:5901 &
+fi
+
+echo "Desktop started on :1, noVNC on port 6081"
+DSTART
+chmod +x /usr/local/bin/crabhq-desktop-start
+
+# Desktop stop script
+cat > /usr/local/bin/crabhq-desktop-stop << 'DSTOP'
+#!/bin/bash
+pkill -f "websockify.*6081" 2>/dev/null || true
+pkill -f "x11vnc.*5901"     2>/dev/null || true
+pkill -f "lxqt-session"     2>/dev/null || true
+pkill -f "Xorg :1"          2>/dev/null || true
+echo "Desktop stopped"
+DSTOP
+chmod +x /usr/local/bin/crabhq-desktop-stop
+
+# Desktop control API — tiny Node.js HTTP server on port 4567
+mkdir -p /opt/crabhq-desktop-api
+cat > /opt/crabhq-desktop-api/server.mjs << 'JSEOF'
+import http from 'http';
+import { exec } from 'child_process';
+
+const PORT = 4567;
+
+const run = (cmd) => new Promise((res, rej) =>
+  exec(cmd, (err, out) => err ? rej(err.message) : res(out.trim()))
+);
+const running = (pat) => new Promise(res =>
+  exec(`pgrep -f "${pat}"`, err => res(!err))
+);
+
+http.createServer(async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const url = new URL(req.url, `http://localhost`);
+  try {
+    if (req.method === 'POST' && url.pathname === '/desktop/start') {
+      await run('/usr/local/bin/crabhq-desktop-start');
+      res.end(JSON.stringify({ ok: true }));
+    } else if (req.method === 'POST' && url.pathname === '/desktop/stop') {
+      await run('/usr/local/bin/crabhq-desktop-stop');
+      res.end(JSON.stringify({ ok: true }));
+    } else if (req.method === 'GET' && url.pathname === '/desktop/status') {
+      const [novnc, vnc, lxqt] = await Promise.all([
+        running('websockify.*6081'),
+        running('x11vnc.*5901'),
+        running('lxqt-session'),
+      ]);
+      res.end(JSON.stringify({ active: novnc && vnc, novnc, vnc, lxqt }));
+    } else {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: 'not found' }));
+    }
+  } catch (err) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: String(err) }));
+  }
+}).listen(PORT, '0.0.0.0', () => console.log(`[desktop-api] :${PORT}`));
+JSEOF
+
+echo "[setup] Desktop control API written to /opt/crabhq-desktop-api/server.mjs"
+
 # Wait for parallel tasks to complete
 dlog "Waiting for bridge npm install..."
 wait $BRIDGE_NPM_PID 2>/dev/null || {
@@ -1319,8 +1421,25 @@ console.log('Pre-approved device: ' + deviceId.substring(0, 12) + '...');
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
 
+# Desktop Control API service (port 4567)
+cat > /etc/systemd/system/crabhq-desktop-api.service << 'DAPI'
+[Unit]
+Description=CrabsHQ Desktop Control API
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/crabhq-desktop-api/server.mjs
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+DAPI
+
 systemctl daemon-reload
-systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc
+systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop-api
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
@@ -1350,6 +1469,7 @@ fi
 systemctl start openclaw-bridge
 systemctl start openclaw-poller
 systemctl start openclaw-vnc
+systemctl start crabhq-desktop-api
 systemctl restart caddy 2>/dev/null || true
 
 # Brief settle time, then verify
