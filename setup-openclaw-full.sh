@@ -257,6 +257,13 @@ ${HTTPS_DOMAIN} {
  handle_path /desktop-vnc/* {
  reverse_proxy 127.0.0.1:6081
  }
+ handle /playwright-ws/* {
+ reverse_proxy 127.0.0.1:3333
+ }
+ handle /desktop-api/* {
+ uri strip_prefix /desktop-api
+ reverse_proxy 127.0.0.1:4567
+ }
  handle {
  reverse_proxy 127.0.0.1:${GATEWAY_PORT}
  }
@@ -1188,12 +1195,15 @@ apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || t
 echo "[setup] noVNC + websockify installed for VNC live view"
 
 # ── Desktop (LXQt) setup — manual use via CrabsHQ Desktop panel ──────────────
-dlog "Installing desktop packages (LXQt, x11vnc)..."
+dlog "Installing desktop packages (LXQt, x11vnc, apps)..."
 apt-get install -y -qq --no-install-recommends \
   xvfb xorg openbox x11vnc xterm \
   lxqt-core lxqt-panel lxqt-runner \
+  pcmanfm-qt feh papirus-icon-theme \
   fonts-dejavu fonts-liberation \
-  xdg-utils 2>/dev/null || true
+  xdg-utils wget 2>/dev/null || true
+# Install snap Firefox (Ubuntu 24.04 doesn't have firefox-esr deb)
+snap install firefox 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
 
 # Pre-seed LXQt session config (openbox as WM, skip first-run dialog)
@@ -1249,6 +1259,15 @@ if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
   sleep 1
 fi
 
+# Set wallpaper
+feh --bg-fill /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
+
+# Start pcmanfm-qt in desktop mode (shows icons)
+if ! pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then
+  nohup pcmanfm-qt --desktop > /var/log/pcmanfm-desktop.log 2>&1 &
+  sleep 1
+fi
+
 # Start websockify bridging port 6081 → VNC 5901
 if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
   nohup websockify --web=/usr/share/novnc 6081 localhost:5901 \
@@ -1270,13 +1289,16 @@ echo "Desktop stopped"
 DSTOP
 chmod +x /usr/local/bin/crabhq-desktop-stop
 
-# Desktop control API — tiny Node.js HTTP server on port 4567
+# Desktop control API — Node.js HTTP server on port 4567
 mkdir -p /opt/crabhq-desktop-api
 cat > /opt/crabhq-desktop-api/server.mjs << 'JSEOF'
 import http from 'http';
 import { exec } from 'child_process';
+import { readFileSync } from 'fs';
 
 const PORT = 4567;
+const TOKEN_FILE = '/tmp/playwright-ws-token';
+const GATEWAY_URL = process.env.GATEWAY_URL || '';
 
 const run = (cmd) => new Promise((res, rej) =>
   exec(cmd, (err, out) => err ? rej(err.message) : res(out.trim()))
@@ -1287,6 +1309,7 @@ const running = (pat) => new Promise(res =>
 
 http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
   const url = new URL(req.url, `http://localhost`);
   try {
     if (req.method === 'POST' && url.pathname === '/desktop/start') {
@@ -1302,6 +1325,15 @@ http.createServer(async (req, res) => {
         running('lxqt-session'),
       ]);
       res.end(JSON.stringify({ active: novnc && vnc, novnc, vnc, lxqt }));
+    } else if (req.method === 'GET' && url.pathname === '/browser/endpoint') {
+      try {
+        const token = readFileSync(TOKEN_FILE, 'utf8').trim();
+        const wsUrl = `${GATEWAY_URL.replace('https://', 'wss://')}/playwright-ws/${token}`;
+        res.end(JSON.stringify({ wsEndpoint: wsUrl, ready: true }));
+      } catch {
+        res.writeHead(503);
+        res.end(JSON.stringify({ ready: false, error: 'Playwright server not ready' }));
+      }
     } else {
       res.writeHead(404);
       res.end(JSON.stringify({ error: 'not found' }));
@@ -1312,8 +1344,127 @@ http.createServer(async (req, res) => {
   }
 }).listen(PORT, '0.0.0.0', () => console.log(`[desktop-api] :${PORT}`));
 JSEOF
+echo "[setup] Desktop control API written"
 
-echo "[setup] Desktop control API written to /opt/crabhq-desktop-api/server.mjs"
+# Install Playwright for VPS browser server
+cd /opt/crabhq-desktop-api
+npm init -y 2>/dev/null
+npm install playwright 2>/dev/null || true
+echo "[setup] Playwright installed"
+
+# Playwright browser server — launches Chromium on :1, exposes WS for Render backend
+cat > /opt/crabhq-desktop-api/playwright-server.mjs << 'PWEOF'
+import { chromium } from 'playwright';
+import { writeFileSync } from 'fs';
+
+const PORT = 3333;
+const TOKEN_FILE = '/tmp/playwright-ws-token';
+let retryCount = 0;
+
+async function startServer() {
+  try {
+    const server = await chromium.launchServer({
+      headless: false,
+      executablePath: '/usr/bin/chromium-browser',
+      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--window-size=1280,800'],
+      env: { ...process.env, DISPLAY: ':1', XAUTHORITY: '/root/.Xauthority' },
+      port: PORT,
+    });
+    const token = server.wsEndpoint().split('/').pop();
+    writeFileSync(TOKEN_FILE, token, 'utf8');
+    console.log(`[playwright-server] Ready — token: ${token}`);
+    retryCount = 0;
+    server.process().on('exit', () => {
+      console.log('[playwright-server] Chromium exited, restarting in 3s...');
+      setTimeout(startServer, 3000);
+    });
+  } catch (err) {
+    retryCount++;
+    const delay = Math.min(retryCount * 2000, 30000);
+    console.error(`[playwright-server] Failed (attempt ${retryCount}): ${err.message}`);
+    setTimeout(startServer, delay);
+  }
+}
+startServer();
+PWEOF
+echo "[setup] Playwright server script written"
+
+# Download wallpaper
+mkdir -p /usr/local/share
+wget -q 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1280&h=800&fit=crop' \
+  -O /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
+
+# Configure pcmanfm-qt desktop (wallpaper + single-click + Papirus icons)
+mkdir -p /root/.config/pcmanfm-qt/default
+cat > /root/.config/pcmanfm-qt/default/settings.conf << 'PCMANCONF'
+[Behavior]
+SingleClick=true
+QuickExec=true
+
+[Desktop]
+Wallpaper=/usr/local/share/crabhq-wallpaper.jpg
+WallpaperMode=zoom
+DesktopIconSize=48
+FgColor=#ffffff
+ShadowColor=#000000
+WorkAreaMargins=12, 12, 12, 12
+
+[System]
+FallbackIconThemeName=Papirus
+Terminal=xterm
+PCMANCONF
+
+# Desktop icons
+mkdir -p /root/Desktop
+cat > /root/Desktop/firefox.desktop << 'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Firefox
+Exec=/snap/bin/firefox
+Icon=firefox-bin
+Terminal=false
+EOF
+cat > /root/Desktop/files.desktop << 'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Files
+Exec=pcmanfm-qt
+Icon=system-file-manager
+Terminal=false
+EOF
+cat > /root/Desktop/terminal.desktop << 'EOF'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Terminal
+Exec=xterm
+Icon=utilities-terminal
+Terminal=false
+EOF
+chmod +x /root/Desktop/*.desktop
+
+# Openbox right-click menu
+mkdir -p /root/.config/openbox
+cat > /root/.config/openbox/menu.xml << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="Desktop Menu">
+    <item label="Firefox"><action name="Execute"><command>/snap/bin/firefox</command></action></item>
+    <item label="Files"><action name="Execute"><command>pcmanfm-qt</command></action></item>
+    <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>
+    <separator />
+    <item label="Reconfigure"><action name="Reconfigure" /></item>
+  </menu>
+</openbox_menu>
+EOF
+
+# Hide noVNC sidebar by default
+sed -i 's|</head>|<style>#noVNC_control_bar_anchor { display: none !important; }</style>\n</head>|' \
+  /usr/share/novnc/vnc.html 2>/dev/null || true
+
+echo "[setup] Desktop UI configured (wallpaper, icons, menu, noVNC sidebar hidden)"
 
 # Wait for parallel tasks to complete
 dlog "Waiting for bridge npm install..."
@@ -1451,13 +1602,14 @@ console.log('Pre-approved device: ' + deviceId.substring(0, 12) + '...');
 chown -R 1000:1000 /opt/openclaw-data
 
 # Desktop Control API service (port 4567)
-cat > /etc/systemd/system/crabhq-desktop-api.service << 'DAPI'
+cat > /etc/systemd/system/crabhq-desktop-api.service << DAPI
 [Unit]
 Description=CrabsHQ Desktop Control API
 After=network.target
 
 [Service]
 ExecStart=/usr/bin/node /opt/crabhq-desktop-api/server.mjs
+Environment=GATEWAY_URL=https://${HTTPS_DOMAIN}
 Restart=always
 RestartSec=3
 StandardOutput=journal
@@ -1467,8 +1619,27 @@ StandardError=journal
 WantedBy=multi-user.target
 DAPI
 
+# Playwright browser server service (port 3333)
+cat > /etc/systemd/system/crabhq-playwright.service << 'PWSVC'
+[Unit]
+Description=CrabHQ Playwright Browser Server
+After=network.target crabhq-desktop-api.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/node /opt/crabhq-desktop-api/playwright-server.mjs
+WorkingDirectory=/opt/crabhq-desktop-api
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=/root/.Xauthority
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+PWSVC
+
 systemctl daemon-reload
-systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop-api
+systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop-api crabhq-playwright
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
@@ -1499,6 +1670,7 @@ systemctl start openclaw-bridge
 systemctl start openclaw-poller
 systemctl start openclaw-vnc
 systemctl start crabhq-desktop-api
+systemctl start crabhq-playwright
 systemctl restart caddy 2>/dev/null || true
 
 # Brief settle time, then verify
