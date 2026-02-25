@@ -1211,6 +1211,15 @@ fi
 
 export DISPLAY=:1
 
+# Pre-seed LXQt config to avoid first-run "choose window manager" dialog
+mkdir -p /root/.config/lxqt
+if [ ! -f /root/.config/lxqt/session.conf ]; then
+  cat > /root/.config/lxqt/session.conf << 'LXQTCFG'
+[General]
+window_manager=openbox
+LXQTCFG
+fi
+
 # Start LXQt session
 if ! pgrep -f "lxqt-session" > /dev/null 2>&1; then
   DISPLAY=:1 lxqt-session &
