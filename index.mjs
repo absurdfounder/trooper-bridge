@@ -132,7 +132,7 @@ app.use(express.json({ limit: '5mb' }));
 
 // Auth middleware — exempt health/deploy-logs (needed during provisioning)
 app.use((req, res, next) => {
- if (req.path === '/health' || req.path === '/deploy-logs' || req.path === '/files' || req.path.startsWith('/api/proxy/') || req.path.startsWith('/files/')) return next();
+ if (req.path === '/health' || req.path === '/deploy-logs' || req.path === '/files' || req.path === '/llm/vision' || req.path.startsWith('/api/proxy/') || req.path.startsWith('/files/')) return next();
  if (!BRIDGE_AUTH_TOKEN) return next();
  const token = req.headers.authorization?.replace('Bearer ', '');
  if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
