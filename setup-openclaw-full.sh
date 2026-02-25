@@ -1224,16 +1224,22 @@ export DISPLAY=:1
 mkdir -p /root/.config/lxqt
 printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/lxqt/session.conf
 
-# Start openbox FIRST — lxqt-session detects it and skips the WM dialog
+# Start openbox first (WM must run before lxqt-session, no --display flag)
 if ! pgrep -f 'openbox' > /dev/null 2>&1; then
-  nohup openbox --display :1 > /var/log/openbox.log 2>&1 &
+  nohup openbox > /var/log/openbox.log 2>&1 &
   sleep 2
 fi
 
-# Start LXQt session (openbox already running, no dialog shown)
+# Start LXQt session (openbox already running, skips WM dialog)
 if ! pgrep -f 'lxqt-session' > /dev/null 2>&1; then
   nohup dbus-run-session lxqt-session > /var/log/lxqt.log 2>&1 &
   sleep 3
+fi
+
+# Explicitly start lxqt-panel (autostart unreliable in headless env)
+if ! pgrep -f 'lxqt-panel' > /dev/null 2>&1; then
+  nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
+  sleep 1
 fi
 
 # Start x11vnc on display :1, port 5901
