@@ -1208,45 +1208,43 @@ echo "[setup] LXQt session config pre-seeded (openbox WM)"
 cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
 #!/bin/bash
 # Start LXQt on display :1 + x11vnc + websockify on port 6081
-# Display :99 is reserved for AI browser (existing VNC live view)
-set -e
+# Display :99 is reserved for AI browser live view
 
-# Start Xorg on display :1
-if ! pgrep -f "Xorg :1" > /dev/null 2>&1; then
-  Xorg :1 -screen 0 1280x800x24 -ac +extension RANDR &
-  sleep 3
+# Start Xvfb on display :1
+if ! pgrep -f 'Xvfb :1' > /dev/null 2>&1; then
+  nohup Xvfb :1 -screen 0 1280x800x24 > /var/log/xvfb.log 2>&1 &
+  sleep 2
 fi
 
 export DISPLAY=:1
 
-# Pre-seed LXQt config to avoid first-run "choose window manager" dialog
+# Pre-seed LXQt config (no first-run dialog, no DBus warning)
 mkdir -p /root/.config/lxqt
-if [ ! -f /root/.config/lxqt/session.conf ]; then
-  cat > /root/.config/lxqt/session.conf << 'LXQTCFG'
+cat > /root/.config/lxqt/session.conf << 'LXQTCFG'
 [General]
 window_manager=openbox
 LXQTCFG
-fi
 
-# Start LXQt session
-if ! pgrep -f "lxqt-session" > /dev/null 2>&1; then
-  DISPLAY=:1 lxqt-session &
-  sleep 2
+# Start LXQt session with proper DBus session
+if ! pgrep -f 'lxqt-session' > /dev/null 2>&1; then
+  nohup dbus-run-session lxqt-session > /var/log/lxqt.log 2>&1 &
+  sleep 3
 fi
 
 # Start x11vnc on display :1, port 5901
-if ! pgrep -f "x11vnc.*5901" > /dev/null 2>&1; then
-  x11vnc -display :1 -forever -nopw -shared -rfbport 5901 -bg \
-    -o /var/log/x11vnc-desktop.log -quiet 2>/dev/null
+if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
+  nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 \
+    -o /var/log/x11vnc-desktop.log -quiet > /dev/null 2>&1 &
   sleep 1
 fi
 
 # Start websockify bridging port 6081 → VNC 5901
 if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
-  websockify --web=/usr/share/novnc 6081 localhost:5901 &
+  nohup websockify --web=/usr/share/novnc 6081 localhost:5901 \
+    > /var/log/websockify-desktop.log 2>&1 &
 fi
 
-echo "Desktop started on :1, noVNC on port 6081"
+echo 'Desktop started on :1, noVNC on port 6081'
 DSTART
 chmod +x /usr/local/bin/crabhq-desktop-start
 
