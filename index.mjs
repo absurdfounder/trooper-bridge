@@ -5,7 +5,7 @@ process.on('unhandledRejection', (err) => console.error('[Bridge] Unhandled reje
 import express from 'express';
 import cors from 'cors';
 import { EventEmitter } from 'events';
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { randomUUID, generateKeyPairSync, createHash, createPrivateKey, createPublicKey, sign } from 'crypto';
 import path from 'path';
@@ -1123,13 +1123,22 @@ async function handleIncomingTaskStream(req, res) {
 
  let screenshotPollerInterval = null;
 
+ // If this is a browser task (flagged by CrabsHQ), add a browser-focused system prompt
+ // to ensure the agent uses the browser tool even if the task description is ambiguous
+ const isBrowserTask = context?.browserTask === true;
+ let resolvedSystemPrompt = registered ? undefined : (systemPrompt || undefined);
+ if (isBrowserTask && !registered) {
+   const browserHint = 'You have a browser tool available. Use it to complete this task. Navigate to URLs, interact with pages, take screenshots, and report results. Use DuckDuckGo instead of Google for web searches (Google blocks automated browsers).';
+   resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${browserHint}` : browserHint;
+ }
+
  try {
- console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}...`);
+ console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${isBrowserTask ? ' [browser task]' : ''}...`);
  const { response, toolLog } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
- extraSystemPrompt: registered ? undefined : (systemPrompt || undefined),
+ extraSystemPrompt: resolvedSystemPrompt,
  timeoutMs: 180000,
  }, (event, data) => {
  // Forward each event to SSE as it arrives
@@ -1341,6 +1350,141 @@ app.post('/files/write', (req, res) => {
 app.post('/webhook/crabhq', handleIncomingTask);
 app.post('/webhook/mission-control', handleIncomingTask);
 app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
+
+// ── Screen Recording — ffmpeg x11grab on display :99 ─────────────────
+// Used by the develop → test → record → approve workflow.
+// POST /recording/start → start recording, returns sessionId
+// POST /recording/stop  → stop recording, returns file path
+// GET  /recording/download/:id → serve the recorded mp4
+
+const activeRecordings = new Map(); // sessionId → { process, filePath, startTime }
+
+app.post('/recording/start', (req, res) => {
+  const sessionId = req.body.sessionId || `rec-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+
+  if (activeRecordings.has(sessionId)) {
+    return res.json({ sessionId, status: 'already_recording' });
+  }
+
+  // Detect display geometry from Xvnc/Xvfb
+  let geometry = '1280x800';
+  try {
+    const xdpyInfo = execSync('DISPLAY=:99 xdpyinfo 2>/dev/null | grep dimensions', { encoding: 'utf8', timeout: 3000 });
+    const match = xdpyInfo.match(/(\d+x\d+)/);
+    if (match) geometry = match[1];
+  } catch {}
+
+  const filePath = `/tmp/recording-${sessionId}.mp4`;
+  const ffmpegArgs = [
+    '-video_size', geometry,
+    '-framerate', '15',
+    '-f', 'x11grab',
+    '-i', ':99',
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-crf', '28',
+    '-pix_fmt', 'yuv420p',
+    '-y', // overwrite
+    filePath,
+  ];
+
+  try {
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, DISPLAY: ':99' },
+    });
+
+    ffmpeg.stderr.on('data', (data) => {
+      // ffmpeg outputs progress to stderr — only log errors
+      const msg = data.toString();
+      if (msg.includes('Error') || msg.includes('error')) {
+        console.error(`[recording:${sessionId}] ffmpeg error: ${msg.trim()}`);
+      }
+    });
+
+    ffmpeg.on('error', (err) => {
+      console.error(`[recording:${sessionId}] ffmpeg spawn error: ${err.message}`);
+      activeRecordings.delete(sessionId);
+    });
+
+    ffmpeg.on('exit', (code) => {
+      console.log(`[recording:${sessionId}] ffmpeg exited with code ${code}`);
+    });
+
+    activeRecordings.set(sessionId, { process: ffmpeg, filePath, startTime: Date.now() });
+    console.log(`[recording] Started recording ${sessionId} → ${filePath} (${geometry})`);
+    res.json({ sessionId, filePath, geometry, status: 'recording' });
+  } catch (err) {
+    console.error(`[recording] Failed to start: ${err.message}`);
+    res.status(500).json({ error: `Failed to start recording: ${err.message}` });
+  }
+});
+
+app.post('/recording/stop', (req, res) => {
+  const sessionId = req.body.sessionId;
+  if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+
+  const recording = activeRecordings.get(sessionId);
+  if (!recording) return res.status(404).json({ error: 'No active recording with this sessionId' });
+
+  // Send SIGINT to ffmpeg for graceful shutdown (finalizes mp4 container)
+  try {
+    recording.process.kill('SIGINT');
+  } catch {}
+
+  // Wait briefly for ffmpeg to finalize the file
+  setTimeout(() => {
+    activeRecordings.delete(sessionId);
+    const duration = Math.round((Date.now() - recording.startTime) / 1000);
+    let fileSize = 0;
+    try {
+      const stat = execSync(`stat -c %s "${recording.filePath}" 2>/dev/null`, { encoding: 'utf8', timeout: 2000 });
+      fileSize = parseInt(stat.trim()) || 0;
+    } catch {}
+
+    console.log(`[recording] Stopped ${sessionId} — ${duration}s, ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
+    res.json({
+      sessionId,
+      filePath: recording.filePath,
+      duration,
+      fileSize,
+      downloadUrl: `/recording/download/${sessionId}`,
+      status: 'stopped',
+    });
+  }, 1500);
+});
+
+app.get('/recording/download/:id', (req, res) => {
+  const sessionId = req.params.id;
+  const filePath = `/tmp/recording-${sessionId}.mp4`;
+
+  try {
+    if (!existsSync(filePath)) {
+      return res.status(404).json({ error: 'Recording not found' });
+    }
+    const data = readFileSync(filePath);
+    res.set('Content-Type', 'video/mp4');
+    res.set('Content-Disposition', `inline; filename="recording-${sessionId}.mp4"`);
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.send(data);
+  } catch (err) {
+    res.status(500).json({ error: `Failed to serve recording: ${err.message}` });
+  }
+});
+
+// List active recordings
+app.get('/recording/status', (req, res) => {
+  const recordings = [];
+  for (const [sessionId, rec] of activeRecordings) {
+    recordings.push({
+      sessionId,
+      filePath: rec.filePath,
+      duration: Math.round((Date.now() - rec.startTime) / 1000),
+      status: 'recording',
+    });
+  }
+  res.json({ recordings });
+});
 
 // ── Agent CRUD — Create/Update/Delete SPC agents on OpenClaw ─────────
 
