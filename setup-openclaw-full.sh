@@ -1197,11 +1197,10 @@ apt-get install -y -qq --no-install-recommends \
 echo "[setup] LXQt desktop packages installed"
 
 # Pre-seed LXQt config so the first-run "choose window manager" dialog never appears
+# Both files + __userfile__=true are required for LXQt to skip the dialog
 mkdir -p /root/.config/lxqt
-cat > /root/.config/lxqt/session.conf << 'LXQTCFG'
-[General]
-window_manager=openbox
-LXQTCFG
+printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/lxqt/session.conf
+printf '[General]\n__userfile__=true\nwindowmanager=openbox\n' > /root/.config/lxqt/windowmanagers.conf
 echo "[setup] LXQt session config pre-seeded (openbox WM)"
 
 # Desktop start script — called by control API
@@ -1218,12 +1217,10 @@ fi
 
 export DISPLAY=:1
 
-# Pre-seed LXQt config (no first-run dialog, no DBus warning)
+# Pre-seed LXQt config — both files needed to suppress first-run dialog
 mkdir -p /root/.config/lxqt
-cat > /root/.config/lxqt/session.conf << 'LXQTCFG'
-[General]
-window_manager=openbox
-LXQTCFG
+printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/lxqt/session.conf
+printf '[General]\n__userfile__=true\nwindowmanager=openbox\n' > /root/.config/lxqt/windowmanagers.conf
 
 # Start LXQt session with proper DBus session
 if ! pgrep -f 'lxqt-session' > /dev/null 2>&1; then
