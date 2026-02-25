@@ -1196,6 +1196,14 @@ apt-get install -y -qq --no-install-recommends \
   xdg-utils 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
 
+# Pre-seed LXQt config so the first-run "choose window manager" dialog never appears
+mkdir -p /root/.config/lxqt
+cat > /root/.config/lxqt/session.conf << 'LXQTCFG'
+[General]
+window_manager=openbox
+LXQTCFG
+echo "[setup] LXQt session config pre-seeded (openbox WM)"
+
 # Desktop start script — called by control API
 cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
 #!/bin/bash
