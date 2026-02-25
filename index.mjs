@@ -1784,6 +1784,57 @@ app.post('/webhook/background', async (req, res) => {
  }
 });
 
+// LLM Vision — simple vision-capable LLM call using configured API keys
+// Used by browser automation agent loop on the Render backend
+app.post('/llm/vision', async (req, res) => {
+ try {
+   let envContent = '';
+   try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+   const getKey = (name) => {
+     const match = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
+     return match ? match[1].trim() : (process.env[name] || '');
+   };
+   const orKey = getKey('OPENROUTER_API_KEY');
+   const anKey = getKey('ANTHROPIC_API_KEY');
+
+   const { messages, model } = req.body;
+   if (!messages || !messages.length) return res.status(400).json({ error: 'messages required' });
+
+   if (orKey) {
+     const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+       method: 'POST',
+       headers: { 'Authorization': `Bearer ${orKey}`, 'Content-Type': 'application/json' },
+       body: JSON.stringify({ model: model || 'anthropic/claude-3-5-sonnet', messages, max_tokens: 400 }),
+     });
+     if (resp.ok) {
+       const data = await resp.json();
+       return res.json({ content: data.choices?.[0]?.message?.content?.trim() || '' });
+     }
+     const errText = await resp.text().catch(() => '');
+     console.error('[llm/vision] OpenRouter error:', resp.status, errText);
+   }
+
+   if (anKey) {
+     const resp = await fetch('https://api.anthropic.com/v1/messages', {
+       method: 'POST',
+       headers: { 'x-api-key': anKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+       body: JSON.stringify({ model: 'claude-3-5-sonnet-20241022', max_tokens: 400, messages }),
+     });
+     if (resp.ok) {
+       const data = await resp.json();
+       return res.json({ content: data.content?.[0]?.text?.trim() || '' });
+     }
+     const errText = await resp.text().catch(() => '');
+     console.error('[llm/vision] Anthropic error:', resp.status, errText);
+   }
+
+   return res.status(503).json({ error: 'No API key configured (set OPENROUTER_API_KEY or ANTHROPIC_API_KEY in bridge)' });
+ } catch (err) {
+   console.error('[llm/vision] Error:', err.message);
+   res.status(500).json({ error: err.message });
+ }
+});
+
 // Proxy: forward API calls from OpenClaw agent sandbox to CrabsHQ backend
 app.post('/api/proxy/:path(*)', async (req, res) => {
  if (!MISSION_CONTROL_URL) return res.status(503).json({ error: 'No CrabsHQ backend configured' });
