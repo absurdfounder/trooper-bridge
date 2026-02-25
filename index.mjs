@@ -1188,8 +1188,8 @@ async function handleIncomingTaskStream(req, res) {
    }
  }
 
- // Stop screenshot poller when tool completes or stream ends
- if (event === 'tool_result' || event === 'done' || event === 'error') {
+ // Stop screenshot poller when stream ends (not on individual tool_result — there may be multiple browser tool calls)
+ if (event === 'done' || event === 'error') {
    if (screenshotPollerInterval) {
      clearInterval(screenshotPollerInterval);
      screenshotPollerInterval = null;
@@ -1224,11 +1224,13 @@ async function handleIncomingTaskStream(req, res) {
    screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
- // Signal browser session end if a skill-reported session was active
+ // Signal browser session end — for skill-reported or any browser task
  const endSession = getSkillBrowserSession();
  if (endSession) {
    try { sendSSE('browser_session_end', { sessionId: endSession.sessionId }); } catch {}
    clearSkillBrowserSession();
+ } else if (isBrowserTask) {
+   try { sendSSE('browser_session_end', { sessionId: null }); } catch {}
  }
  res.end();
  }
