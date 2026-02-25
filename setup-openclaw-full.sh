@@ -1190,7 +1190,7 @@ echo "[setup] noVNC + websockify installed for VNC live view"
 # ── Desktop (LXQt) setup — manual use via CrabsHQ Desktop panel ──────────────
 dlog "Installing desktop packages (LXQt, x11vnc)..."
 apt-get install -y -qq --no-install-recommends \
-  xorg openbox x11vnc xterm \
+  xvfb xorg openbox x11vnc xterm \
   lxqt-core lxqt-panel lxqt-runner \
   fonts-dejavu fonts-liberation \
   xdg-utils 2>/dev/null || true
