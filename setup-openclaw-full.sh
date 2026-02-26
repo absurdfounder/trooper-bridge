@@ -612,7 +612,8 @@ ${MODELS_PROVIDERS}
  "controlUi": {
  "enabled": true,
  "allowInsecureAuth": true,
- "dangerouslyAllowHostHeaderOriginFallback": true
+ "dangerouslyAllowHostHeaderOriginFallback": true,
+ "dangerouslyDisableDeviceAuth": true
  },
  "http": {
  "endpoints": {
@@ -706,6 +707,14 @@ elif [ -n "${COMPOSIO_API_KEY:-}" ]; then
  echo "[startup] Composio already installed: $(composio --version 2>/dev/null)"
 fi
 GATEWAY_PORT="${1:-18789}"
+# Start Xvnc at boot so VNC live view is always available (not just when Chrome launches)
+if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
+  echo "[startup] Starting Xvnc on :99 (port 5999) for live browser view..."
+  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+  sleep 0.5
+  echo "[startup] Xvnc started on :99"
+fi
 # Fix permissions: ensure node user can read config files
 # (files may have been written by root via bridge or UI before container started)
 chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
@@ -713,7 +722,7 @@ chmod 700 /home/node/.openclaw 2>/dev/null || true
 chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
 find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
 # Drop back to node user for the gateway process
-exec su -s /bin/bash node -c "node dist/index.js gateway --allow-unconfigured --bind lan --port $GATEWAY_PORT"
+exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind lan --port $GATEWAY_PORT"
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh
 
