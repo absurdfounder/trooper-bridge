@@ -611,7 +611,8 @@ ${MODELS_PROVIDERS}
  "trustedProxies": ["127.0.0.1", "172.16.0.0/12"],
  "controlUi": {
  "enabled": true,
- "allowInsecureAuth": true
+ "allowInsecureAuth": true,
+ "dangerouslyAllowHostHeaderOriginFallback": true
  },
  "http": {
  "endpoints": {
