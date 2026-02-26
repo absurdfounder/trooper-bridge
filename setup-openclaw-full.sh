@@ -641,6 +641,7 @@ services:
       - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
       - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro
       - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
+      - openclaw-pkg-cache:/opt/pkg-cache
     ports:
       - "127.0.0.1:5999:5999"
     group_add:
@@ -663,27 +664,53 @@ services:
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/startup.sh"]
     command: ["${GATEWAY_PORT}"]
+volumes:
+  openclaw-pkg-cache:
 OVERRIDE
 
 # Startup script that ensures Chrome + Xvfb are installed before starting the gateway
 cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 #!/bin/bash
-# Ensure Chrome is installed (survives container restarts)
-# Uses curl (always available in node:22-bookworm) instead of wget
+PKG_CACHE="/opt/pkg-cache"
+SNAPSHOT="${PKG_CACHE}/deps-snapshot.tar.gz"
+CHROME_DEB_CACHE="${PKG_CACHE}/chrome.deb"
+
+# Fast path: restore from snapshot if available (< 5 seconds vs 60-90s full install)
+if ! command -v google-chrome-stable &>/dev/null && [ -f "$SNAPSHOT" ]; then
+ echo "[startup] Restoring Chrome + TigerVNC from cached snapshot..."
+ tar xzf "$SNAPSHOT" -C / 2>/dev/null
+ ldconfig 2>/dev/null
+ if command -v google-chrome-stable &>/dev/null; then
+   echo "[startup] Restored from cache: $(google-chrome-stable --version 2>/dev/null)"
+ fi
+fi
+
+# Ensure Chrome is installed (uses cached .deb if available, else downloads)
 if ! command -v google-chrome-stable &>/dev/null; then
  echo "[startup] Chrome not found, installing..."
  dpkg --configure -a 2>/dev/null
- for _ca in 1 2 3; do
-   if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
-     apt-get update -qq 2>/dev/null
-     dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
-     rm -f /tmp/chrome.deb
-     echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
-     break
-   fi
-   echo "[startup] Chrome download attempt ${_ca} failed, retrying in 5s..."
-   sleep 5
- done
+ # Try cached .deb first, then download
+ if [ -f "$CHROME_DEB_CACHE" ]; then
+   echo "[startup] Installing Chrome from cached .deb..."
+   apt-get update -qq 2>/dev/null
+   dpkg -i "$CHROME_DEB_CACHE" 2>/dev/null || apt-get install -y -f 2>/dev/null
+   echo "[startup] Chrome installed from cache: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
+ else
+   for _ca in 1 2 3; do
+     if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
+       apt-get update -qq 2>/dev/null
+       dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
+       # Cache the .deb for next restart
+       mkdir -p "$PKG_CACHE"
+       cp /tmp/chrome.deb "$CHROME_DEB_CACHE" 2>/dev/null
+       rm -f /tmp/chrome.deb
+       echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
+       break
+     fi
+     echo "[startup] Chrome download attempt ${_ca} failed, retrying in 5s..."
+     sleep 5
+   done
+ fi
 else
  echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
 fi
@@ -695,6 +722,25 @@ if ! command -v Xvnc &>/dev/null; then
  echo "[startup] TigerVNC installed (Xvnc available)"
 else
  echo "[startup] TigerVNC already installed"
+fi
+# Save snapshot for fast restore on next container restart
+if command -v google-chrome-stable &>/dev/null && [ ! -f "$SNAPSHOT" ]; then
+ echo "[startup] Creating package snapshot for fast restarts..."
+ mkdir -p "$PKG_CACHE"
+ tar czf "$SNAPSHOT" \
+   /usr/bin/google-chrome-stable \
+   /opt/google/chrome/ \
+   /usr/bin/Xvnc \
+   /usr/bin/xkbcomp \
+   /usr/lib/xorg/ \
+   /usr/share/X11/xkb/ \
+   /usr/lib/*/libXfont2* \
+   /usr/lib/*/libfontenc* \
+   /usr/lib/*/libxkbfile* \
+   /usr/lib/*/libpixman* \
+   /usr/lib/*/libxshmfence* \
+   2>/dev/null || true
+ echo "[startup] Snapshot saved ($(du -sh "$SNAPSHOT" 2>/dev/null | cut -f1))"
 fi
 # Install Composio CLI if API key is set and not already installed
 if [ -n "${COMPOSIO_API_KEY:-}" ] && ! command -v composio &>/dev/null; then
