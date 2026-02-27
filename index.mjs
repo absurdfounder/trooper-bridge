@@ -1054,6 +1054,24 @@ try {
    changed = true;
    console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
  }
+ // Startup migration: restore gateway controlUi flags required for bridge proxy model
+ const controlUi = config.gateway?.controlUi;
+ if (controlUi && controlUi.dangerouslyAllowHostHeaderOriginFallback === false) {
+   controlUi.allowInsecureAuth = true;
+   controlUi.dangerouslyAllowHostHeaderOriginFallback = true;
+   controlUi.dangerouslyDisableDeviceAuth = true;
+   changed = true;
+   console.log('[bridge] Migrated: restored gateway controlUi flags for bridge proxy model');
+ }
+ // Startup migration: remove unrecognized config keys that cause validation errors
+ if (config.security) { delete config.security; changed = true; console.log('[bridge] Migrated: removed unrecognized "security" key'); }
+ if (config.agents?.defaults?.params) { delete config.agents.defaults.params; changed = true; console.log('[bridge] Migrated: removed unrecognized "agents.defaults.params" key'); }
+ if (config.agents?.defaults?.autoReply) { delete config.agents.defaults.autoReply; changed = true; console.log('[bridge] Migrated: removed unrecognized "agents.defaults.autoReply" key'); }
+ if (config.agents?.defaults?.bootstrap) { delete config.agents.defaults.bootstrap; changed = true; console.log('[bridge] Migrated: removed unrecognized "agents.defaults.bootstrap" key'); }
+ if (config.agents?.defaults?.sandbox?.docker?.namespaceJoin !== undefined) { delete config.agents.defaults.sandbox.docker.namespaceJoin; changed = true; console.log('[bridge] Migrated: removed unrecognized "sandbox.docker.namespaceJoin" key'); }
+ if (config.cron?.stagger) { delete config.cron.stagger; changed = true; console.log('[bridge] Migrated: removed unrecognized "cron.stagger" key'); }
+ if (config.cron?.delivery) { delete config.cron.delivery; changed = true; console.log('[bridge] Migrated: removed unrecognized "cron.delivery" key'); }
+ if (config.channels?.telegram?.nativeCommands !== undefined) { delete config.channels.telegram.nativeCommands; changed = true; console.log('[bridge] Migrated: removed unrecognized "channels.telegram.nativeCommands" key'); }
  if (changed) {
    writeFileSync(configPath, JSON.stringify(config, null, 2));
    try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
