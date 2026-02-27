@@ -1036,12 +1036,6 @@ try {
    changed = true;
    console.log('[bridge] Migrated sandbox browser config: allowHostControl=true');
  }
- // Startup migration: add security config if missing
- if (!config.security) {
-   config.security = { trust_model: 'restricted', audit: { enabled: true, logBlocked: true } };
-   changed = true;
-   console.log('[bridge] Migrated: added security config');
- }
  // Startup migration: add maxSpawnDepth if missing
  if (config.agents?.defaults?.subagents && !config.agents.defaults.subagents.maxSpawnDepth) {
    config.agents.defaults.subagents.maxSpawnDepth = 3;
@@ -1059,18 +1053,6 @@ try {
    config.agents.defaults.heartbeat.directPolicy = 'allow';
    changed = true;
    console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
- }
- // Startup migration: add autoReply stop keywords if missing
- if (config.agents?.defaults && !config.agents.defaults.autoReply) {
-   config.agents.defaults.autoReply = { stopKeywords: ['stop', 'cancel', 'wait', 'hold on', 'pause', 'enough'] };
-   changed = true;
-   console.log('[bridge] Migrated: added autoReply.stopKeywords');
- }
- // Startup migration: add bootstrap caching if missing
- if (config.agents?.defaults && !config.agents.defaults.bootstrap) {
-   config.agents.defaults.bootstrap = { cacheRetention: 'session' };
-   changed = true;
-   console.log('[bridge] Migrated: added bootstrap.cacheRetention=session');
  }
  if (changed) {
    writeFileSync(configPath, JSON.stringify(config, null, 2));

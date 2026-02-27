@@ -507,16 +507,12 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "target": "none",
  "directPolicy": "allow"
  },
- "params": {
- "context1m": true
- },
  "sandbox": {
  "mode": "all",
  "scope": "agent",
  "workspaceAccess": "rw",
  "docker": {
  "setupCommand": "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1",
- "namespaceJoin": false,
  "user": "1000:1000"
  },
  "browser": {
@@ -539,12 +535,6 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "systemPrompt": "Session nearing compaction. Store durable memories now.",
  "prompt": "Write any lasting notes to memory/ as YYYY-MM-DD.md; reply with NO_REPLY if nothing to store."
  }
- },
- "autoReply": {
- "stopKeywords": ["stop", "cancel", "wait", "hold on", "pause", "enough", "halt"]
- },
- "bootstrap": {
- "cacheRetention": "session"
  },
  ${MEMORY_SEARCH_JSON}
  }
@@ -613,17 +603,6 @@ ${MODELS_PROVIDERS}
  "redactSensitive": "tools",
  "maxFileBytes": 100000000
  },
- "security": {
- "trust_model": "restricted",
- "audit": {
- "enabled": true,
- "logBlocked": true
- },
- "ssrf": {
- "denyPolicy": "private",
- "allowedUrls": []
- }
- },
  "session": {
  "dmScope": "per-channel-peer"
  },
@@ -634,21 +613,12 @@ ${MODELS_PROVIDERS}
  "telegram": {
  "enabled": true,
  "streaming": "partial",
- "nativeCommands": true,
  "groupPolicy": "allowlist"
  }
  },
  "cron": {
  "enabled": true,
- "maxConcurrentRuns": 3,
- "stagger": { "enabled": true, "maxDelaySeconds": 120 },
- "delivery": {
- "webhook": {
- "enabled": true,
- "url": "http://127.0.0.1:${BRIDGE_PORT}/webhook/cron",
- "token": "oc-hook-HOOK_TOKEN_PLACEHOLDER"
- }
- }
+ "maxConcurrentRuns": 3
  },
  "gateway": {
  "mode": "local",
