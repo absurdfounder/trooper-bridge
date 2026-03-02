@@ -584,9 +584,7 @@ ${MODELS_PROVIDERS}
  "defaultAgent": "claude",
  "allowedAgents": ["claude", "codex", "gemini", "opencode"],
  "maxConcurrentSessions": 3,
- "dispatch": { "enabled": true, "prefix": "/acp" },
- "permissions": "approve-reads",
- "sessionTimeout": "30m"
+ "dispatch": { "enabled": true }
  },
  "browser": {
  "enabled": true,
@@ -615,9 +613,7 @@ ${MODELS_PROVIDERS}
  "maxFileBytes": 100000000
  },
  "session": {
- "dmScope": "per-channel-peer",
- "idle": "30m",
- "maxAge": "24h"
+ "dmScope": "per-channel-peer"
  },
  "discovery": {
  "mdns": { "mode": "off" }

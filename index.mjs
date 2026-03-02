@@ -1146,12 +1146,6 @@ try {
    changed = true;
    console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
  }
- // Startup migration: set heartbeat.deliverTo=last (v2026.2.24 changed default from 'last' to 'none')
- if (config.agents?.defaults?.heartbeat && !config.agents.defaults.heartbeat.deliverTo) {
-   config.agents.defaults.heartbeat.deliverTo = 'last';
-   changed = true;
-   console.log('[bridge] Migrated: set heartbeat.deliverTo=last (v2026.2.24 changed default)');
- }
  // Startup migration: enable diffs plugin if missing (v2026.3.1 new tool)
  if (!config.plugins) config.plugins = {};
  if (!config.plugins.entries) config.plugins.entries = {};
@@ -1165,13 +1159,6 @@ try {
    config.tools.allow.push('diffs');
    changed = true;
    console.log('[bridge] Migrated: added diffs to tools.allow');
- }
- // Startup migration: add session.idle and session.maxAge for session lifecycle (v2026.2.24)
- if (config.session && !config.session.idle) {
-   config.session.idle = '30m';
-   config.session.maxAge = '24h';
-   changed = true;
-   console.log('[bridge] Migrated: added session.idle=30m, session.maxAge=24h');
  }
  // Startup migration: restore gateway controlUi flags required for bridge proxy model
  const controlUi = config.gateway?.controlUi;
@@ -1191,6 +1178,13 @@ try {
  if (config.cron?.stagger) { delete config.cron.stagger; changed = true; console.log('[bridge] Migrated: removed unrecognized "cron.stagger" key'); }
  if (config.cron?.delivery) { delete config.cron.delivery; changed = true; console.log('[bridge] Migrated: removed unrecognized "cron.delivery" key'); }
  if (config.channels?.telegram?.nativeCommands !== undefined) { delete config.channels.telegram.nativeCommands; changed = true; console.log('[bridge] Migrated: removed unrecognized "channels.telegram.nativeCommands" key'); }
+ // Remove invalid keys added by previous migrations that OpenClaw's schema doesn't recognize
+ if (config.acp?.dispatch?.prefix) { delete config.acp.dispatch.prefix; changed = true; }
+ if (config.acp?.permissions) { delete config.acp.permissions; changed = true; }
+ if (config.acp?.sessionTimeout) { delete config.acp.sessionTimeout; changed = true; }
+ if (config.agents?.defaults?.heartbeat?.deliverTo) { delete config.agents.defaults.heartbeat.deliverTo; changed = true; }
+ if (config.session?.idle) { delete config.session.idle; changed = true; }
+ if (config.session?.maxAge) { delete config.session.maxAge; changed = true; }
  // Startup migration: enable ACP (Agent Client Protocol) support with acpx backend
  if (!config.acp) {
    config.acp = {
@@ -1199,9 +1193,7 @@ try {
      defaultAgent: 'claude',
      allowedAgents: ['claude', 'codex', 'gemini', 'opencode'],
      maxConcurrentSessions: 3,
-     dispatch: { enabled: true, prefix: '/acp' },
-     permissions: 'approve-reads',
-     sessionTimeout: '30m',
+     dispatch: { enabled: true },
    };
    changed = true;
    console.log('[bridge] Migrated: enabled ACP with acpx backend');
