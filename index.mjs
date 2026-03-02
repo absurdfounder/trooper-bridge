@@ -772,6 +772,27 @@ class OpenClawGateway {
      }
    } catch (e) { /* ignore screenshot extraction errors */ }
  }
+ // Extract diff artifact from diffs tool results (v2026.3.1 diffs plugin)
+ if (last && last.tool === 'diffs' && !data.is_error) {
+   try {
+     const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || '');
+     const parsed = typeof data.content === 'string' ? JSON.parse(data.content) : data.content;
+     const details = parsed?.details || parsed;
+     if (details && (details.viewerUrl || details.imagePath || details.artifactId)) {
+       if (onEvent) onEvent('diff_artifact', {
+         artifactId: details.artifactId || null,
+         viewerUrl: details.viewerUrl || null,
+         viewerPath: details.viewerPath || null,
+         imagePath: details.imagePath || null,
+         title: details.title || null,
+         expiresAt: details.expiresAt || null,
+         inputKind: details.inputKind || null,
+         fileCount: details.fileCount || null,
+         mode: details.mode || null,
+       });
+     }
+   } catch (e) { /* ignore diff artifact extraction errors */ }
+ }
  }
  if (stream === 'thinking' && data?.text) {
  if (onEvent) onEvent('thinking', { text: data.text });
@@ -1054,6 +1075,33 @@ try {
    changed = true;
    console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
  }
+ // Startup migration: set heartbeat.deliverTo=last (v2026.2.24 changed default from 'last' to 'none')
+ if (config.agents?.defaults?.heartbeat && !config.agents.defaults.heartbeat.deliverTo) {
+   config.agents.defaults.heartbeat.deliverTo = 'last';
+   changed = true;
+   console.log('[bridge] Migrated: set heartbeat.deliverTo=last (v2026.2.24 changed default)');
+ }
+ // Startup migration: enable diffs plugin if missing (v2026.3.1 new tool)
+ if (!config.plugins) config.plugins = {};
+ if (!config.plugins.entries) config.plugins.entries = {};
+ if (!config.plugins.entries.diffs) {
+   config.plugins.entries.diffs = { enabled: true };
+   changed = true;
+   console.log('[bridge] Migrated: enabled diffs plugin');
+ }
+ // Startup migration: add diffs to tools.allow if missing
+ if (Array.isArray(config.tools?.allow) && !config.tools.allow.includes('diffs')) {
+   config.tools.allow.push('diffs');
+   changed = true;
+   console.log('[bridge] Migrated: added diffs to tools.allow');
+ }
+ // Startup migration: add session.idle and session.maxAge for session lifecycle (v2026.2.24)
+ if (config.session && !config.session.idle) {
+   config.session.idle = '30m';
+   config.session.maxAge = '24h';
+   changed = true;
+   console.log('[bridge] Migrated: added session.idle=30m, session.maxAge=24h');
+ }
  // Startup migration: restore gateway controlUi flags required for bridge proxy model
  const controlUi = config.gateway?.controlUi;
  if (controlUi && controlUi.dangerouslyAllowHostHeaderOriginFallback === false) {
@@ -1239,9 +1287,12 @@ async function handleIncomingTaskStream(req, res) {
  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
  };
 
- // Keep-alive to prevent proxy timeouts
+ // Keep-alive to prevent proxy timeouts + typing indicator keepalive (v2026.3.1)
  const keepAlive = setInterval(() => {
- if (!res.writableEnded) res.write(': keepalive\n\n');
+ if (!res.writableEnded) {
+   res.write(': keepalive\n\n');
+   sendSSE('typing_keepalive', { timestamp: Date.now() });
+ }
  }, 15000);
 
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
@@ -1430,6 +1481,16 @@ app.get('/health', (req, res) => {
  pending: pendingRequests.size, skills: skillRegistry.size,
  uptime: process.uptime(),
  });
+});
+
+// ── Kubernetes-style health/readiness probes (aligned with OpenClaw v2026.3.1) ──
+app.get('/healthz', (req, res) => res.status(200).json({ status: 'ok' }));
+app.get('/ready', (req, res) => {
+ const ok = gateway.isReady;
+ res.status(ok ? 200 : 503).json({ status: ok ? 'ready' : 'not_ready', openclawConnected: ok });
+});
+app.get('/readyz', (req, res) => {
+ res.status(gateway.isReady ? 200 : 503).json({ status: gateway.isReady ? 'ready' : 'not_ready' });
 });
 
 // ── Write files to agent workspace (supports subdirectories) ─────────
@@ -2758,7 +2819,16 @@ function normalizeModelId(model) {
    restartOk = false;
    console.error('Container restart failed:', restartErr.message);
  }
- 
+
+ // Apply secrets through OpenClaw's native secrets management (v2026.2.24+)
+ if (restartOk) {
+   try {
+     await run('sleep 3 && docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>/dev/null', { timeout: 20000 });
+     await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>/dev/null', { timeout: 15000 });
+     console.log('[keys] Secrets applied and reloaded via openclaw secrets');
+   } catch (e) { console.warn('[keys] openclaw secrets apply/reload not available (pre-v2026.2.24?):', e.message); }
+ }
+
  const response = { status: 'updating', message: 'API keys updated — restarting services' };
  if (warnings.length > 0) response.warnings = warnings;
  if (!restartOk) response.status = 'partial';
@@ -2767,6 +2837,46 @@ function normalizeModelId(model) {
  console.error('API key update failed:', err.message);
  if (!res.headersSent) res.status(500).json({ error: err.message });
  } finally { keysUpdateInProgress = false; }
+});
+
+// ── Secrets Management (wraps OpenClaw v2026.2.24+ `openclaw secrets` CLI) ──
+
+app.get('/config/secrets/audit', async (req, res) => {
+ try {
+   const { promisify } = await import('util');
+   const { exec } = await import('child_process');
+   const run = promisify(exec);
+   const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets audit --json 2>/dev/null', { timeout: 15000 });
+   res.json(JSON.parse(stdout));
+ } catch (e) {
+   if (/not found|unknown command|No such/i.test(e.message || e.stderr || '')) {
+     res.json({ available: false, message: 'openclaw secrets not available (requires v2026.2.24+)' });
+   } else {
+     res.status(500).json({ error: e.message });
+   }
+ }
+});
+
+app.post('/config/secrets/apply', async (req, res) => {
+ try {
+   const { promisify } = await import('util');
+   const { exec } = await import('child_process');
+   const run = promisify(exec);
+   const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>&1', { timeout: 20000 });
+   console.log('[secrets] Applied:', stdout.trim());
+   res.json({ status: 'ok', output: stdout.trim() });
+ } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/config/secrets/reload', async (req, res) => {
+ try {
+   const { promisify } = await import('util');
+   const { exec } = await import('child_process');
+   const run = promisify(exec);
+   const { stdout } = await run('docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>&1', { timeout: 15000 });
+   console.log('[secrets] Reloaded:', stdout.trim());
+   res.json({ status: 'ok', output: stdout.trim() });
+ } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Deep Research (Librarium) ─────────────────────────────────────────

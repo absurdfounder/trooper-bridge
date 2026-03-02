@@ -549,7 +549,7 @@ ${MODELS_PROVIDERS}
  "web_search", "web_fetch", "browser",
  "sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status",
  "agents_list", "image", "message", "cron", "gateway",
- "llm-task", "lobster"
+ "llm-task", "lobster", "diffs"
  ],
  "web": {
  "search": {
@@ -573,7 +573,8 @@ ${MODELS_PROVIDERS}
  "plugins": {
  "entries": {
  "lobster": { "enabled": true },
- "llm-task": { "enabled": true }
+ "llm-task": { "enabled": true },
+ "diffs": { "enabled": true }
  }
  },
  "browser": {
@@ -603,7 +604,9 @@ ${MODELS_PROVIDERS}
  "maxFileBytes": 100000000
  },
  "session": {
- "dmScope": "per-channel-peer"
+ "dmScope": "per-channel-peer",
+ "idle": "30m",
+ "maxAge": "24h"
  },
  "discovery": {
  "mdns": { "mode": "off" }
