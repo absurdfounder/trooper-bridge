@@ -676,39 +676,39 @@ sed -i "s/HOOK_TOKEN_PLACEHOLDER/oc-hook-${HOOK_TOKEN}/g" /opt/openclaw-data/con
 DOCKER_GID=$(getent group docker | cut -d: -f3)
 cat > /opt/openclaw/docker-compose.override.yml << OVERRIDE
 services:
- openclaw-gateway:
- volumes:
- - /var/run/docker.sock:/var/run/docker.sock
- - /usr/bin/docker:/usr/bin/docker:ro
- - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
- - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro
- - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
- - openclaw-pkg-cache:/opt/pkg-cache
- - /var/run/openclaw:/var/run/openclaw
- ports:
- - "127.0.0.1:5999:5999"
- group_add:
- - "${DOCKER_GID}"
- extra_hosts:
-  host.docker.internal: host-gateway
- environment:
- OPENAI_API_KEY: \${OPENAI_API_KEY:-}
- ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
- GEMINI_API_KEY: \${GEMINI_API_KEY:-}
- OPENROUTER_API_KEY: \${OPENROUTER_API_KEY:-}
- MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}
- BRAVE_API_KEY: \${BRAVE_API_KEY}
- CHROME_PATH: /opt/openclaw-data/chrome-wrapper.sh
- CHROMIUM_PATH: /opt/openclaw-data/chrome-wrapper.sh
- PUPPETEER_EXECUTABLE_PATH: /opt/openclaw-data/chrome-wrapper.sh
- OPENCLAW_BROWSER_EXECUTABLE: /opt/openclaw-data/chrome-wrapper.sh
- CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
- COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
- user: "0:0"
- entrypoint: ["/bin/bash", "/opt/startup.sh"]
- command: ["${GATEWAY_PORT}"]
+  openclaw-gateway:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
+      - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro
+      - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
+      - openclaw-pkg-cache:/opt/pkg-cache
+      - /var/run/openclaw:/var/run/openclaw
+    ports:
+      - "127.0.0.1:5999:5999"
+    group_add:
+      - "${DOCKER_GID}"
+    extra_hosts:
+      host.docker.internal: host-gateway
+    environment:
+      OPENAI_API_KEY: \${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: \${GEMINI_API_KEY:-}
+      OPENROUTER_API_KEY: \${OPENROUTER_API_KEY:-}
+      MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}
+      BRAVE_API_KEY: \${BRAVE_API_KEY}
+      CHROME_PATH: /opt/openclaw-data/chrome-wrapper.sh
+      CHROMIUM_PATH: /opt/openclaw-data/chrome-wrapper.sh
+      PUPPETEER_EXECUTABLE_PATH: /opt/openclaw-data/chrome-wrapper.sh
+      OPENCLAW_BROWSER_EXECUTABLE: /opt/openclaw-data/chrome-wrapper.sh
+      CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
+      COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
+    user: "0:0"
+    entrypoint: ["/bin/bash", "/opt/startup.sh"]
+    command: ["${GATEWAY_PORT}"]
 volumes:
- openclaw-pkg-cache:
+  openclaw-pkg-cache:
 OVERRIDE
 
 # Startup script that ensures Chrome + Xvfb are installed before starting the gateway
