@@ -51,9 +51,9 @@ dlog() {
  DEPLOY_LOG="$DEPLOY_LOG" LOG_MSG="$msg" LOG_STEP="$step" LOG_TS="$ts" python3 -c "
 import json,os
 try:
-  with open(os.environ['DEPLOY_LOG'],'r+') as f:
-    logs=json.load(f); logs.append({'t':int(os.environ['LOG_TS']),'msg':os.environ['LOG_MSG'],'step':os.environ['LOG_STEP']})
-    f.seek(0); json.dump(logs,f); f.truncate()
+ with open(os.environ['DEPLOY_LOG'],'r+') as f:
+ logs=json.load(f); logs.append({'t':int(os.environ['LOG_TS']),'msg':os.environ['LOG_MSG'],'step':os.environ['LOG_STEP']})
+ f.seek(0); json.dump(logs,f); f.truncate()
 except: pass
 " 2>/dev/null || true
  # Also POST directly to Render API for instant visibility in the frontend
@@ -73,23 +73,23 @@ exec 1> >(tee -a "$DEPLOY_RAW_LOG") 2>&1
 python3 -c "
 import http.server, json, threading, os
 class H(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path=='/health':
-            self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
-            self.wfile.write(b'{\"status\":\"installing\"}')
-        elif self.path=='/deploy-logs':
-            self.send_response(200); self.send_header('Content-Type','application/json')
-            self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
-            with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
-        elif self.path=='/deploy-logs-raw':
-            self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
-            self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
-            try:
-                with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
-            except: self.wfile.write(b'')
-        else:
-            self.send_response(404); self.end_headers()
-    def log_message(self,*a): pass
+ def do_GET(self):
+ if self.path=='/health':
+ self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+ self.wfile.write(b'{\"status\":\"installing\"}')
+ elif self.path=='/deploy-logs':
+ self.send_response(200); self.send_header('Content-Type','application/json')
+ self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+ with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
+ elif self.path=='/deploy-logs-raw':
+ self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
+ self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+ try:
+ with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
+ except: self.wfile.write(b'')
+ else:
+ self.send_response(404); self.end_headers()
+ def log_message(self,*a): pass
 s=http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H)
 s.serve_forever()
 " &
@@ -115,7 +115,7 @@ systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || true
 # Add 2GB swap in background (doesn't block anything)
 if [ ! -f /swapfile ]; then
  (fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile \
-  && echo '/swapfile none swap sw 0 0' >> /etc/fstab && echo "Swap enabled: $(swapon --show)") &
+ && echo '/swapfile none swap sw 0 0' >> /etc/fstab && echo "Swap enabled: $(swapon --show)") &
  SWAP_PID=$!
 fi
 
@@ -163,11 +163,11 @@ if command -v docker &>/dev/null; then
  mkdir -p /etc/docker
  cat > /etc/docker/daemon.json << 'DOCKERCFG'
 {
-  "storage-driver": "overlay2",
-  "log-driver": "json-file",
-  "log-opts": { "max-size": "10m", "max-file": "3" },
-  "max-concurrent-downloads": 3,
-  "max-concurrent-uploads": 2
+ "storage-driver": "overlay2",
+ "log-driver": "json-file",
+ "log-opts": { "max-size": "10m", "max-file": "3" },
+ "max-concurrent-downloads": 3,
+ "max-concurrent-uploads": 2
 }
 DOCKERCFG
  systemctl restart docker
@@ -175,6 +175,10 @@ DOCKERCFG
 fi
 echo "Node.js installed: $(node --version 2>/dev/null || echo 'N/A')"
 echo "Caddy installed: $(caddy version 2>/dev/null || echo 'N/A')"
+
+# Shared socket for Agent Daemon (desktop exec via Unix socket)
+mkdir -p /var/run/openclaw
+chmod 1777 /var/run/openclaw
 
 # Wait for swap to finish
 [ -n "${SWAP_PID:-}" ] && wait $SWAP_PID 2>/dev/null || true
@@ -196,18 +200,18 @@ docker system prune -f 2>/dev/null || true
 # Background pull — we'll wait for it later before docker compose up
 DOCKER_PULL_LOG=/tmp/docker-pull.log
 (
-  for attempt in 1 2 3; do
-    if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}" > "$DOCKER_PULL_LOG" 2>&1; then
-      docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
-      echo "IMAGE_READY=true" > /tmp/docker-pull-status
-      exit 0
-    fi
-    echo "Pull attempt ${attempt} failed" >> "$DOCKER_PULL_LOG"
-    docker system prune -a -f 2>/dev/null || true
-    systemctl restart docker 2>/dev/null || true
-    sleep $((attempt * 4))
-  done
-  echo "IMAGE_READY=false" > /tmp/docker-pull-status
+ for attempt in 1 2 3; do
+ if docker pull --platform "${DOCKER_PLATFORM}" "${OPENCLAW_DOCKER_IMAGE}" > "$DOCKER_PULL_LOG" 2>&1; then
+ docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
+ echo "IMAGE_READY=true" > /tmp/docker-pull-status
+ exit 0
+ fi
+ echo "Pull attempt ${attempt} failed" >> "$DOCKER_PULL_LOG"
+ docker system prune -a -f 2>/dev/null || true
+ systemctl restart docker 2>/dev/null || true
+ sleep $((attempt * 4))
+ done
+ echo "IMAGE_READY=false" > /tmp/docker-pull-status
 ) &
 DOCKER_PULL_PID=$!
 
@@ -284,34 +288,34 @@ dlog "Configuring model routing..." "model-routing"
 resolve_primary_model() {
  # If user explicitly specified provider + model, use that
  if [ -n "${PRIMARY_PROVIDER:-}" ] && [ "${PRIMARY_PROVIDER}" != "{{PRIMARY_PROVIDER}}" ] && \
-    [ -n "${PRIMARY_MODEL:-}" ] && [ "${PRIMARY_MODEL}" != "{{PRIMARY_MODEL}}" ]; then
-  echo "${PRIMARY_PROVIDER}/${PRIMARY_MODEL}"
-  return
+ [ -n "${PRIMARY_MODEL:-}" ] && [ "${PRIMARY_MODEL}" != "{{PRIMARY_MODEL}}" ]; then
+ echo "${PRIMARY_PROVIDER}/${PRIMARY_MODEL}"
+ return
  fi
 
  # If user specified provider but not model, pick best model for that provider
  local provider="${PRIMARY_PROVIDER:-}"
  if [ -n "$provider" ] && [ "$provider" != "{{PRIMARY_PROVIDER}}" ]; then
-  case "$provider" in
-   anthropic) echo "anthropic/claude-sonnet-4-5"; return ;;
-   openai)    echo "openai/gpt-5.2"; return ;;
-   gemini)    echo "google/gemini-2.5-pro"; return ;;
-   openrouter) echo "openrouter/anthropic/claude-sonnet-4-5"; return ;;
-  esac
+ case "$provider" in
+ anthropic) echo "anthropic/claude-sonnet-4-5"; return ;;
+ openai) echo "openai/gpt-5.2"; return ;;
+ gemini) echo "google/gemini-2.5-pro"; return ;;
+ openrouter) echo "openrouter/anthropic/claude-sonnet-4-5"; return ;;
+ esac
  fi
 
  # Auto-detect from available API keys (priority: anthropic > openai > gemini > openrouter)
  if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
-  echo "anthropic/claude-sonnet-4-5"
+ echo "anthropic/claude-sonnet-4-5"
  elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
-  echo "openai/gpt-5.2"
+ echo "openai/gpt-5.2"
  elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
-  echo "google/gemini-2.5-pro"
+ echo "google/gemini-2.5-pro"
  elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
-  echo "openrouter/openai/gpt-5-mini"
+ echo "openrouter/openai/gpt-5-mini"
  else
-  # Fallback — no keys found, default to cheap model
-  echo "openrouter/openai/gpt-5-mini"
+ # Fallback — no keys found, default to cheap model
+ echo "openrouter/openai/gpt-5-mini"
  fi
 }
 
@@ -326,11 +330,11 @@ MODEL_FALLBACKS=""
 build_fallback() {
  local ref="$1"
  if [ "$ref" != "$RESOLVED_MODEL" ]; then
-  if [ -z "$MODEL_FALLBACKS" ]; then
-   MODEL_FALLBACKS="\"${ref}\""
-  else
-   MODEL_FALLBACKS="${MODEL_FALLBACKS}, \"${ref}\""
-  fi
+ if [ -z "$MODEL_FALLBACKS" ]; then
+ MODEL_FALLBACKS="\"${ref}\""
+ else
+ MODEL_FALLBACKS="${MODEL_FALLBACKS}, \"${ref}\""
+ fi
  fi
 }
 if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
@@ -360,12 +364,12 @@ echo "Fallback chain: ${MODEL_FALLBACKS:-none}"
 dlog "Fetching OpenClaw compose files..."
 if [ ! -d /opt/openclaw ]; then
  for _git_attempt in 1 2 3; do
-  if git clone --depth 1 https://github.com/openclaw/openclaw.git /opt/openclaw; then
-    break
-  fi
-  dlog "Git clone attempt ${_git_attempt} failed, retrying..."
-  rm -rf /opt/openclaw 2>/dev/null || true
-  sleep $((${_git_attempt} * 3))
+ if git clone --depth 1 https://github.com/openclaw/openclaw.git /opt/openclaw; then
+ break
+ fi
+ dlog "Git clone attempt ${_git_attempt} failed, retrying..."
+ rm -rf /opt/openclaw 2>/dev/null || true
+ sleep $((${_git_attempt} * 3))
  done
 else
  cd /opt/openclaw && git pull --depth 1 origin main || true
@@ -408,70 +412,70 @@ MODELS_PROVIDERS=""
 add_provider() {
  local entry="$1"
  if [ -z "$MODELS_PROVIDERS" ]; then
-  MODELS_PROVIDERS="$entry"
+ MODELS_PROVIDERS="$entry"
  else
-  MODELS_PROVIDERS="${MODELS_PROVIDERS},
+ MODELS_PROVIDERS="${MODELS_PROVIDERS},
 $entry"
  fi
 }
 
 if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "{{ANTHROPIC_API_KEY}}" ]; then
- add_provider '   "anthropic": {
-    "baseUrl": "https://api.anthropic.com",
-    "api": "anthropic-messages",
-    "models": [
-     { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "contextWindow": 200000 },
-     { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "contextWindow": 200000 },
-     { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "contextWindow": 200000 },
-     { "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "contextWindow": 200000 }
-    ]
-   }'
+ add_provider ' "anthropic": {
+ "baseUrl": "https://api.anthropic.com",
+ "api": "anthropic-messages",
+ "models": [
+ { "id": "claude-opus-4-6", "name": "Claude Opus 4.6", "contextWindow": 200000 },
+ { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "contextWindow": 200000 },
+ { "id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6", "contextWindow": 200000 },
+ { "id": "claude-haiku-4-5", "name": "Claude Haiku 4.5", "contextWindow": 200000 }
+ ]
+ }'
 fi
 
 if [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "{{OPENAI_API_KEY}}" ]; then
- add_provider '   "openai": {
-    "baseUrl": "https://api.openai.com/v1",
-    "api": "openai-completions",
-    "models": [
-     { "id": "gpt-5.2", "name": "GPT-5.2", "contextWindow": 128000 },
-     { "id": "gpt-5.0", "name": "GPT-5.0", "contextWindow": 128000 }
-    ]
-   }'
+ add_provider ' "openai": {
+ "baseUrl": "https://api.openai.com/v1",
+ "api": "openai-completions",
+ "models": [
+ { "id": "gpt-5.2", "name": "GPT-5.2", "contextWindow": 128000 },
+ { "id": "gpt-5.0", "name": "GPT-5.0", "contextWindow": 128000 }
+ ]
+ }'
 fi
 
 if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "{{GEMINI_API_KEY}}" ]; then
- add_provider '   "google": {
-    "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
-    "api": "google-generative-ai",
-    "models": [
-     { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "contextWindow": 1000000 },
-     { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "contextWindow": 1000000 }
-    ]
-   }'
+ add_provider ' "google": {
+ "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+ "api": "google-generative-ai",
+ "models": [
+ { "id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro", "contextWindow": 1000000 },
+ { "id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash", "contextWindow": 1000000 }
+ ]
+ }'
 fi
 
 if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "{{OPENROUTER_API_KEY}}" ]; then
- add_provider '   "openrouter": {
-    "baseUrl": "https://openrouter.ai/api/v1",
-    "api": "openai-completions",
-    "models": [
-     { "id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5 (OR)", "contextWindow": 200000 },
-     { "id": "openai/gpt-5.2", "name": "GPT-5.2 (OR)", "contextWindow": 128000 },
-     { "id": "openai/gpt-5-mini", "name": "GPT-5 Mini (OR)", "contextWindow": 128000 },
-     { "id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro (OR)", "contextWindow": 1000000 }
-    ]
-   }'
+ add_provider ' "openrouter": {
+ "baseUrl": "https://openrouter.ai/api/v1",
+ "api": "openai-completions",
+ "models": [
+ { "id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5 (OR)", "contextWindow": 200000 },
+ { "id": "openai/gpt-5.2", "name": "GPT-5.2 (OR)", "contextWindow": 128000 },
+ { "id": "openai/gpt-5-mini", "name": "GPT-5 Mini (OR)", "contextWindow": 128000 },
+ { "id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro (OR)", "contextWindow": 1000000 }
+ ]
+ }'
 fi
 
 # Fallback: if no providers configured, add anthropic as default
 if [ -z "$MODELS_PROVIDERS" ]; then
- MODELS_PROVIDERS='   "anthropic": {
-    "baseUrl": "https://api.anthropic.com",
-    "api": "anthropic-messages",
-    "models": [
-     { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "contextWindow": 200000 }
-    ]
-   }'
+ MODELS_PROVIDERS=' "anthropic": {
+ "baseUrl": "https://api.anthropic.com",
+ "api": "anthropic-messages",
+ "models": [
+ { "id": "claude-sonnet-4-5", "name": "Claude Sonnet 4.5", "contextWindow": 200000 }
+ ]
+ }'
 fi
 
 # Resolve memorySearch config — always use OpenRouter for embeddings (platform key)
@@ -657,38 +661,39 @@ sed -i "s/HOOK_TOKEN_PLACEHOLDER/oc-hook-${HOOK_TOKEN}/g" /opt/openclaw-data/con
 DOCKER_GID=$(getent group docker | cut -d: -f3)
 cat > /opt/openclaw/docker-compose.override.yml << OVERRIDE
 services:
-  openclaw-gateway:
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /usr/bin/docker:/usr/bin/docker:ro
-      - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
-      - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro
-      - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
-      - openclaw-pkg-cache:/opt/pkg-cache
-    ports:
-      - "127.0.0.1:5999:5999"
-    group_add:
-      - "${DOCKER_GID}"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      OPENAI_API_KEY: \${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
-      GEMINI_API_KEY: \${GEMINI_API_KEY:-}
-      OPENROUTER_API_KEY: \${OPENROUTER_API_KEY:-}
-      MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}
-      BRAVE_API_KEY: \${BRAVE_API_KEY}
-      CHROME_PATH: /opt/openclaw-data/chrome-wrapper.sh
-      CHROMIUM_PATH: /opt/openclaw-data/chrome-wrapper.sh
-      PUPPETEER_EXECUTABLE_PATH: /opt/openclaw-data/chrome-wrapper.sh
-      OPENCLAW_BROWSER_EXECUTABLE: /opt/openclaw-data/chrome-wrapper.sh
-      CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
-      COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
-    user: "0:0"
-    entrypoint: ["/bin/bash", "/opt/startup.sh"]
-    command: ["${GATEWAY_PORT}"]
+ openclaw-gateway:
+ volumes:
+ - /var/run/docker.sock:/var/run/docker.sock
+ - /usr/bin/docker:/usr/bin/docker:ro
+ - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
+ - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro
+ - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
+ - openclaw-pkg-cache:/opt/pkg-cache
+ - /var/run/openclaw:/var/run/openclaw
+ ports:
+ - "127.0.0.1:5999:5999"
+ group_add:
+ - "${DOCKER_GID}"
+ extra_hosts:
+ - "host.docker.internal:host-gateway"
+ environment:
+ OPENAI_API_KEY: \${OPENAI_API_KEY:-}
+ ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
+ GEMINI_API_KEY: \${GEMINI_API_KEY:-}
+ OPENROUTER_API_KEY: \${OPENROUTER_API_KEY:-}
+ MISTRAL_API_KEY: \${MISTRAL_API_KEY:-}
+ BRAVE_API_KEY: \${BRAVE_API_KEY}
+ CHROME_PATH: /opt/openclaw-data/chrome-wrapper.sh
+ CHROMIUM_PATH: /opt/openclaw-data/chrome-wrapper.sh
+ PUPPETEER_EXECUTABLE_PATH: /opt/openclaw-data/chrome-wrapper.sh
+ OPENCLAW_BROWSER_EXECUTABLE: /opt/openclaw-data/chrome-wrapper.sh
+ CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
+ COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
+ user: "0:0"
+ entrypoint: ["/bin/bash", "/opt/startup.sh"]
+ command: ["${GATEWAY_PORT}"]
 volumes:
-  openclaw-pkg-cache:
+ openclaw-pkg-cache:
 OVERRIDE
 
 # Startup script that ensures Chrome + Xvfb are installed before starting the gateway
@@ -704,7 +709,7 @@ if ! command -v google-chrome-stable &>/dev/null && [ -f "$SNAPSHOT" ]; then
  tar xzf "$SNAPSHOT" -C / 2>/dev/null
  ldconfig 2>/dev/null
  if command -v google-chrome-stable &>/dev/null; then
-   echo "[startup] Restored from cache: $(google-chrome-stable --version 2>/dev/null)"
+ echo "[startup] Restored from cache: $(google-chrome-stable --version 2>/dev/null)"
  fi
 fi
 
@@ -714,25 +719,25 @@ if ! command -v google-chrome-stable &>/dev/null; then
  dpkg --configure -a 2>/dev/null
  # Try cached .deb first, then download
  if [ -f "$CHROME_DEB_CACHE" ]; then
-   echo "[startup] Installing Chrome from cached .deb..."
-   apt-get update -qq 2>/dev/null
-   dpkg -i "$CHROME_DEB_CACHE" 2>/dev/null || apt-get install -y -f 2>/dev/null
-   echo "[startup] Chrome installed from cache: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
+ echo "[startup] Installing Chrome from cached .deb..."
+ apt-get update -qq 2>/dev/null
+ dpkg -i "$CHROME_DEB_CACHE" 2>/dev/null || apt-get install -y -f 2>/dev/null
+ echo "[startup] Chrome installed from cache: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
  else
-   for _ca in 1 2 3; do
-     if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
-       apt-get update -qq 2>/dev/null
-       dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
-       # Cache the .deb for next restart
-       mkdir -p "$PKG_CACHE"
-       cp /tmp/chrome.deb "$CHROME_DEB_CACHE" 2>/dev/null
-       rm -f /tmp/chrome.deb
-       echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
-       break
-     fi
-     echo "[startup] Chrome download attempt ${_ca} failed, retrying in 5s..."
-     sleep 5
-   done
+ for _ca in 1 2 3; do
+ if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
+ apt-get update -qq 2>/dev/null
+ dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
+ # Cache the .deb for next restart
+ mkdir -p "$PKG_CACHE"
+ cp /tmp/chrome.deb "$CHROME_DEB_CACHE" 2>/dev/null
+ rm -f /tmp/chrome.deb
+ echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
+ break
+ fi
+ echo "[startup] Chrome download attempt ${_ca} failed, retrying in 5s..."
+ sleep 5
+ done
  fi
 else
  echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
@@ -751,18 +756,18 @@ if command -v google-chrome-stable &>/dev/null && [ ! -f "$SNAPSHOT" ]; then
  echo "[startup] Creating package snapshot for fast restarts..."
  mkdir -p "$PKG_CACHE"
  tar czf "$SNAPSHOT" \
-   /usr/bin/google-chrome-stable \
-   /opt/google/chrome/ \
-   /usr/bin/Xvnc \
-   /usr/bin/xkbcomp \
-   /usr/lib/xorg/ \
-   /usr/share/X11/xkb/ \
-   /usr/lib/*/libXfont2* \
-   /usr/lib/*/libfontenc* \
-   /usr/lib/*/libxkbfile* \
-   /usr/lib/*/libpixman* \
-   /usr/lib/*/libxshmfence* \
-   2>/dev/null || true
+ /usr/bin/google-chrome-stable \
+ /opt/google/chrome/ \
+ /usr/bin/Xvnc \
+ /usr/bin/xkbcomp \
+ /usr/lib/xorg/ \
+ /usr/share/X11/xkb/ \
+ /usr/lib/*/libXfont2* \
+ /usr/lib/*/libfontenc* \
+ /usr/lib/*/libxkbfile* \
+ /usr/lib/*/libpixman* \
+ /usr/lib/*/libxshmfence* \
+ 2>/dev/null || true
  echo "[startup] Snapshot saved ($(du -sh "$SNAPSHOT" 2>/dev/null | cut -f1))"
 fi
 # Install Composio CLI if API key is set and not already installed
@@ -778,11 +783,11 @@ fi
 GATEWAY_PORT="${1:-18789}"
 # Start Xvnc at boot so VNC live view is always available (not just when Chrome launches)
 if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
-  echo "[startup] Starting Xvnc on :99 (port 5999) for live browser view..."
-  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
-    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
-  sleep 0.5
-  echo "[startup] Xvnc started on :99"
+ echo "[startup] Starting Xvnc on :99 (port 5999) for live browser view..."
+ Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+ -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+ sleep 0.5
+ echo "[startup] Xvnc started on :99"
 fi
 # Fix permissions: ensure node user can read config files
 # (files may have been written by root via bridge or UI before container started)
@@ -803,13 +808,13 @@ add_auth_profile() {
  local entry="\"${id}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${key}\" }"
  local lastgood="\"${provider}\": \"${id}\""
  if [ -z "$AUTH_PROFILES" ]; then
-  AUTH_PROFILES="  $entry"
-  AUTH_LASTGOOD="  $lastgood"
+ AUTH_PROFILES=" $entry"
+ AUTH_LASTGOOD=" $lastgood"
  else
-  AUTH_PROFILES="${AUTH_PROFILES},
-  $entry"
-  AUTH_LASTGOOD="${AUTH_LASTGOOD},
-  $lastgood"
+ AUTH_PROFILES="${AUTH_PROFILES},
+ $entry"
+ AUTH_LASTGOOD="${AUTH_LASTGOOD},
+ $lastgood"
  fi
 }
 
@@ -968,9 +973,9 @@ cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP_BASE'
 # ── Xvnc: Virtual display + VNC server on :99 (port 5999) ──
 # Xvnc provides a virtual display AND serves VNC — enabling live browser view via noVNC
 if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
-  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
-    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
-  sleep 0.5
+ Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+ -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+ sleep 0.5
 fi
 export DISPLAY=:99
 exec /usr/bin/google-chrome-stable "$@"
@@ -984,18 +989,18 @@ sed -i 's|/usr/bin/google-chrome-stable|/opt/openclaw-data/chrome-wrapper.sh|g' 
 # ── 2Captcha extension (when API key is set) ─────────────────────────────
 mkdir -p /opt/openclaw-data/2captcha-extension
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
-  dlog "Configuring 2Captcha extension..."
-  apt-get install -y -qq --no-install-recommends unzip 2>/dev/null || true
-  curl -fsSL "https://github.com/rucaptcha/2captcha-solver/archive/refs/heads/main.zip" -o /tmp/2captcha-solver.zip
-  unzip -o /tmp/2captcha-solver.zip -d /tmp/ 2>/dev/null || true
-  if [ -d /tmp/2captcha-solver-main ]; then
-    cp -r /tmp/2captcha-solver-main/* /opt/openclaw-data/2captcha-extension/ 2>/dev/null || true
-    rm -rf /tmp/2captcha-solver.zip /tmp/2captcha-solver-main
-    if [ -f /opt/openclaw-data/2captcha-extension/common/config.js ]; then
-      sed -i "s|apiKey: null|apiKey: \"${CAPTCHA_2CAPTCHA_API_KEY}\"|" /opt/openclaw-data/2captcha-extension/common/config.js
-    fi
-    echo "[setup] 2Captcha extension configured"
-  fi
+ dlog "Configuring 2Captcha extension..."
+ apt-get install -y -qq --no-install-recommends unzip 2>/dev/null || true
+ curl -fsSL "https://github.com/rucaptcha/2captcha-solver/archive/refs/heads/main.zip" -o /tmp/2captcha-solver.zip
+ unzip -o /tmp/2captcha-solver.zip -d /tmp/ 2>/dev/null || true
+ if [ -d /tmp/2captcha-solver-main ]; then
+ cp -r /tmp/2captcha-solver-main/* /opt/openclaw-data/2captcha-extension/ 2>/dev/null || true
+ rm -rf /tmp/2captcha-solver.zip /tmp/2captcha-solver-main
+ if [ -f /opt/openclaw-data/2captcha-extension/common/config.js ]; then
+ sed -i "s|apiKey: null|apiKey: \"${CAPTCHA_2CAPTCHA_API_KEY}\"|" /opt/openclaw-data/2captcha-extension/common/config.js
+ fi
+ echo "[setup] 2Captcha extension configured"
+ fi
 fi
 
 # Load 2Captcha extension via Chrome wrapper + Xvnc (extensions need a display context).
@@ -1003,14 +1008,14 @@ fi
 # in the web app via noVNC. Also routes Chrome through 2captcha residential proxy
 # so browsing comes from residential IPs (avoids Google/Cloudflare blocks).
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ] && [ -d /opt/openclaw-data/2captcha-extension ] && [ -n "$(ls -A /opt/openclaw-data/2captcha-extension 2>/dev/null)" ]; then
-  cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP'
+ cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP'
 #!/bin/bash
 # ── Xvnc: Virtual display + VNC server on :99 (port 5999) ──
 # Xvnc replaces Xvfb — same virtual display but also serves VNC for live browser view
 if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
-  Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
-    -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
-  sleep 0.5
+ Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
+ -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
+ sleep 0.5
 fi
 export DISPLAY=:99
 
@@ -1021,69 +1026,69 @@ PROXY_ARGS=""
 EXT_DIRS="/opt/openclaw-data/2captcha-extension"
 PROXY_CACHE=/tmp/.2captcha-proxy-user
 if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
-  # Fetch proxy username from 2captcha API (cached — only calls API once per container)
-  if [ ! -f "$PROXY_CACHE" ]; then
-    PROXY_USERNAME=$(curl -sf "https://api.2captcha.com/proxy?key=${CAPTCHA_2CAPTCHA_API_KEY}" 2>/dev/null \
-      | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
-    if [ -n "$PROXY_USERNAME" ]; then
-      echo "$PROXY_USERNAME" > "$PROXY_CACHE"
-    fi
-  fi
-  PROXY_KEY=$(cat "$PROXY_CACHE" 2>/dev/null || echo "")
+ # Fetch proxy username from 2captcha API (cached — only calls API once per container)
+ if [ ! -f "$PROXY_CACHE" ]; then
+ PROXY_USERNAME=$(curl -sf "https://api.2captcha.com/proxy?key=${CAPTCHA_2CAPTCHA_API_KEY}" 2>/dev/null \
+ | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
+ if [ -n "$PROXY_USERNAME" ]; then
+ echo "$PROXY_USERNAME" > "$PROXY_CACHE"
+ fi
+ fi
+ PROXY_KEY=$(cat "$PROXY_CACHE" 2>/dev/null || echo "")
 
-  if [ -n "$PROXY_KEY" ]; then
-    # Generate fresh session ID for a new residential IP each Chrome launch
-    SESSION_ID=$(head -c 12 /dev/urandom | base64 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 9)
-    PROXY_USER="${PROXY_KEY}-zone-custom-session-${SESSION_ID}-sessTime-120"
-    PROXY_PASS="${PROXY_KEY}"
-    PROXY_ARGS="--proxy-server=http://na.proxy.2captcha.com:2334"
+ if [ -n "$PROXY_KEY" ]; then
+ # Generate fresh session ID for a new residential IP each Chrome launch
+ SESSION_ID=$(head -c 12 /dev/urandom | base64 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 9)
+ PROXY_USER="${PROXY_KEY}-zone-custom-session-${SESSION_ID}-sessTime-120"
+ PROXY_PASS="${PROXY_KEY}"
+ PROXY_ARGS="--proxy-server=http://na.proxy.2captcha.com:2334"
 
-    # Create a small MV3 extension that handles proxy authentication
-    PROXY_EXT_DIR=/tmp/proxy-auth-ext
-    mkdir -p "$PROXY_EXT_DIR"
-    cat > "$PROXY_EXT_DIR/manifest.json" << 'PMANI'
-{"manifest_version":3,"name":"Proxy Auth","version":"1.0","permissions":["webRequest","webRequestAuthProvider"],"host_permissions":["<all_urls>"],"background":{"service_worker":"background.js"}}
+ # Create a small MV3 extension that handles proxy authentication
+ PROXY_EXT_DIR=/tmp/proxy-auth-ext
+ mkdir -p "$PROXY_EXT_DIR"
+ cat > "$PROXY_EXT_DIR/manifest.json" << 'PMANI'
+{"manifest_version":3,"name":"Proxy Auth","version":"1.0","permissions":["webRequest","webRequestAuthProvider"],"host_permissions":[" "],"background":{"service_worker":"background.js"}}
 PMANI
-    cat > "$PROXY_EXT_DIR/background.js" << PBGJS
+ cat > "$PROXY_EXT_DIR/background.js" << PBGJS
 chrome.webRequest.onAuthRequired.addListener(
-  (details, callback) => {
-    callback({ authCredentials: { username: "${PROXY_USER}", password: "${PROXY_PASS}" } });
-  },
-  { urls: ["<all_urls>"] },
-  ["asyncBlocking"]
+ (details, callback) => {
+ callback({ authCredentials: { username: "${PROXY_USER}", password: "${PROXY_PASS}" } });
+ },
+ { urls: [" "] },
+ ["asyncBlocking"]
 );
 PBGJS
-    EXT_DIRS="${EXT_DIRS},${PROXY_EXT_DIR}"
-  fi
+ EXT_DIRS="${EXT_DIRS},${PROXY_EXT_DIR}"
+ fi
 fi
 
 # ── Proxy validation: test credentials before committing to proxy mode ──
 # If the proxy rejects our credentials, ALL Chrome traffic fails with
 # ERR_INVALID_AUTH_CREDENTIALS. Better to browse without proxy than not at all.
 if [ -n "$PROXY_ARGS" ]; then
-  PROXY_OK=false
-  if curl -x "http://${PROXY_USER}:${PROXY_PASS}@na.proxy.2captcha.com:2334" \
-       -sf -o /dev/null --max-time 10 "http://httpbin.org/ip" 2>/dev/null; then
-    PROXY_OK=true
-    echo "[chrome-wrapper] Proxy validated OK (residential IP active)" >&2
-  fi
-  if [ "$PROXY_OK" = "false" ]; then
-    echo "[chrome-wrapper] WARNING: Proxy auth failed — launching Chrome without proxy" >&2
-    PROXY_ARGS=""
-    # Keep the 2captcha solver extension (still useful for CAPTCHAs) but drop the proxy-auth ext
-    EXT_DIRS="/opt/openclaw-data/2captcha-extension"
-  fi
+ PROXY_OK=false
+ if curl -x "http://${PROXY_USER}:${PROXY_PASS}@na.proxy.2captcha.com:2334" \
+ -sf -o /dev/null --max-time 10 "http://httpbin.org/ip" 2>/dev/null; then
+ PROXY_OK=true
+ echo "[chrome-wrapper] Proxy validated OK (residential IP active)" >&2
+ fi
+ if [ "$PROXY_OK" = "false" ]; then
+ echo "[chrome-wrapper] WARNING: Proxy auth failed — launching Chrome without proxy" >&2
+ PROXY_ARGS=""
+ # Keep the 2captcha solver extension (still useful for CAPTCHAs) but drop the proxy-auth ext
+ EXT_DIRS="/opt/openclaw-data/2captcha-extension"
+ fi
 fi
 
 exec /usr/bin/google-chrome-stable \
-  --load-extension=${EXT_DIRS} \
-  --disable-extensions-except=${EXT_DIRS} \
-  --disable-blink-features=AutomationControlled \
-  ${PROXY_ARGS} \
-  "$@"
+ --load-extension=${EXT_DIRS} \
+ --disable-extensions-except=${EXT_DIRS} \
+ --disable-blink-features=AutomationControlled \
+ ${PROXY_ARGS} \
+ "$@"
 CHROMEWRAP
-  chmod +x /opt/openclaw-data/chrome-wrapper.sh
-  echo "[setup] 2Captcha: Chrome wrapper configured (proxy + extensions + Xvnc display)"
+ chmod +x /opt/openclaw-data/chrome-wrapper.sh
+ echo "[setup] 2Captcha: Chrome wrapper configured (proxy + extensions + Xvnc display)"
 fi
 
 # Fix permissions: container runs as uid 1000, files should be private
@@ -1102,36 +1107,36 @@ wait $DOCKER_PULL_PID 2>/dev/null || true
 # Check pull result
 IMAGE_READY=false
 if [ -f /tmp/docker-pull-status ]; then
-  source /tmp/docker-pull-status
+ source /tmp/docker-pull-status
 fi
 cat "$DOCKER_PULL_LOG" 2>/dev/null || true
 
 if [ "$IMAGE_READY" = "true" ]; then
-  dlog "Docker image ready"
-  echo "Image pulled and tagged as openclaw:local"
+ dlog "Docker image ready"
+ echo "Image pulled and tagged as openclaw:local"
 else
-  dlog "Pull failed, falling back to local build..."
-  echo "Pull failed, falling back to local build..."
-  AVAIL_KB=$(df /var/lib/docker 2>/dev/null | tail -1 | awk '{print $4}')
-  AVAIL_GB=$((${AVAIL_KB:-0} / 1024 / 1024))
-  for attempt in 1 2; do
-    dlog "Docker build attempt ${attempt}/2..."
-    if docker build --no-cache --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .; then
-      IMAGE_READY=true
-      dlog "Docker image built from source (attempt ${attempt})"
-      break
-    fi
-    dlog "Build attempt ${attempt} failed"
-    docker system prune -a -f 2>/dev/null || true
-    systemctl restart docker 2>/dev/null || true
-    sleep $((attempt * 5))
-  done
+ dlog "Pull failed, falling back to local build..."
+ echo "Pull failed, falling back to local build..."
+ AVAIL_KB=$(df /var/lib/docker 2>/dev/null | tail -1 | awk '{print $4}')
+ AVAIL_GB=$((${AVAIL_KB:-0} / 1024 / 1024))
+ for attempt in 1 2; do
+ dlog "Docker build attempt ${attempt}/2..."
+ if docker build --no-cache --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .; then
+ IMAGE_READY=true
+ dlog "Docker image built from source (attempt ${attempt})"
+ break
+ fi
+ dlog "Build attempt ${attempt} failed"
+ docker system prune -a -f 2>/dev/null || true
+ systemctl restart docker 2>/dev/null || true
+ sleep $((attempt * 5))
+ done
 fi
 
 if [ "$IMAGE_READY" != "true" ]; then
-  dlog "FATAL: Could not pull or build Docker image after retries" "failed"
-  echo "ERROR: Failed to obtain Docker image after multiple attempts."
-  exit 1
+ dlog "FATAL: Could not pull or build Docker image after retries" "failed"
+ echo "ERROR: Failed to obtain Docker image after multiple attempts."
+ exit 1
 fi
 
 dlog "Starting containers..."
@@ -1141,41 +1146,41 @@ docker compose up -d
 # Wait for container to be healthy before running exec commands
 dlog "Waiting for container to start..."
 for _cw in $(seq 1 20); do
-  if docker compose ps --format json 2>/dev/null | grep -q '"running"'; then
-    echo "Container running after ${_cw}s"
-    break
-  fi
-  sleep 1
+ if docker compose ps --format json 2>/dev/null | grep -q '"running"'; then
+ echo "Container running after ${_cw}s"
+ break
+ fi
+ sleep 1
 done
 sleep 2
 
 # Wait for startup.sh to finish Chrome install (it runs as the container entrypoint)
 dlog "Waiting for Chrome install in container..."
 for _chrome_wait in $(seq 1 30); do
-  if docker compose exec -T openclaw-gateway bash -c 'command -v google-chrome-stable' >/dev/null 2>&1; then
-    echo "Chrome ready after ${_chrome_wait}s"
-    break
-  fi
-  sleep 2
+ if docker compose exec -T openclaw-gateway bash -c 'command -v google-chrome-stable' >/dev/null 2>&1; then
+ echo "Chrome ready after ${_chrome_wait}s"
+ break
+ fi
+ sleep 2
 done
 
 # Fallback: if startup.sh didn't install Chrome, install it now using curl
 docker compose exec -T openclaw-gateway bash -c '
  if command -v google-chrome-stable &>/dev/null; then
-   echo "Chrome: $(google-chrome-stable --version 2>/dev/null)"
-   exit 0
+ echo "Chrome: $(google-chrome-stable --version 2>/dev/null)"
+ exit 0
  fi
  echo "Chrome not found, installing via curl..."
  for _cr in 1 2 3; do
-   if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
-     apt-get update -qq 2>/dev/null
-     dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
-     rm -f /tmp/chrome.deb
-     echo "Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo unknown)"
-     exit 0
-   fi
-   echo "Chrome download attempt ${_cr} failed, retrying..."
-   sleep 5
+ if curl -fsSL -o /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; then
+ apt-get update -qq 2>/dev/null
+ dpkg -i /tmp/chrome.deb 2>/dev/null || apt-get install -y -f 2>/dev/null
+ rm -f /tmp/chrome.deb
+ echo "Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo unknown)"
+ exit 0
+ fi
+ echo "Chrome download attempt ${_cr} failed, retrying..."
+ sleep 5
  done
  echo "WARNING: Chrome install failed (non-fatal — startup.sh will retry on next restart)"
 ' || echo "Chrome exec skipped (non-fatal)"
@@ -1186,17 +1191,17 @@ docker image prune -f 2>/dev/null || true
 dlog "Waiting for OpenClaw gateway to start listening..."
 _gw_ready=0
 for _gw_wait in $(seq 1 45); do
-  if docker compose exec -T openclaw-gateway node -e "fetch('http://127.0.0.1:${GATEWAY_PORT}/',{signal:AbortSignal.timeout(3000)}).then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
-    echo "Gateway ready after ${_gw_wait}s"
-    _gw_ready=1
-    break
-  fi
-  sleep 2
+ if docker compose exec -T openclaw-gateway node -e "fetch('http://127.0.0.1:${GATEWAY_PORT}/',{signal:AbortSignal.timeout(3000)}).then(()=>process.exit(0)).catch(()=>process.exit(1))" 2>/dev/null; then
+ echo "Gateway ready after ${_gw_wait}s"
+ _gw_ready=1
+ break
+ fi
+ sleep 2
 done
 if [ "$_gw_ready" -eq 0 ]; then
-  echo "WARNING: Gateway did not respond after 90s — running setup/doctor anyway"
-  # Dump container logs for debugging
-  docker compose logs --tail 40 openclaw-gateway 2>/dev/null || true
+ echo "WARNING: Gateway did not respond after 90s — running setup/doctor anyway"
+ # Dump container logs for debugging
+ docker compose logs --tail 40 openclaw-gateway 2>/dev/null || true
 fi
 
 # Run openclaw setup/doctor (use node directly — openclaw CLI is not in PATH)
@@ -1211,13 +1216,13 @@ dlog "Setting up Bridge..."
 mkdir -p /opt/openclaw-bridge
 dlog "Downloading bridge from GitHub..."
 for _dl_attempt in 1 2 3; do
-  if curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/package.json" -o /opt/openclaw-bridge/package.json && \
-     curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/index.mjs" -o /opt/openclaw-bridge/index.mjs; then
-    dlog "Bridge downloaded ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
-    break
-  fi
-  dlog "Bridge download attempt ${_dl_attempt} failed, retrying..."
-  sleep $((${_dl_attempt} * 3))
+ if curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/package.json" -o /opt/openclaw-bridge/package.json && \
+ curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/index.mjs" -o /opt/openclaw-bridge/index.mjs; then
+ dlog "Bridge downloaded ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
+ break
+ fi
+ dlog "Bridge download attempt ${_dl_attempt} failed, retrying..."
+ sleep $((${_dl_attempt} * 3))
 done
 
 # Create poller stub (fast)
@@ -1245,27 +1250,27 @@ dlog "Installing bridge, sandbox, and dependencies in parallel..."
 
 # Task 1: Bridge npm install (background)
 (cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
-  npm cache clean --force 2>/dev/null || true
-  timeout 180 npm install 2>&1
+ npm cache clean --force 2>/dev/null || true
+ timeout 180 npm install 2>&1
 }) &
 BRIDGE_NPM_PID=$!
 
 # Task 2: Sandbox base image build (background)
 (
-  cd /opt/openclaw
-  dlog "Building sandbox base image..."
-  if bash scripts/sandbox-setup.sh 2>&1; then
-    echo "Sandbox image built: openclaw-sandbox:bookworm-slim"
-  else
-    echo "WARNING: Sandbox image build failed (non-fatal)"
-  fi
+ cd /opt/openclaw
+ dlog "Building sandbox base image..."
+ if bash scripts/sandbox-setup.sh 2>&1; then
+ echo "Sandbox image built: openclaw-sandbox:bookworm-slim"
+ else
+ echo "WARNING: Sandbox image build failed (non-fatal)"
+ fi
 ) &
 SANDBOX_PID=$!
 
 # Task 3: Poller npm + librarium + noVNC (foreground — fastest)
 cd /opt/openclaw-poller && timeout 120 npm install --prefer-offline 2>/dev/null || timeout 120 npm install
 timeout 120 npm install -g librarium 2>&1 || {
-  dlog "librarium install failed (non-fatal, deep research will be unavailable)"
+ dlog "librarium install failed (non-fatal, deep research will be unavailable)"
 }
 
 # noVNC + websockify — enables live browser streaming for all orgs
@@ -1276,11 +1281,11 @@ echo "[setup] noVNC + websockify installed for VNC live view"
 # ── Desktop (LXQt) setup — manual use via CrabsHQ Desktop panel ──────────────
 dlog "Installing desktop packages (LXQt, x11vnc, apps)..."
 apt-get install -y -qq --no-install-recommends \
-  xvfb xorg openbox x11vnc xterm \
-  lxqt-core lxqt-panel lxqt-runner \
-  pcmanfm-qt feh papirus-icon-theme \
-  fonts-dejavu fonts-liberation \
-  xdg-utils wget 2>/dev/null || true
+ xvfb xorg openbox x11vnc xterm xdotool \
+ lxqt-core lxqt-panel lxqt-runner \
+ pcmanfm-qt feh papirus-icon-theme \
+ fonts-dejavu fonts-liberation \
+ xdg-utils wget 2>/dev/null || true
 # Install snap Firefox (Ubuntu 24.04 doesn't have firefox-esr deb)
 snap install firefox 2>/dev/null || true
 echo "[setup] LXQt desktop packages installed"
@@ -1303,8 +1308,8 @@ chmod 700 "$XDG_RUNTIME_DIR"
 
 # Start Xvfb on display :1
 if ! pgrep -f 'Xvfb :1' > /dev/null 2>&1; then
-  nohup Xvfb :1 -screen 0 1280x800x24 > /var/log/xvfb.log 2>&1 &
-  sleep 2
+ nohup Xvfb :1 -screen 0 1280x800x24 > /var/log/xvfb.log 2>&1 &
+ sleep 2
 fi
 
 export DISPLAY=:1
@@ -1315,27 +1320,27 @@ printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/
 
 # Start openbox first (WM must run before lxqt-session, no --display flag)
 if ! pgrep -f 'openbox' > /dev/null 2>&1; then
-  nohup openbox > /var/log/openbox.log 2>&1 &
-  sleep 2
+ nohup openbox > /var/log/openbox.log 2>&1 &
+ sleep 2
 fi
 
 # Start LXQt session (openbox already running, skips WM dialog)
 if ! pgrep -f 'lxqt-session' > /dev/null 2>&1; then
-  nohup dbus-run-session lxqt-session > /var/log/lxqt.log 2>&1 &
-  sleep 3
+ nohup dbus-run-session lxqt-session > /var/log/lxqt.log 2>&1 &
+ sleep 3
 fi
 
 # Explicitly start lxqt-panel (autostart unreliable in headless env)
 if ! pgrep -f 'lxqt-panel' > /dev/null 2>&1; then
-  nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
-  sleep 1
+ nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
+ sleep 1
 fi
 
 # Start x11vnc on display :1, port 5901
 if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
-  nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 \
-    -o /var/log/x11vnc-desktop.log -quiet > /dev/null 2>&1 &
-  sleep 1
+ nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 \
+ -o /var/log/x11vnc-desktop.log -quiet > /dev/null 2>&1 &
+ sleep 1
 fi
 
 # Set wallpaper
@@ -1343,15 +1348,17 @@ feh --bg-fill /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
 
 # Start pcmanfm-qt in desktop mode (shows icons)
 if ! pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then
-  nohup pcmanfm-qt --desktop > /var/log/pcmanfm-desktop.log 2>&1 &
-  sleep 1
+ nohup pcmanfm-qt --desktop > /var/log/pcmanfm-desktop.log 2>&1 &
+ sleep 1
 fi
 
 # Start websockify bridging port 6081 → VNC 5901
 if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
-  nohup websockify --web=/usr/share/novnc 6081 localhost:5901 \
-    > /var/log/websockify-desktop.log 2>&1 &
+ nohup websockify --web=/usr/share/novnc 6081 localhost:5901 \
+ > /var/log/websockify-desktop.log 2>&1 &
 fi
+
+systemctl start crabhq-agent-daemon 2>/dev/null || true
 
 echo 'Desktop started on :1, noVNC on port 6081'
 DSTART
@@ -1360,10 +1367,11 @@ chmod +x /usr/local/bin/crabhq-desktop-start
 # Desktop stop script
 cat > /usr/local/bin/crabhq-desktop-stop << 'DSTOP'
 #!/bin/bash
+systemctl stop crabhq-agent-daemon 2>/dev/null || true
 pkill -f "websockify.*6081" 2>/dev/null || true
-pkill -f "x11vnc.*5901"     2>/dev/null || true
-pkill -f "lxqt-session"     2>/dev/null || true
-pkill -f "Xorg :1"          2>/dev/null || true
+pkill -f "x11vnc.*5901" 2>/dev/null || true
+pkill -f "lxqt-session" 2>/dev/null || true
+pkill -f "Xorg :1" 2>/dev/null || true
 echo "Desktop stopped"
 DSTOP
 chmod +x /usr/local/bin/crabhq-desktop-stop
@@ -1380,50 +1388,75 @@ const TOKEN_FILE = '/tmp/playwright-ws-token';
 const GATEWAY_URL = process.env.GATEWAY_URL || '';
 
 const run = (cmd) => new Promise((res, rej) =>
-  exec(cmd, (err, out) => err ? rej(err.message) : res(out.trim()))
+ exec(cmd, (err, out) => err ? rej(err.message) : res(out.trim()))
 );
 const running = (pat) => new Promise(res =>
-  exec(`pgrep -f "${pat}"`, err => res(!err))
+ exec(`pgrep -f "${pat}"`, err => res(!err))
 );
 
 http.createServer(async (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  const url = new URL(req.url, `http://localhost`);
-  try {
-    if (req.method === 'POST' && url.pathname === '/desktop/start') {
-      await run('/usr/local/bin/crabhq-desktop-start');
-      res.end(JSON.stringify({ ok: true }));
-    } else if (req.method === 'POST' && url.pathname === '/desktop/stop') {
-      await run('/usr/local/bin/crabhq-desktop-stop');
-      res.end(JSON.stringify({ ok: true }));
-    } else if (req.method === 'GET' && url.pathname === '/desktop/status') {
-      const [novnc, vnc, lxqt] = await Promise.all([
-        running('websockify.*6081'),
-        running('x11vnc.*5901'),
-        running('lxqt-session'),
-      ]);
-      res.end(JSON.stringify({ active: novnc && vnc, novnc, vnc, lxqt }));
-    } else if (req.method === 'GET' && url.pathname === '/browser/endpoint') {
-      try {
-        const token = readFileSync(TOKEN_FILE, 'utf8').trim();
-        const wsUrl = `${GATEWAY_URL.replace('https://', 'wss://')}/playwright-ws/${token}`;
-        res.end(JSON.stringify({ wsEndpoint: wsUrl, ready: true }));
-      } catch {
-        res.writeHead(503);
-        res.end(JSON.stringify({ ready: false, error: 'Playwright server not ready' }));
-      }
-    } else {
-      res.writeHead(404);
-      res.end(JSON.stringify({ error: 'not found' }));
-    }
-  } catch (err) {
-    res.writeHead(500);
-    res.end(JSON.stringify({ error: String(err) }));
-  }
+ res.setHeader('Content-Type', 'application/json');
+ res.setHeader('Access-Control-Allow-Origin', '*');
+ const url = new URL(req.url, `http://localhost`);
+ try {
+ if (req.method === 'POST' && url.pathname === '/desktop/start') {
+ await run('/usr/local/bin/crabhq-desktop-start');
+ res.end(JSON.stringify({ ok: true }));
+ } else if (req.method === 'POST' && url.pathname === '/desktop/stop') {
+ await run('/usr/local/bin/crabhq-desktop-stop');
+ res.end(JSON.stringify({ ok: true }));
+ } else if (req.method === 'GET' && url.pathname === '/desktop/status') {
+ const [novnc, vnc, lxqt] = await Promise.all([
+ running('websockify.*6081'),
+ running('x11vnc.*5901'),
+ running('lxqt-session'),
+ ]);
+ res.end(JSON.stringify({ active: novnc && vnc, novnc, vnc, lxqt }));
+ } else if (req.method === 'GET' && url.pathname === '/browser/endpoint') {
+ try {
+ const token = readFileSync(TOKEN_FILE, 'utf8').trim();
+ const wsUrl = `${GATEWAY_URL.replace('https://', 'wss://')}/playwright-ws/${token}`;
+ res.end(JSON.stringify({ wsEndpoint: wsUrl, ready: true }));
+ } catch {
+ res.writeHead(503);
+ res.end(JSON.stringify({ ready: false, error: 'Playwright server not ready' }));
+ }
+ } else {
+ res.writeHead(404);
+ res.end(JSON.stringify({ error: 'not found' }));
+ }
+ } catch (err) {
+ res.writeHead(500);
+ res.end(JSON.stringify({ error: String(err) }));
+ }
 }).listen(PORT, '0.0.0.0', () => console.log(`[desktop-api] :${PORT}`));
 JSEOF
 echo "[setup] Desktop control API written"
+
+# Agent Daemon — Unix socket server for desktop exec (OpenClaw native integration)
+mkdir -p /opt/crabhq-agent-daemon
+curl -fsSL "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/agent-daemon.mjs" -o /opt/crabhq-agent-daemon/agent-daemon.mjs 2>/dev/null || true
+if [ -s /opt/crabhq-agent-daemon/agent-daemon.mjs ]; then
+  chmod +x /opt/crabhq-agent-daemon/agent-daemon.mjs
+  cat > /etc/systemd/system/crabhq-agent-daemon.service << 'AGENTDAEMON'
+[Unit]
+Description=CrabsHQ Agent Daemon (desktop exec)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/crabhq-agent-daemon/agent-daemon.mjs
+Environment=WORKSPACE_DIR=/opt/openclaw-data/workspace
+Environment=AGENT_DAEMON_SOCKET=/var/run/openclaw/agent-daemon.sock
+Environment=DISPLAY=:1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+AGENTDAEMON
+  systemctl enable crabhq-agent-daemon
+  echo "[setup] Agent Daemon installed"
+fi
 
 # Install Playwright for VPS browser server
 cd /opt/crabhq-desktop-api
@@ -1441,28 +1474,28 @@ const TOKEN_FILE = '/tmp/playwright-ws-token';
 let retryCount = 0;
 
 async function startServer() {
-  try {
-    const server = await chromium.launchServer({
-      headless: false,
-      executablePath: '/usr/bin/chromium-browser',
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--window-size=1280,800'],
-      env: { ...process.env, DISPLAY: ':1', XAUTHORITY: '/root/.Xauthority' },
-      port: PORT,
-    });
-    const token = server.wsEndpoint().split('/').pop();
-    writeFileSync(TOKEN_FILE, token, 'utf8');
-    console.log(`[playwright-server] Ready — token: ${token}`);
-    retryCount = 0;
-    server.process().on('exit', () => {
-      console.log('[playwright-server] Chromium exited, restarting in 3s...');
-      setTimeout(startServer, 3000);
-    });
-  } catch (err) {
-    retryCount++;
-    const delay = Math.min(retryCount * 2000, 30000);
-    console.error(`[playwright-server] Failed (attempt ${retryCount}): ${err.message}`);
-    setTimeout(startServer, delay);
-  }
+ try {
+ const server = await chromium.launchServer({
+ headless: false,
+ executablePath: '/usr/bin/chromium-browser',
+ args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--window-size=1280,800'],
+ env: { ...process.env, DISPLAY: ':1', XAUTHORITY: '/root/.Xauthority' },
+ port: PORT,
+ });
+ const token = server.wsEndpoint().split('/').pop();
+ writeFileSync(TOKEN_FILE, token, 'utf8');
+ console.log(`[playwright-server] Ready — token: ${token}`);
+ retryCount = 0;
+ server.process().on('exit', () => {
+ console.log('[playwright-server] Chromium exited, restarting in 3s...');
+ setTimeout(startServer, 3000);
+ });
+ } catch (err) {
+ retryCount++;
+ const delay = Math.min(retryCount * 2000, 30000);
+ console.error(`[playwright-server] Failed (attempt ${retryCount}): ${err.message}`);
+ setTimeout(startServer, delay);
+ }
 }
 startServer();
 PWEOF
@@ -1471,7 +1504,7 @@ echo "[setup] Playwright server script written"
 # Download wallpaper
 mkdir -p /usr/local/share
 wget -q 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1280&h=800&fit=crop' \
-  -O /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
+ -O /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
 
 # Configure pcmanfm-qt desktop (wallpaper + single-click + Papirus icons)
 mkdir -p /root/.config/pcmanfm-qt/default
@@ -1527,29 +1560,29 @@ chmod +x /root/Desktop/*.desktop
 # Openbox right-click menu
 mkdir -p /root/.config/openbox
 cat > /root/.config/openbox/menu.xml << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_menu xmlns="http://openbox.org/3.4/menu">
-  <menu id="root-menu" label="Desktop Menu">
-    <item label="Firefox"><action name="Execute"><command>/snap/bin/firefox</command></action></item>
-    <item label="Files"><action name="Execute"><command>pcmanfm-qt</command></action></item>
-    <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>
-    <separator />
-    <item label="Reconfigure"><action name="Reconfigure" /></item>
-  </menu>
-</openbox_menu>
+ 
+ 
+ 
+ /snap/bin/firefox 
+ pcmanfm-qt 
+ xterm 
+ 
+ 
+ 
+ 
 EOF
 
 # Hide noVNC sidebar by default
-sed -i 's|</head>|<style>#noVNC_control_bar_anchor { display: none !important; }</style>\n</head>|' \
-  /usr/share/novnc/vnc.html 2>/dev/null || true
+sed -i 's| | #noVNC_control_bar_anchor { display: none !important; } \n |' \
+ /usr/share/novnc/vnc.html 2>/dev/null || true
 
 echo "[setup] Desktop UI configured (wallpaper, icons, menu, noVNC sidebar hidden)"
 
 # Wait for parallel tasks to complete
 dlog "Waiting for bridge npm install..."
 wait $BRIDGE_NPM_PID 2>/dev/null || {
-  dlog "Bridge npm install may have failed, retrying..."
-  cd /opt/openclaw-bridge && npm cache clean --force 2>/dev/null; timeout 180 npm install 2>&1
+ dlog "Bridge npm install may have failed, retrying..."
+ cd /opt/openclaw-bridge && npm cache clean --force 2>/dev/null; timeout 180 npm install 2>&1
 }
 dlog "Waiting for sandbox build..."
 wait $SANDBOX_PID 2>/dev/null || true
@@ -1732,16 +1765,16 @@ systemctl start openclaw-docker
 dlog "Waiting for OpenClaw gateway..."
 _gw_alive=0
 for i in $(seq 1 30); do
-  if curl -sf --max-time 2 http://127.0.0.1:${GATEWAY_PORT}/ >/dev/null 2>&1; then
-    echo "Gateway: ALIVE (ready after ${i}s)"
-    _gw_alive=1
-    break
-  fi
-  sleep 2
+ if curl -sf --max-time 2 http://127.0.0.1:${GATEWAY_PORT}/ >/dev/null 2>&1; then
+ echo "Gateway: ALIVE (ready after ${i}s)"
+ _gw_alive=1
+ break
+ fi
+ sleep 2
 done
 if [ "$_gw_alive" -eq 0 ]; then
-  echo "WARNING: Gateway did not respond after 60s"
-  docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
+ echo "WARNING: Gateway did not respond after 60s"
+ docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
 fi
 
 # Start bridge, poller, caddy (bridge has pre-approved identity, connects on first try)
