@@ -2606,7 +2606,7 @@ app.post('/skills/:slug/install', async (req, res) => {
  try {
  console.log(`📦 Installing skill "${slug}" via clawhub...`);
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub install ${slug} 2>&1'`,
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub install ${slug} --force 2>&1'`,
  { timeout: 60000 }
  ).toString();
  console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);

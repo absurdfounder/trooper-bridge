@@ -807,6 +807,7 @@ fi
 # Fix permissions: ensure node user can read config files
 # (files may have been written by root via bridge or UI before container started)
 chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
+chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
 chmod 700 /home/node/.openclaw 2>/dev/null || true
 chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
 find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
