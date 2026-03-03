@@ -650,6 +650,33 @@ class OpenClawGateway {
  if (onEvent) onEvent('subagent_text', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
  } else if (stream === 'thinking' && data?.text) {
  if (onEvent) onEvent('subagent_thinking', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
+ } else if (stream === 'lifecycle' && data?.phase === 'end') {
+ // Sub-agent lifecycle ended — emit subagent_done with real completion data
+ console.log(`[SUBAGENT:done] ${subInfo.name} (runId=${runId}) lifecycle ended`);
+ if (onEvent) onEvent('subagent_done', {
+ subAgentRunId: runId,
+ parentRunId: subInfo.parentRunId,
+ depth: subInfo.depth,
+ subAgentName: subInfo.name,
+ summary: data.summary || '',
+ durationMs: Date.now() - (subInfo.startedAt || Date.now()),
+ toolCount: subInfo.toolCount || 0,
+ });
+ activeSubAgents.delete(runId);
+ } else if (stream === 'task_completion' && data) {
+ // New v2026.3.1: typed task_completion event from gateway
+ console.log(`[SUBAGENT:task_completion] ${subInfo.name} (runId=${runId}) task=${data.status || 'done'}`);
+ if (onEvent) onEvent('subagent_done', {
+ subAgentRunId: runId,
+ parentRunId: subInfo.parentRunId,
+ depth: subInfo.depth,
+ subAgentName: subInfo.name,
+ summary: data.result || data.summary || data.message || '',
+ status: data.status || 'completed',
+ durationMs: data.durationMs || (Date.now() - (subInfo.startedAt || Date.now())),
+ toolCount: subInfo.toolCount || 0,
+ });
+ activeSubAgents.delete(runId);
  }
  return; // Don't process sub-agent events as main agent events
  }
@@ -895,9 +922,11 @@ class OpenClawGateway {
  const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 1000 : 300;
  last.summary = typeof data.content === 'string' ? data.content.substring(0, summaryLimit) : (data.output || '').substring(0, summaryLimit);
  }
- // When sessions_spawn completes, emit subagent_done with parent/depth for tree rendering
+ // When sessions_spawn completes, emit subagent_done for any agents not already
+ // cleaned up by lifecycle:end or task_completion events (fallback for older gateways)
  if (last?.tool === 'sessions_spawn' || last?.tool === 'Task') {
  for (const [subRunId, subInfo] of activeSubAgents) {
+ console.log(`[SUBAGENT:fallback_done] ${subInfo.name} (runId=${subRunId}) — no lifecycle/task_completion received, using tool_result`);
  if (onEvent) onEvent('subagent_done', { subAgentRunId: subRunId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name, summary: last?.summary || '' });
  }
  activeSubAgents.clear();
