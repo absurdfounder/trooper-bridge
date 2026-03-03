@@ -1819,7 +1819,7 @@ else
 fi
 
 if systemctl is-active --quiet caddy; then
- echo "Caddy: RUNNING (HTTPS via ${SSLIP_DOMAIN:-unknown})"
+ echo "Caddy: RUNNING (HTTPS via ${HTTPS_DOMAIN:-unknown})"
 else
  echo "Caddy: NOT RUNNING"
  journalctl -u caddy --no-pager -n 10
