@@ -1220,17 +1220,42 @@ function loadAgentRegistry() {
 // Load registry on startup
 loadAgentRegistry();
 
-// ── Startup migration: ensure sandbox agents can use host browser ──────────
+// ── Startup config migrations ──────────────────────────────────────────────
 try {
  const configPath = '/opt/openclaw-data/config/openclaw.json';
  const config = JSON.parse(readFileSync(configPath, 'utf8'));
  let changed = false;
  const sandbox = config?.agents?.defaults?.sandbox;
- if (sandbox && (!sandbox.browser || !sandbox.browser.allowHostControl)) {
- if (!sandbox.browser) sandbox.browser = {};
- sandbox.browser.allowHostControl = true;
- changed = true;
- console.log('[bridge] Migrated sandbox browser config: allowHostControl=true');
+ // Startup migration: disable Docker sandbox — Docker socket permissions
+ // are unreliable inside the gateway container, causing all tasks to fail.
+ // Browser is a built-in tool (not sandboxed), so sandbox.mode "off" is safe.
+ if (sandbox && sandbox.mode && sandbox.mode !== 'off') {
+  const oldMode = sandbox.mode;
+  sandbox.mode = 'off';
+  // Remove Docker-specific sandbox config that no longer applies
+  delete sandbox.scope;
+  delete sandbox.workspaceAccess;
+  delete sandbox.docker;
+  delete sandbox.browser;
+  changed = true;
+  console.log(`[bridge] Migrated: sandbox.mode → off (was "${oldMode}")`);
+ }
+ // Also fix per-agent sandbox modes
+ if (Array.isArray(config.agents?.list)) {
+  for (const agent of config.agents.list) {
+   if (agent.sandbox && agent.sandbox.mode && agent.sandbox.mode !== 'off') {
+    const oldMode = agent.sandbox.mode;
+    agent.sandbox = { mode: 'off' };
+    changed = true;
+    console.log(`[bridge] Migrated: agent "${agent.id}" sandbox.mode → off (was "${oldMode}")`);
+   }
+  }
+ }
+ // Startup migration: exec host should be "gateway" when sandbox is off
+ if (config.tools?.exec?.host === 'sandbox') {
+  config.tools.exec.host = 'gateway';
+  changed = true;
+  console.log('[bridge] Migrated: tools.exec.host → gateway (sandbox is off)');
  }
  // Startup migration: add maxSpawnDepth if missing
  if (config.agents?.defaults?.subagents && !config.agents.defaults.subagents.maxSpawnDepth) {
@@ -1250,19 +1275,16 @@ try {
  changed = true;
  console.log('[bridge] Migrated: added heartbeat.directPolicy=allow');
  }
- // Startup migration: enable diffs plugin if missing (v2026.3.1 new tool)
- if (!config.plugins) config.plugins = {};
- if (!config.plugins.entries) config.plugins.entries = {};
- if (!config.plugins.entries.diffs) {
- config.plugins.entries.diffs = { enabled: true };
+ // Startup migration: remove diffs plugin — @pierre/diffs module not available
+ if (config.plugins?.entries?.diffs) {
+ delete config.plugins.entries.diffs;
  changed = true;
- console.log('[bridge] Migrated: enabled diffs plugin');
+ console.log('[bridge] Migrated: removed diffs plugin (module unavailable)');
  }
- // Startup migration: add diffs to tools.allow if missing
- if (Array.isArray(config.tools?.allow) && !config.tools.allow.includes('diffs')) {
- config.tools.allow.push('diffs');
+ if (Array.isArray(config.tools?.allow) && config.tools.allow.includes('diffs')) {
+ config.tools.allow = config.tools.allow.filter(t => t !== 'diffs');
  changed = true;
- console.log('[bridge] Migrated: added diffs to tools.allow');
+ console.log('[bridge] Migrated: removed diffs from tools.allow');
  }
  // Startup migration: restore gateway controlUi flags required for bridge proxy model
  const controlUi = config.gateway?.controlUi;
