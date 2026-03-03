@@ -132,7 +132,7 @@ app.use(express.json({ limit: '5mb' }));
 
 // Auth middleware — exempt health/deploy-logs (needed during provisioning)
 app.use((req, res, next) => {
- if (req.path === '/health' || req.path === '/deploy-logs' || req.path === '/deploy-logs-raw' || req.path === '/files' || req.path === '/llm/vision' || req.path.startsWith('/api/proxy/') || req.path.startsWith('/files/')) return next();
+ if (req.path === '/health' || req.path === '/deploy-logs' || req.path === '/deploy-logs-raw' || req.path === '/files' || req.path === '/llm/vision' || req.path.startsWith('/api/proxy/') || req.path.startsWith('/files/') || req.path.startsWith('/desktop-api/')) return next();
  if (!BRIDGE_AUTH_TOKEN) return next();
  const token = req.headers.authorization?.replace('Bearer ', '');
  if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
@@ -2758,7 +2758,7 @@ app.all('/desktop-api/*', async (req, res) => {
 app.post('/gateway/restart', (req, res) => {
  try {
  console.log('Restarting OpenClaw gateway container...');
- execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 });
+ execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
  try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 }); } catch {}
@@ -2772,10 +2772,10 @@ app.post('/gateway/restart', (req, res) => {
 
 app.get('/gateway/status', (req, res) => {
  try {
- const status = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-gateway 2>&1', { timeout: 10000 }).toString().trim();
+ const status = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 10000 }).toString().trim();
  const [state, running, restarts] = status.split(':');
  let logs = '';
- try { logs = execSync('docker logs --tail 20 openclaw-gateway 2>&1', { timeout: 10000 }).toString(); } catch {}
+ try { logs = execSync('docker logs --tail 20 openclaw-openclaw-gateway-1 2>&1', { timeout: 10000 }).toString(); } catch {}
  res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, websocketConnected: gateway.isReady, recentLogs: logs });
  } catch (err) {
  res.status(500).json({ error: 'Failed to get gateway status', details: err.message });
@@ -2794,7 +2794,7 @@ app.put('/gateway/config', (req, res) => {
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(req.body, null, 2), 'utf8');
  try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
  console.log('Gateway config updated, restarting...');
- execSync('docker restart openclaw-gateway 2>&1', { timeout: 30000 });
+ execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  setTimeout(() => gateway.connect(), 5000);
  res.json({ success: true, message: 'Config updated and gateway restarted' });
  } catch (err) { res.status(500).json({ error: 'Failed to update config', details: err.message }); }
