@@ -1692,7 +1692,10 @@ app.get('/deploy-logs-raw', (req, res) => {
 app.get('/health', (req, res) => {
  // During initial provisioning, return 'installing' so provision.js keeps polling
  // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
- const setupDone = existsSync('/tmp/openclaw-setup-complete');
+ // Fallback: if bridge has been running >5 min, assume setup is complete (handles existing VPS + reboots).
+ const setupDone = existsSync('/tmp/openclaw-setup-complete')
+   || existsSync('/opt/openclaw-bridge/.setup-complete')
+   || process.uptime() > 300;
  res.json({
  status: setupDone ? 'ok' : 'installing',
  service: 'openclaw-bridge',
