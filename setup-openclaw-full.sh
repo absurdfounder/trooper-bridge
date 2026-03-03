@@ -492,9 +492,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "id": "main",
  "default": true,
  "name": "Team Lead",
- "sandbox": {
- "mode": "off"
- }
+ "sandbox": { "mode": "non-main" } 
  }
  ],
  "defaults": {
