@@ -68,6 +68,21 @@ except: pass
 # Capture all script output to raw log (apt-get, docker, etc.) — served via /deploy-logs-raw
 exec 1> >(tee -a "$DEPLOY_RAW_LOG") 2>&1
 
+# Background raw log pusher — POSTs tail of raw log to API every 5s
+# This bypasses the need for inbound VPS connectivity on port 3002
+if [ -n "{{API_URL}}" ] && [ -n "{{ORG_ID}}" ] && [ -n "{{GATEWAY_TOKEN}}" ]; then
+  (while true; do
+    sleep 5
+    [ -s "$DEPLOY_RAW_LOG" ] || continue
+    _raw_json=$(tail -c 50000 "$DEPLOY_RAW_LOG" 2>/dev/null | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null) || continue
+    curl -sf -X POST "{{API_URL}}/api/deploy-log/{{ORG_ID}}" \
+      -H "Content-Type: application/json" \
+      -d "{\"msg\":\"_rawlog_sync\",\"step\":\"installing\",\"token\":\"{{GATEWAY_TOKEN}}\",\"rawLog\":${_raw_json}}" \
+      --max-time 10 >/dev/null 2>&1 || true
+  done) &
+  RAW_LOG_PUSHER_PID=$!
+fi
+
 # Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT
 # The real bridge will replace this later
 python3 -c "
