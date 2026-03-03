@@ -86,25 +86,25 @@ fi
 # Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT
 # The real bridge will replace this later
 python3 -c "
-import http.server, json, threading, os
+import http.server, json, os
 class H(http.server.BaseHTTPRequestHandler):
- def do_GET(self):
- if self.path=='/health':
- self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
- self.wfile.write(b'{\"status\":\"installing\"}')
- elif self.path=='/deploy-logs':
- self.send_response(200); self.send_header('Content-Type','application/json')
- self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
- with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
- elif self.path=='/deploy-logs-raw':
- self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
- self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
- try:
- with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
- except: self.wfile.write(b'')
- else:
- self.send_response(404); self.end_headers()
- def log_message(self,*a): pass
+  def do_GET(self):
+    if self.path=='/health':
+      self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
+      self.wfile.write(b'{\"status\":\"installing\"}')
+    elif self.path=='/deploy-logs':
+      self.send_response(200); self.send_header('Content-Type','application/json')
+      self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+      with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
+    elif self.path=='/deploy-logs-raw':
+      self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
+      self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+      try:
+        with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
+      except: self.wfile.write(b'')
+    else:
+      self.send_response(404); self.end_headers()
+  def log_message(self,*a): pass
 s=http.server.HTTPServer(('0.0.0.0',${BRIDGE_PORT}),H)
 s.serve_forever()
 " &
@@ -690,7 +690,7 @@ services:
  group_add:
  - "${DOCKER_GID}"
  extra_hosts:
- - "host.docker.internal:host-gateway"
+  host.docker.internal: host-gateway
  environment:
  OPENAI_API_KEY: \${OPENAI_API_KEY:-}
  ANTHROPIC_API_KEY: \${ANTHROPIC_API_KEY:-}
