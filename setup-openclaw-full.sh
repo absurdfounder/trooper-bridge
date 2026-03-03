@@ -511,7 +511,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "id": "main",
  "default": true,
  "name": "Team Lead",
- "sandbox": { "mode": "non-main" } 
+ "sandbox": { "mode": "off" }
  }
  ],
  "defaults": {
@@ -524,17 +524,7 @@ cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
  "directPolicy": "allow"
  },
  "sandbox": {
- "mode": "all",
- "scope": "agent",
- "workspaceAccess": "rw",
- "docker": {
- "setupCommand": "apt-get update -qq && apt-get install -y -qq curl > /dev/null 2>&1",
- "user": "1000:1000"
- },
- "browser": {
- "allowHostControl": true,
- "binds": ["/opt/openclaw-data/workspace:/workspace:rw"]
- }
+ "mode": "off"
  },
  "subagents": {
  "model": "${RESOLVED_MODEL}",
@@ -566,7 +556,7 @@ ${MODELS_PROVIDERS}
  "web_search", "web_fetch", "browser",
  "sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status",
  "agents_list", "image", "message", "cron", "gateway",
- "llm-task", "lobster", "diffs"
+ "llm-task", "lobster"
  ],
  "web": {
  "search": {
@@ -583,7 +573,7 @@ ${MODELS_PROVIDERS}
  }
  },
  "exec": {
- "host": "sandbox",
+ "host": "gateway",
  "notifyOnExit": true
  }
  },
@@ -591,7 +581,6 @@ ${MODELS_PROVIDERS}
  "entries": {
  "lobster": { "enabled": true },
  "llm-task": { "enabled": true },
- "diffs": { "enabled": true },
  "acpx": { "enabled": true }
  }
  },
