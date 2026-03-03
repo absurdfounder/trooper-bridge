@@ -2606,7 +2606,7 @@ app.post('/skills/:slug/install', async (req, res) => {
  try {
  console.log(`📦 Installing skill "${slug}" via clawhub...`);
  const output = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub install ${slug} 2>&1'`,
+ `docker exec openclaw-openclaw-gateway-1 bash -c 'cd /home/node/.openclaw && npx clawhub install ${slug} --force 2>&1'`,
  { timeout: 60000 }
  ).toString();
  console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
@@ -3966,5 +3966,5 @@ app.get('/api/browser-session', (req, res) => {
 
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
- console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: skill-based (install browserbase skill from ClawHub)`);
+ console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
 });
