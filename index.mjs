@@ -1338,6 +1338,39 @@ try {
  }
 } catch (e) { /* config not available yet */ }
 
+// ── Startup migration: fix mistyped auth profiles ────────────────────────
+// OAuth tokens (sk-ant-oat-*) must be stored with type "token" and field "token",
+// not type "api_key"/"key" with field "key". Fix any that were created incorrectly.
+try {
+ const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
+ const auth = JSON.parse(readFileSync(authPath, 'utf8'));
+ let authChanged = false;
+ if (auth.profiles) {
+  for (const [id, profile] of Object.entries(auth.profiles)) {
+   if (profile.provider === 'anthropic' && profile.key && profile.key.startsWith('sk-ant-oat')) {
+    // OAuth token stored as API key — fix it
+    auth.profiles[id] = { type: 'token', provider: 'anthropic', token: profile.key };
+    authChanged = true;
+    console.log(`[bridge] Migrated auth profile "${id}": api_key → token (OAuth token detected)`);
+   }
+  }
+ }
+ if (authChanged) {
+  writeFileSync(authPath, JSON.stringify(auth, null, 2));
+  try { execSync(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`, { timeout: 3000 }); } catch {}
+  // Propagate to sub-agent dirs
+  try {
+   const agentsDir = '/opt/openclaw-data/config/agents';
+   const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
+   const updated = readFileSync(authPath, 'utf8');
+   for (const d of dirs) {
+    const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
+    if (existsSync(sub)) { writeFileSync(sub, updated); }
+   }
+  } catch {}
+ }
+} catch (e) { /* auth profiles not available yet */ }
+
 // Helper: slugify agent name to valid OpenClaw agentId
 function agentSlug(name) {
  return (name || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');

@@ -810,7 +810,14 @@ AUTH_PROFILES=""
 AUTH_LASTGOOD=""
 add_auth_profile() {
  local id="$1" provider="$2" key="$3"
- local entry="\"${id}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${key}\" }"
+ local entry
+ # Anthropic OAuth tokens (sk-ant-oat-*) need type "token" with field "token", not "key"
+ # Regular API keys (sk-ant-api*) use type "api_key" with field "key"
+ if [ "$provider" = "anthropic" ] && echo "$key" | grep -q '^sk-ant-oat'; then
+  entry="\"${id}\": { \"type\": \"token\", \"provider\": \"${provider}\", \"token\": \"${key}\" }"
+ else
+  entry="\"${id}\": { \"type\": \"api_key\", \"provider\": \"${provider}\", \"key\": \"${key}\" }"
+ fi
  local lastgood="\"${provider}\": \"${id}\""
  if [ -z "$AUTH_PROFILES" ]; then
  AUTH_PROFILES=" $entry"
