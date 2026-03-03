@@ -21,9 +21,28 @@ function isBrowserTool(tool) {
 // ── VNC Live View ─────────────────────────────────────────────────────
 // When Xvnc + noVNC/websockify are running, send the client a live VNC URL
 // instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
+// Cache the sslip.io domain derived from the Caddyfile (set once at startup or first use)
+let _sslipDomain = null;
+function getSslipDomain() {
+ if (_sslipDomain !== null) return _sslipDomain || null;
+ try {
+   const caddyfile = readFileSync('/etc/caddy/Caddyfile', 'utf8');
+   const match = caddyfile.match(/([\d]+-[\d]+-[\d]+-[\d]+)\.sslip\.io/);
+   if (match) { _sslipDomain = `${match[1]}.sslip.io`; return _sslipDomain; }
+ } catch {}
+ _sslipDomain = ''; // empty string = not found, won't retry
+ return null;
+}
+
 function getVNCLiveViewUrl() {
  const orgId = process.env.ORG_ID || '';
  if (!orgId) return null;
+ // Prefer sslip.io (always resolves via IP) over crabhq.com (may have DNS/cert issues)
+ const sslip = getSslipDomain();
+ if (sslip) {
+   return `https://${sslip}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
+ }
+ // Fallback to crabhq.com domain
  const orgShort = orgId.toLowerCase().substring(0, 12);
  const domain = `org-${orgShort}.crabhq.com`;
  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
