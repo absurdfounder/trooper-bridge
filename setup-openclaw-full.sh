@@ -744,6 +744,27 @@ if ! command -v google-chrome-stable &>/dev/null; then
 else
  echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
 fi
+
+# Ensure Chrome's shared library dependencies are present (needed after snapshot restore
+# since the snapshot only captures binaries, not all transitive .so deps)
+CHROME_DEPS="libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+ libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
+ libcairo2 libasound2 libxshmfence1 libx11-xcb1 fonts-liberation"
+if command -v google-chrome-stable &>/dev/null; then
+ MISSING_DEPS=""
+ for dep in $CHROME_DEPS; do
+ if ! dpkg -s "$dep" &>/dev/null; then
+  MISSING_DEPS="$MISSING_DEPS $dep"
+ fi
+ done
+ if [ -n "$MISSING_DEPS" ]; then
+ echo "[startup] Installing missing Chrome dependencies:$MISSING_DEPS"
+ apt-get update -qq 2>/dev/null && apt-get install -y --no-install-recommends $MISSING_DEPS 2>/dev/null
+ ldconfig 2>/dev/null
+ echo "[startup] Chrome deps installed: $(google-chrome-stable --version 2>/dev/null || echo FAILED)"
+ fi
+fi
+
 # Ensure TigerVNC is installed (Xvnc = virtual display + VNC server in one process)
 # Replaces Xvfb — provides the display extensions need PLUS live VNC streaming to web app
 if ! command -v Xvnc &>/dev/null; then
@@ -769,6 +790,27 @@ if command -v google-chrome-stable &>/dev/null && [ ! -f "$SNAPSHOT" ]; then
  /usr/lib/*/libxkbfile* \
  /usr/lib/*/libpixman* \
  /usr/lib/*/libxshmfence* \
+ /usr/lib/*/libnspr4* \
+ /usr/lib/*/libnss3* \
+ /usr/lib/*/libnssutil3* \
+ /usr/lib/*/libsmime3* \
+ /usr/lib/*/libssl3* \
+ /usr/lib/*/libatk-1.0* \
+ /usr/lib/*/libatk-bridge-2.0* \
+ /usr/lib/*/libatspi* \
+ /usr/lib/*/libcups* \
+ /usr/lib/*/libdrm* \
+ /usr/lib/*/libxkbcommon* \
+ /usr/lib/*/libXcomposite* \
+ /usr/lib/*/libXdamage* \
+ /usr/lib/*/libXrandr* \
+ /usr/lib/*/libgbm* \
+ /usr/lib/*/libpango* \
+ /usr/lib/*/libcairo* \
+ /usr/lib/*/libasound* \
+ /usr/lib/*/libX11-xcb* \
+ /usr/lib/*/libplc4* \
+ /usr/lib/*/libplds4* \
  2>/dev/null || true
  echo "[startup] Snapshot saved ($(du -sh "$SNAPSHOT" 2>/dev/null | cut -f1))"
 fi
@@ -1582,8 +1624,8 @@ cat > /root/.config/openbox/menu.xml << 'EOF'
  
 EOF
 
-# Hide noVNC sidebar by default
-sed -i 's| | #noVNC_control_bar_anchor { display: none !important; } \n |' \
+# Hide noVNC sidebar by default (inject <style> after <head> tag)
+sed -i '/<head>/a <style>#noVNC_control_bar_anchor { display: none !important; }</style>' \
  /usr/share/novnc/vnc.html 2>/dev/null || true
 
 echo "[setup] Desktop UI configured (wallpaper, icons, menu, noVNC sidebar hidden)"
