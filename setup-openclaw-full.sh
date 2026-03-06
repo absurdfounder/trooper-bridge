@@ -1076,6 +1076,23 @@ chmod 700 /opt/openclaw-data/config
 chmod 600 /opt/openclaw-data/config/openclaw.json
 chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
 
+# Bridge runs on HOST as node (uid may differ from container's 1000).
+# It needs write access to config files for API key sync, model updates, and device approval.
+HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
+if [ "$HOST_NODE_UID" != "1000" ]; then
+  echo "Host node UID ($HOST_NODE_UID) differs from container (1000), setting ACLs for bridge..."
+  # Make bridge-writable paths accessible to host node user
+  chown "$HOST_NODE_UID" /opt/openclaw/.env 2>/dev/null || true
+  chown "$HOST_NODE_UID" /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+  chown "$HOST_NODE_UID" /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  mkdir -p /opt/openclaw-data/config/devices
+  chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
+  # Container still needs read access — both UIDs can read via group or mode
+  chmod 666 /opt/openclaw/.env 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+  chmod 660 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+fi
+
 cd /opt/openclaw
 
 # ── Wait for background Docker image pull ─────────────────────────────
