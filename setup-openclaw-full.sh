@@ -797,6 +797,8 @@ services:
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]
     command: ["${GATEWAY_PORT}"]
+  openclaw-cli:
+    profiles: ["disabled"]
 OVERRIDE
 
 # Startup script — Chrome + TigerVNC are pre-installed in the custom Docker image
@@ -1073,7 +1075,17 @@ fi
 dlog "Starting containers..."
 # Start containers (clean up any partial state first)
 docker compose down 2>/dev/null || true
-docker compose up -d
+# Retry docker compose up — host network mode can fail with namespace race on first boot
+for _dc_attempt in 1 2 3; do
+  docker compose up -d 2>&1 && break || true
+  echo "docker compose up failed (attempt $_dc_attempt), retrying in 3s..."
+  sleep 3
+  docker compose down 2>/dev/null || true
+done
+# Verify gateway container is actually running (CLI container failure is non-fatal)
+if ! docker compose ps --format json 2>/dev/null | grep -q '"running"'; then
+  echo "WARNING: gateway container may not be running, proceeding anyway"
+fi
 # Wait for container to be healthy before running exec commands
 dlog "Waiting for container to start..."
 for _cw in $(seq 1 20); do
