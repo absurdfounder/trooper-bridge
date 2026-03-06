@@ -227,7 +227,7 @@ class OpenClawGateway {
  const { promisify: _promisify } = await import('util');
  const { exec: _execCb } = await import('child_process');
  const _run = _promisify(_execCb);
- await _run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+ await _run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
  console.log('[OpenClaw] Bridge device auto-approved for sessions_spawn');
  } catch { /* device approve not available or already approved */ }
  })();
@@ -412,7 +412,7 @@ class OpenClawGateway {
  console.log(`[OpenClaw] Self-approving deviceId ${deviceIdentity.deviceId.slice(0, 12)}...`);
  // Try both `devices approve` (v2026.3+) and `device approve` (older)
  const { stdout } = await _run(
- `docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`,
+ `docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`,
  { timeout: 20000 }
  ).catch(() => ({ stdout: '' }));
  if (stdout.toLowerCase().includes('approved') || stdout.toLowerCase().includes('already')) {
@@ -2926,7 +2926,7 @@ app.post('/gateway/restart', (req, res) => {
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
- try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 }); } catch {}
+ try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 }); } catch {}
  gateway.connect();
  }, 5000);
  res.json({ success: true, message: 'Gateway container restarted' });
@@ -3348,7 +3348,7 @@ function normalizeModelId(model) {
  // Re-approve bridge device after restart so sessions_spawn works
  if (restartOk) {
  try {
- await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null`, { timeout: 15000 });
+ await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
  console.log('[keys] Bridge device re-approved after restart');
  } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
  }
