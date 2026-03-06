@@ -291,10 +291,21 @@ echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS created by provision.js)"
 
 if [ -n "$SERVER_PUBLIC_IP" ]; then
  SSLIP_DOMAIN=$(echo "$SERVER_PUBLIC_IP" | tr '.' '-').sslip.io
+
+ # Generate self-signed cert for CF origin (CF Full mode accepts self-signed)
+ mkdir -p /etc/caddy/certs
+ openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+   -keyout /etc/caddy/certs/cf-origin.key \
+   -out /etc/caddy/certs/cf-origin.crt \
+   -subj "/CN=*.crabhq.com" 2>/dev/null
+ chown caddy:caddy /etc/caddy/certs/cf-origin.key /etc/caddy/certs/cf-origin.crt
+ chmod 600 /etc/caddy/certs/cf-origin.key
+
  # Caddyfile: CF-proxied crabhq.com domain (primary) + sslip.io fallback
  cat > /etc/caddy/Caddyfile << CADDYFILE
-# Primary: Cloudflare-proxied domain (CF handles external SSL)
+# Primary: CF-proxied domain (self-signed cert — CF terminates external SSL)
 ${HTTPS_DOMAIN} {
+ tls /etc/caddy/certs/cf-origin.crt /etc/caddy/certs/cf-origin.key
  handle /ws {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
@@ -913,6 +924,11 @@ chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
 chmod 700 /home/node/.openclaw 2>/dev/null || true
 chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
 find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
+
+# Fix jiti cache permissions — Xvnc/root startup may have created files in /tmp/jiti owned by root
+# which blocks the node user from loading plugins
+rm -rf /tmp/jiti 2>/dev/null || true
+mkdir -p /tmp/jiti && chown 1000:1000 /tmp/jiti
 
 # Drop back to node user for the gateway process
 exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
