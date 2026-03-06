@@ -789,6 +789,7 @@ ${MODELS_PROVIDERS}
  "port": ${GATEWAY_PORT},
  "auth": { "mode": "token", "token": "GATEWAY_TOKEN_PLACEHOLDER" },
  "trustedProxies": ["127.0.0.1", "172.16.0.0/12"],
+ "dangerouslyDisableDeviceAuth": true,
  "controlUi": {
  "enabled": true,
  "allowInsecureAuth": true,

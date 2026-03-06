@@ -179,6 +179,7 @@ class OpenClawGateway {
  this._authResolve = null;
  this._authReject = null;
  this._pingInterval = null;
+ this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
  this.connect();
  }
 
@@ -424,8 +425,15 @@ class OpenClawGateway {
  this._pendingRequests.delete(frame.id);
  // Self-approval strategy: write our device directly to paired.json on the host,
  // then restart the gateway so it loads the approval from disk on next start.
- // This avoids the race condition where the pending pair request is deleted before
- // the docker-exec CLI can approve it.
+ // Cooldown: only attempt restart once every 5 minutes to prevent restart loops.
+ const now = Date.now();
+ if (now - this._lastSelfApproveMs < 5 * 60 * 1000) {
+ console.log(`[OpenClaw] Self-approve cooldown active (${Math.round((5 * 60 * 1000 - (now - this._lastSelfApproveMs)) / 1000)}s remaining) — skipping restart`);
+ // Resolve auth so reconnect timer fires normally
+ if (this._authResolve) { const r = this._authResolve; this._authResolve = null; this._authReject = null; r(null); }
+ return;
+ }
+ this._lastSelfApproveMs = now;
  (async () => {
  try {
  const { promisify: _p } = await import('util');
@@ -2999,6 +3007,28 @@ app.all('/desktop-api/*', async (req, res) => {
 });
 
 // ── Gateway Management ───────────────────────────────────────────────
+
+// Patch openclaw.json to disable device auth (fixes pairing issues on existing VPS)
+app.post('/gateway/patch-auth', (req, res) => {
+ try {
+ const fs = require('fs');
+ const CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
+ const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+ if (!config.gateway) config.gateway = {};
+ config.gateway.dangerouslyDisableDeviceAuth = true;
+ if (!config.gateway.controlUi) config.gateway.controlUi = {};
+ config.gateway.controlUi.dangerouslyDisableDeviceAuth = true;
+ fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+ execSync('chown 1000:1000 ' + CONFIG_PATH + ' 2>/dev/null || true', { timeout: 5000 });
+ console.log('[bridge] Patched openclaw.json: dangerouslyDisableDeviceAuth=true');
+ // Restart gateway to apply
+ execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ setTimeout(() => gateway.connect(), 15000);
+ res.json({ success: true, message: 'Config patched and gateway restarted' });
+ } catch (err) {
+ res.status(500).json({ error: 'Patch failed', details: err.message });
+ }
+});
 
 app.post('/gateway/restart', (req, res) => {
  try {
