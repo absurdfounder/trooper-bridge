@@ -32,7 +32,6 @@ BRIDGE_AUTH_TOKEN="{{BRIDGE_AUTH_TOKEN}}"
 GATEWAY_PORT=18789
 MEDIA_PORT=18791
 API_URL="{{API_URL}}"
-CAPTCHA_2CAPTCHA_API_KEY="{{CAPTCHA_2CAPTCHA_API_KEY}}"
 COMPOSIO_API_KEY="{{COMPOSIO_API_KEY}}"
 PRIMARY_PROVIDER="{{PRIMARY_PROVIDER}}"
 PRIMARY_MODEL="{{PRIMARY_MODEL}}"
@@ -405,7 +404,6 @@ OPENCLAW_CONFIG_DIR=/opt/openclaw-data/config
 OPENCLAW_WORKSPACE_DIR=/opt/openclaw-data/workspace
 OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
 BRAVE_API_KEY=${BRAVE_API_KEY}
-CAPTCHA_2CAPTCHA_API_KEY=${CAPTCHA_2CAPTCHA_API_KEY}
 COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
 CLAUDE_AI_SESSION_KEY=
 CLAUDE_WEB_SESSION_KEY=
@@ -673,7 +671,6 @@ services:
       - /usr/bin/docker:/usr/bin/docker:ro
       - /opt/openclaw-data/startup.sh:/opt/startup.sh:ro
       - /opt/openclaw-data/chrome-wrapper.sh:/opt/openclaw-data/chrome-wrapper.sh:ro
-      - /opt/openclaw-data/2captcha-extension:/opt/openclaw-data/2captcha-extension:ro
       - openclaw-pkg-cache:/opt/pkg-cache
       - /var/run/openclaw:/var/run/openclaw
     group_add:
@@ -689,7 +686,6 @@ services:
       CHROMIUM_PATH: /opt/openclaw-data/chrome-wrapper.sh
       PUPPETEER_EXECUTABLE_PATH: /opt/openclaw-data/chrome-wrapper.sh
       OPENCLAW_BROWSER_EXECUTABLE: /opt/openclaw-data/chrome-wrapper.sh
-      CAPTCHA_2CAPTCHA_API_KEY: \${CAPTCHA_2CAPTCHA_API_KEY}
       COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/startup.sh"]
@@ -1018,8 +1014,7 @@ Keys are stored in the org's Firestore doc under `keys.*` and in the VPS environ
 CAPMD
 
 # ── Chrome wrapper with Xvnc for live browser view ───────────────────────
-# Always create a chrome-wrapper that starts Xvnc so noVNC live view works for all orgs.
-# When 2captcha is set, this wrapper gets overwritten with the full proxy+extension version.
+# Chrome wrapper: starts Xvnc so noVNC live view works, then launches Chrome.
 cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP_BASE'
 #!/bin/bash
 # ── Xvnc: Virtual display + VNC server on :99 (port 5999) ──
@@ -1030,7 +1025,9 @@ if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
  sleep 0.5
 fi
 export DISPLAY=:99
-exec /usr/bin/google-chrome-stable "$@"
+exec /usr/bin/google-chrome-stable \
+ --disable-blink-features=AutomationControlled \
+ "$@"
 CHROMEWRAP_BASE
 chmod +x /opt/openclaw-data/chrome-wrapper.sh
 # Set headless:false so OpenClaw doesn't add --headless (Chrome uses the Xvnc display)
@@ -1038,110 +1035,7 @@ sed -i 's|"headless": true|"headless": false|g' /opt/openclaw-data/config/opencl
 # Point browser config at the wrapper
 sed -i 's|/usr/bin/google-chrome-stable|/opt/openclaw-data/chrome-wrapper.sh|g' /opt/openclaw-data/config/openclaw.json
 
-# ── 2Captcha extension (when API key is set) ─────────────────────────────
-mkdir -p /opt/openclaw-data/2captcha-extension
-if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
- dlog "Configuring 2Captcha extension..."
- apt-get install -y -qq --no-install-recommends unzip 2>/dev/null || true
- curl -fsSL "https://github.com/rucaptcha/2captcha-solver/archive/refs/heads/main.zip" -o /tmp/2captcha-solver.zip
- unzip -o /tmp/2captcha-solver.zip -d /tmp/ 2>/dev/null || true
- if [ -d /tmp/2captcha-solver-main ]; then
- cp -r /tmp/2captcha-solver-main/* /opt/openclaw-data/2captcha-extension/ 2>/dev/null || true
- rm -rf /tmp/2captcha-solver.zip /tmp/2captcha-solver-main
- if [ -f /opt/openclaw-data/2captcha-extension/common/config.js ]; then
- sed -i "s|apiKey: null|apiKey: \"${CAPTCHA_2CAPTCHA_API_KEY}\"|" /opt/openclaw-data/2captcha-extension/common/config.js
- fi
- echo "[setup] 2Captcha extension configured"
- fi
-fi
 
-# Load 2Captcha extension via Chrome wrapper + Xvnc (extensions need a display context).
-# Xvnc provides BOTH a virtual display AND a VNC server — enabling live browser view
-# in the web app via noVNC. Also routes Chrome through 2captcha residential proxy
-# so browsing comes from residential IPs (avoids Google/Cloudflare blocks).
-if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ] && [ -d /opt/openclaw-data/2captcha-extension ] && [ -n "$(ls -A /opt/openclaw-data/2captcha-extension 2>/dev/null)" ]; then
- cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP'
-#!/bin/bash
-# ── Xvnc: Virtual display + VNC server on :99 (port 5999) ──
-# Xvnc replaces Xvfb — same virtual display but also serves VNC for live browser view
-if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
- Xvnc :99 -geometry 1920x1080 -depth 24 -rfbport 5999 -localhost \
- -SecurityTypes None -AlwaysShared -AcceptKeyEvents -AcceptPointerEvents &
- sleep 0.5
-fi
-export DISPLAY=:99
-
-# ── Residential proxy via 2captcha (auto-detected from CAPTCHA_2CAPTCHA_API_KEY) ──
-# Calls the 2captcha proxy API to get the proxy username, then routes ALL Chrome
-# traffic through a residential IP to avoid bot detection by Google/Cloudflare/etc.
-PROXY_ARGS=""
-EXT_DIRS="/opt/openclaw-data/2captcha-extension"
-PROXY_CACHE=/tmp/.2captcha-proxy-user
-if [ -n "${CAPTCHA_2CAPTCHA_API_KEY:-}" ]; then
- # Fetch proxy username from 2captcha API (cached — only calls API once per container)
- if [ ! -f "$PROXY_CACHE" ]; then
- PROXY_USERNAME=$(curl -sf "https://api.2captcha.com/proxy?key=${CAPTCHA_2CAPTCHA_API_KEY}" 2>/dev/null \
- | grep -o '"username":"[^"]*"' | cut -d'"' -f4)
- if [ -n "$PROXY_USERNAME" ]; then
- echo "$PROXY_USERNAME" > "$PROXY_CACHE"
- fi
- fi
- PROXY_KEY=$(cat "$PROXY_CACHE" 2>/dev/null || echo "")
-
- if [ -n "$PROXY_KEY" ]; then
- # Generate fresh session ID for a new residential IP each Chrome launch
- SESSION_ID=$(head -c 12 /dev/urandom | base64 2>/dev/null | tr -dc 'a-zA-Z0-9' | head -c 9)
- PROXY_USER="${PROXY_KEY}-zone-custom-session-${SESSION_ID}-sessTime-120"
- PROXY_PASS="${PROXY_KEY}"
- PROXY_ARGS="--proxy-server=http://na.proxy.2captcha.com:2334"
-
- # Create a small MV3 extension that handles proxy authentication
- PROXY_EXT_DIR=/tmp/proxy-auth-ext
- mkdir -p "$PROXY_EXT_DIR"
- cat > "$PROXY_EXT_DIR/manifest.json" << 'PMANI'
-{"manifest_version":3,"name":"Proxy Auth","version":"1.0","permissions":["webRequest","webRequestAuthProvider"],"host_permissions":[" "],"background":{"service_worker":"background.js"}}
-PMANI
- cat > "$PROXY_EXT_DIR/background.js" << PBGJS
-chrome.webRequest.onAuthRequired.addListener(
- (details, callback) => {
- callback({ authCredentials: { username: "${PROXY_USER}", password: "${PROXY_PASS}" } });
- },
- { urls: [" "] },
- ["asyncBlocking"]
-);
-PBGJS
- EXT_DIRS="${EXT_DIRS},${PROXY_EXT_DIR}"
- fi
-fi
-
-# ── Proxy validation: test credentials before committing to proxy mode ──
-# If the proxy rejects our credentials, ALL Chrome traffic fails with
-# ERR_INVALID_AUTH_CREDENTIALS. Better to browse without proxy than not at all.
-if [ -n "$PROXY_ARGS" ]; then
- PROXY_OK=false
- if curl -x "http://${PROXY_USER}:${PROXY_PASS}@na.proxy.2captcha.com:2334" \
- -sf -o /dev/null --max-time 10 "http://httpbin.org/ip" 2>/dev/null; then
- PROXY_OK=true
- echo "[chrome-wrapper] Proxy validated OK (residential IP active)" >&2
- fi
- if [ "$PROXY_OK" = "false" ]; then
- echo "[chrome-wrapper] WARNING: Proxy auth failed — launching Chrome without proxy" >&2
- PROXY_ARGS=""
- # Keep the 2captcha solver extension (still useful for CAPTCHAs) but drop the proxy-auth ext
- EXT_DIRS="/opt/openclaw-data/2captcha-extension"
- fi
-fi
-
-exec /usr/bin/google-chrome-stable \
- --load-extension=${EXT_DIRS} \
- --disable-extensions-except=${EXT_DIRS} \
- --disable-blink-features=AutomationControlled \
- ${PROXY_ARGS} \
- "$@"
-CHROMEWRAP
- chmod +x /opt/openclaw-data/chrome-wrapper.sh
- echo "[setup] 2Captcha: Chrome wrapper configured (proxy + extensions + Xvnc display)"
-fi
 
 # Fix permissions: container runs as uid 1000, files should be private
 chown -R 1000:1000 /opt/openclaw-data
