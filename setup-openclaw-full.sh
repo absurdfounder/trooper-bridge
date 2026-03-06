@@ -1706,6 +1706,11 @@ console.log('Pre-approved 2 devices: bridge + gateway internal');
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
 
+# CRITICAL: chown bridge identity AFTER creation (was written by root above, node user must be able to read it)
+# Without this the bridge can't read its own identity and generates a NEW random one that doesn't match paired.json
+chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1000:1000 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true
+chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true
+
 # Desktop Control API service (port 4567)
 cat > /etc/systemd/system/crabhq-desktop-api.service << DAPI
 [Unit]
