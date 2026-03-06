@@ -296,12 +296,18 @@ else
 fi
 
 # ── [3b/9] Cloudflare Tunnel (primary HTTPS, Caddy kept as fallback) ──
+# Non-fatal: if tunnel setup fails, Caddy handles HTTPS
 if [ -n "${CF_API_TOKEN:-}" ] && [ -n "${ORG_ID:-}" ]; then
+ (
+ set +e  # Don't exit on errors inside tunnel setup
  dlog "Setting up Cloudflare Tunnel..." "cloudflare-tunnel"
 
  # Install cloudflared if not present
  if ! command -v cloudflared &>/dev/null; then
-   curl -fsSL -o /tmp/cloudflared.deb https://pkg.cloudflare.com/cloudflared-linux-amd64.deb
+   CLOUDFLARED_URL=$(curl -sf "https://api.github.com/repos/cloudflare/cloudflared/releases/latest" | \
+     python3 -c "import sys,json; releases=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in releases if a['name']=='cloudflared-linux-amd64.deb'))" 2>/dev/null || \
+     echo "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb")
+   curl -fsSL -o /tmp/cloudflared.deb "$CLOUDFLARED_URL"
    dpkg -i /tmp/cloudflared.deb
    rm -f /tmp/cloudflared.deb
  fi
@@ -391,6 +397,7 @@ CFDSERVICE
  else
    echo "WARNING: Could not get Cloudflare account ID — falling back to Caddy"
  fi
+ ) || echo "WARNING: Cloudflare Tunnel setup failed (non-fatal) — Caddy will handle HTTPS"
 else
  echo "Cloudflare Tunnel: skipped (no CF_API_TOKEN)"
 fi
