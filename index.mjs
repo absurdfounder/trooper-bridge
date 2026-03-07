@@ -53,6 +53,34 @@ function isVNCAvailable() {
  } catch { return false; }
 }
 
+// ── Auto-save browser screenshots to workspace ──────────────────────
+// Persists screenshots so they show up in the CrabsHQ files panel.
+// Saves to /home/node/.openclaw/media/browser/ inside the container.
+const SCREENSHOT_DIR = '/home/node/.openclaw/media/browser';
+let _screenshotDirReady = false;
+
+function saveBrowserScreenshot(base64Data, ext = 'png') {
+ try {
+  if (!_screenshotDirReady) {
+   execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p ${SCREENSHOT_DIR}`, { timeout: 3000 });
+   _screenshotDirReady = true;
+  }
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const filename = `screenshot-${ts}.${ext}`;
+  // Save to host first, then copy into container (avoids shell arg limits)
+  const hostTmp = `/tmp/screenshot-${Date.now()}.${ext}`;
+  writeFileSync(hostTmp, Buffer.from(base64Data, 'base64'));
+  execSync(
+   `docker cp ${hostTmp} openclaw-openclaw-gateway-1:${SCREENSHOT_DIR}/${filename} && rm -f ${hostTmp}`,
+   { timeout: 10000 }
+  );
+  execSync(`docker exec openclaw-openclaw-gateway-1 chown 1000:1000 ${SCREENSHOT_DIR}/${filename}`, { timeout: 3000 });
+  console.log(`[screenshot] Saved: ${SCREENSHOT_DIR}/${filename}`);
+ } catch (e) {
+  console.warn(`[screenshot] Auto-save failed: ${e.message}`);
+ }
+}
+
 // ── Skill-Reported Browser Sessions ──────────────────────────────────
 // Skills (e.g. browserbase, browserbase-sessions from ClawHub) report their
 // live view URLs here so the bridge can forward them to the frontend.
@@ -1039,15 +1067,17 @@ class OpenClawGateway {
  `docker exec openclaw-openclaw-gateway-1 bash -c 'cat "${mediaPath}" | base64 -w0'`,
  { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
  ).toString().trim();
- if (b64 && b64.length > 100 && onEvent) {
- onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
+ if (b64 && b64.length > 100) {
+ if (onEvent) onEvent('screenshot_frame', { base64: b64, timestamp: Date.now() });
+ saveBrowserScreenshot(b64, mediaPath.endsWith('.jpg') || mediaPath.endsWith('.jpeg') ? 'jpg' : 'png');
  }
  }
  // Check for base64 image block in content array
  if (Array.isArray(data.content)) {
  const imgBlock = data.content.find(b => b.type === 'image' && b.source?.data);
- if (imgBlock && onEvent) {
- onEvent('screenshot_frame', { base64: imgBlock.source.data, timestamp: Date.now() });
+ if (imgBlock) {
+ if (onEvent) onEvent('screenshot_frame', { base64: imgBlock.source.data, timestamp: Date.now() });
+ saveBrowserScreenshot(imgBlock.source.data, imgBlock.source.media_type?.includes('jpeg') ? 'jpg' : 'png');
  }
  }
  } catch (e) { /* ignore screenshot extraction errors */ }
@@ -1818,8 +1848,9 @@ async function handleIncomingTaskStream(req, res) {
 const ALLOWED_LIST_PATHS = ['/tmp', '/home/node/.openclaw/workspace', '/home/node/.openclaw/media', '/opt/openclaw-data/workspace'];
 app.get('/files', (req, res) => {
  let dirPath = (req.query.path || '/').replace(/\/$/, '') || '/';
+ const isRoot = dirPath === '/' || dirPath === '';
  // Map root to workspace
- if (dirPath === '/' || dirPath === '') dirPath = '/home/node/.openclaw/workspace';
+ if (isRoot) dirPath = '/home/node/.openclaw/workspace';
  if (!ALLOWED_LIST_PATHS.some(d => dirPath === d || dirPath.startsWith(d + '/'))) {
  return res.status(403).json({ error: 'Path not allowed' });
  }
@@ -1847,6 +1878,18 @@ app.get('/files', (req, res) => {
  if (mtime) modified = parseInt(mtime) * 1000; // convert seconds to ms
  } catch {}
  entries.push({ name, type, path: fullPath, size, modified });
+ }
+ // When listing workspace root, add screenshots dir if it has files
+ if (isRoot) {
+  try {
+   const ssOut = execSync(
+    `docker exec openclaw-openclaw-gateway-1 find ${SCREENSHOT_DIR} -maxdepth 1 -type f -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' 2>/dev/null | head -1`,
+    { timeout: 3000 }
+   ).toString().trim();
+   if (ssOut) {
+    entries.unshift({ name: '📸 Screenshots', type: 'dir', path: SCREENSHOT_DIR, size: 0 });
+   }
+  } catch {}
  }
  res.json({ files: entries });
  } catch (e) {
