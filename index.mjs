@@ -1815,10 +1815,12 @@ async function handleIncomingTaskStream(req, res) {
 // ── HTTP Routes ──────────────────────────────────────────────────────
 
 // List directory contents (for CrabsHQ Files browser — screenshots, media, etc.)
-const ALLOWED_LIST_PATHS = ['/tmp/', '/home/node/.openclaw/workspace/', '/home/node/.openclaw/media/', '/opt/openclaw-data/workspace/'];
+const ALLOWED_LIST_PATHS = ['/tmp', '/home/node/.openclaw/workspace', '/home/node/.openclaw/media', '/opt/openclaw-data/workspace'];
 app.get('/files', (req, res) => {
- const dirPath = (req.query.path || '/').replace(/\/$/, '') || '/';
- if (!ALLOWED_LIST_PATHS.some(d => dirPath.startsWith(d))) {
+ let dirPath = (req.query.path || '/').replace(/\/$/, '') || '/';
+ // Map root to workspace
+ if (dirPath === '/' || dirPath === '') dirPath = '/home/node/.openclaw/workspace';
+ if (!ALLOWED_LIST_PATHS.some(d => dirPath === d || dirPath.startsWith(d + '/'))) {
  return res.status(403).json({ error: 'Path not allowed' });
  }
  try {
@@ -1856,8 +1858,7 @@ app.get('/files', (req, res) => {
 app.get('/files/*', (req, res) => {
  const filePath = '/' + req.params[0]; // reconstruct absolute path
  // Only allow specific directories for security
- const allowed = ['/tmp/', '/home/node/.openclaw/workspace/', '/home/node/.openclaw/media/', '/opt/openclaw-data/workspace/'];
- if (!allowed.some(d => filePath.startsWith(d))) {
+ if (!ALLOWED_LIST_PATHS.some(d => filePath === d || filePath.startsWith(d + '/'))) {
  return res.status(403).json({ error: 'Path not allowed' });
  }
  try {
