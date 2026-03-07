@@ -97,7 +97,7 @@ function startBrowserRecording() {
  // Use ultrafast preset + high CRF for small files
  try {
   const proc = spawn('ffmpeg', [
-   '-y', '-f', 'x11grab', '-video_size', '1280x720', '-framerate', '10',
+   '-y', '-f', 'x11grab', '-video_size', '1920x1080', '-framerate', '10',
    '-i', ':99', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35',
    '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
    filePath,
