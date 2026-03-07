@@ -82,51 +82,57 @@ function saveBrowserScreenshot(base64Data, ext = 'png') {
 }
 
 // ── Browser Session Screen Recording ─────────────────────────────────
-// Records the Xvnc display during browser sessions using ffmpeg.
-// Saves to media/browser/ and returns the path on session end.
+// Records X displays during agent sessions using ffmpeg.
+// Supports both :99 (browser) and :1 (desktop).
 import { spawn } from 'child_process';
 
-let _activeRecording = null; // { process, filePath, startedAt }
+const MEDIA_DIR = '/home/node/.openclaw/media';
+const _activeRecordings = {}; // display -> { process, filePath, startedAt }
 
-function startBrowserRecording() {
- if (_activeRecording) return _activeRecording.filePath; // already recording
+function startRecording(display = ':99') {
+ const key = display;
+ if (_activeRecordings[key]) return _activeRecordings[key].filePath;
  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+ const label = display === ':1' ? 'desktop' : 'browser';
+ const size = display === ':1' ? '1280x800' : '1920x1080';
+ const saveDir = `${MEDIA_DIR}/${label}`;
  const filename = `session-${ts}.mp4`;
- const filePath = `${SCREENSHOT_DIR}/${filename}`;
- // Record from host's Xvnc display :99 (not inside container)
- // Use ultrafast preset + high CRF for small files
+ const filePath = `${saveDir}/${filename}`;
  try {
+  execSync(`mkdir -p ${saveDir}`, { timeout: 2000 });
   const proc = spawn('ffmpeg', [
-   '-y', '-f', 'x11grab', '-video_size', '1920x1080', '-framerate', '10',
-   '-i', ':99', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35',
+   '-y', '-f', 'x11grab', '-video_size', size, '-framerate', '10',
+   '-i', display, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '35',
    '-pix_fmt', 'yuv420p', '-movflags', '+faststart',
    filePath,
   ], { stdio: ['pipe', 'pipe', 'pipe'], detached: false });
-  proc.on('error', (e) => console.warn(`[recording] ffmpeg error: ${e.message}`));
-  _activeRecording = { process: proc, filePath, hostPath: filePath, startedAt: Date.now() };
-  console.log(`[recording] Started: ${filePath}`);
+  proc.on('error', (e) => console.warn(`[recording] ffmpeg error (${display}): ${e.message}`));
+  _activeRecordings[key] = { process: proc, filePath, startedAt: Date.now() };
+  console.log(`[recording] Started ${label}: ${filePath}`);
   return filePath;
  } catch (e) {
-  console.warn(`[recording] Failed to start ffmpeg: ${e.message}`);
+  console.warn(`[recording] Failed to start (${display}): ${e.message}`);
   return null;
  }
 }
 
-function stopBrowserRecording() {
- if (!_activeRecording) return null;
- const { process: proc, filePath, hostPath } = _activeRecording;
- _activeRecording = null;
+function stopRecording(display = ':99') {
+ const key = display;
+ const rec = _activeRecordings[key];
+ if (!rec) return null;
+ delete _activeRecordings[key];
+ const { process: proc, filePath } = rec;
  try {
-  // Send 'q' to ffmpeg stdin for graceful stop (writes moov atom)
   proc.stdin.write('q');
   proc.stdin.end();
-  // Give ffmpeg 3s to finalize
   setTimeout(() => { try { proc.kill('SIGTERM'); } catch {} }, 3000);
   // Copy into container so it's accessible via /files endpoint
   setTimeout(() => {
    try {
-    const containerPath = `${SCREENSHOT_DIR}/${filePath.split('/').pop()}`;
-    execSync(`docker cp ${hostPath} openclaw-openclaw-gateway-1:${containerPath}`, { timeout: 15000 });
+    const containerDir = filePath.includes('/desktop/') ? `${MEDIA_DIR}/desktop` : SCREENSHOT_DIR;
+    const containerPath = `${containerDir}/${filePath.split('/').pop()}`;
+    execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p ${containerDir}`, { timeout: 3000 });
+    execSync(`docker cp ${filePath} openclaw-openclaw-gateway-1:${containerPath}`, { timeout: 15000 });
     execSync(`docker exec openclaw-openclaw-gateway-1 chown 1000:1000 ${containerPath}`, { timeout: 3000 });
     console.log(`[recording] Copied to container: ${containerPath}`);
    } catch (e) { console.warn(`[recording] Container copy failed: ${e.message}`); }
@@ -139,6 +145,11 @@ function stopBrowserRecording() {
   return filePath;
  }
 }
+
+function startBrowserRecording() { return startRecording(':99'); }
+function stopBrowserRecording() { return stopRecording(':99'); }
+function startDesktopRecording() { return startRecording(':1'); }
+function stopDesktopRecording() { return stopRecording(':1'); }
 
 // ── Skill-Reported Browser Sessions ──────────────────────────────────
 // Skills (e.g. browserbase, browserbase-sessions from ClawHub) report their
@@ -1809,6 +1820,12 @@ async function handleIncomingTaskStream(req, res) {
  // Forward each event to SSE as it arrives
  sendSSE(event, data);
 
+ // Start desktop recording when exec/desktop tools are used
+ const isDesktopTool = (t) => t && ['exec', 'bash', 'write', 'edit'].includes(String(t).toLowerCase());
+ if (event === 'tool_start' && isDesktopTool(data?.tool)) {
+  startDesktopRecording();
+ }
+
  // Start live browser view when browser tool begins
  if (event === 'tool_start' && isBrowserTool(data?.tool)) {
  if (screenshotPollerInterval) {
@@ -1870,6 +1887,7 @@ async function handleIncomingTaskStream(req, res) {
  requestId: id, agentId,
  result: response || '',
  toolLog: toolLog.length > 0 ? toolLog : undefined,
+ desktopRecordingUrl: desktopRecordingUrl || undefined,
  });
 
  // Forward async callbacks
@@ -1892,9 +1910,11 @@ async function handleIncomingTaskStream(req, res) {
  screenshotPollerInterval = null;
  }
  clearInterval(keepAlive);
- // Stop screen recording and get video path
+ // Stop all screen recordings and get video paths
  const recordingPath = stopBrowserRecording();
+ const desktopRecordingPath = stopDesktopRecording();
  const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
+ const desktopRecordingUrl = desktopRecordingPath ? `/files${desktopRecordingPath}` : null;
  // Signal browser session end — for skill-reported or any browser task
  const endSession = getSkillBrowserSession();
  if (endSession) {

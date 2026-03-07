@@ -1411,9 +1411,12 @@ cat > /usr/share/novnc/vnc_embed.html << 'VNCEMBED'
             statusEl.textContent = e.detail.clean ? 'Disconnected' : 'Connection lost';
         });
         rfb.addEventListener('credentialsrequired', () => { statusEl.textContent = 'Password required'; });
-        rfb.scaleViewport = readParam('scale', false);
-        rfb.resizeSession = readParam('resize', false);
-        rfb.viewOnly = readParam('view_only', false);
+        const resizeMode = readParam('resize', '');
+        rfb.scaleViewport = resizeMode === 'scale' || readParam('scale', '') === 'true';
+        rfb.resizeSession = resizeMode === 'remote';
+        rfb.viewOnly = readParam('view_only', 'false') === 'true';
+        // Enable touch for mobile/tablet
+        rfb.touchButton = 1;
     </script>
 </head>
 <body>
