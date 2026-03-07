@@ -3332,12 +3332,12 @@ function normalizeModelId(model) {
  const isOAuthToken = key.startsWith('sk-ant-oat');
  const isApiKey = key.startsWith('sk-ant-') && !isOAuthToken;
  auth.profiles[profileId] = isApiKey
- ? { type: 'key', provider: 'anthropic', key }
+ ? { type: 'api_key', provider: 'anthropic', key }
  : isOAuthToken
  ? { type: 'token', provider: 'anthropic', token: key }
- : { type: 'key', provider: 'anthropic', key };
+ : { type: 'api_key', provider: 'anthropic', key };
  } else {
- auth.profiles[profileId] = { type: 'key', provider, key };
+ auth.profiles[profileId] = { type: 'api_key', provider, key };
  }
  auth.lastGood[provider] = profileId;
  }

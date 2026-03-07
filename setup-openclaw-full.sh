@@ -919,11 +919,12 @@ if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
 fi
 
 # Fix permissions: ensure node user can read config files
+# NOTE: Do NOT chmod 700 or chmod 600 — the bridge runs as a different UID on the host
+# and needs to traverse dirs (755) and read config files (664)
 chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
 chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
-chmod 700 /home/node/.openclaw 2>/dev/null || true
-chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
-find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
+find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
+find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
 
 # Fix jiti cache permissions — Xvnc/root startup may have created files in /tmp/jiti owned by root
 # which blocks the node user from loading plugins
