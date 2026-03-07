@@ -1826,6 +1826,25 @@ chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1
 chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true
 
 # Desktop Control API service (port 4567)
+# Desktop environment service (display :1 — LXQt + x11vnc + websockify:6081)
+cat > /etc/systemd/system/crabhq-desktop.service << 'DESKSVC'
+[Unit]
+Description=CrabsHQ Desktop Environment (display :1)
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/bin/crabhq-desktop-start
+ExecStop=/usr/local/bin/crabhq-desktop-stop
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+DESKSVC
+
+# Desktop Control API service (port 4567)
 cat > /etc/systemd/system/crabhq-desktop-api.service << DAPI
 [Unit]
 Description=CrabsHQ Desktop Control API
@@ -1863,7 +1882,7 @@ WantedBy=multi-user.target
 PWSVC
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop-api crabhq-playwright
+run_cmd systemctl enable openclaw-docker openclaw-bridge openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
@@ -1895,6 +1914,7 @@ fi
 # Start poller, VNC, desktop API, playwright (bridge already running)
 run_cmd systemctl start openclaw-poller
 run_cmd systemctl start openclaw-vnc
+run_cmd systemctl start crabhq-desktop
 run_cmd systemctl start crabhq-desktop-api
 run_cmd systemctl start crabhq-playwright
 run_cmd systemctl restart caddy 2>/dev/null || true
