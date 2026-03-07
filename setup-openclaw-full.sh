@@ -316,11 +316,11 @@ ${HTTPS_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle_path /vnc/* {
- uri replace /vnc.html /vnc_lite.html
+ uri replace /vnc.html /vnc_embed.html
  reverse_proxy 127.0.0.1:6080
  }
  handle_path /desktop-vnc/* {
- uri replace /vnc.html /vnc_lite.html
+ uri replace /vnc.html /vnc_embed.html
  reverse_proxy 127.0.0.1:6081
  }
  handle_path /playwright-ws/* {
@@ -347,11 +347,11 @@ ${SSLIP_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle_path /vnc/* {
- uri replace /vnc.html /vnc_lite.html
+ uri replace /vnc.html /vnc_embed.html
  reverse_proxy 127.0.0.1:6080
  }
  handle_path /desktop-vnc/* {
- uri replace /vnc.html /vnc_lite.html
+ uri replace /vnc.html /vnc_embed.html
  reverse_proxy 127.0.0.1:6081
  }
  handle_path /playwright-ws/* {
@@ -1349,6 +1349,60 @@ if [ "$FROM_SNAPSHOT" != "1" ]; then
 dlog "Installing noVNC + websockify for live browser streaming..."
 run_cmd apt-get install -y -qq --no-install-recommends novnc websockify 2>/dev/null || true
 echo "[setup] noVNC + websockify installed for VNC live view"
+
+# Custom embedded VNC page — no toolbar, no CtrlAltDel, clean iframe embed
+cat > /usr/share/novnc/vnc_embed.html << 'VNCEMBED'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>CrabsHQ Desktop</title>
+    <meta charset="utf-8">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; overflow: hidden; background: #1a1a1a; }
+        #screen { width: 100%; height: 100%; }
+        #status {
+            position: fixed; top: 0; left: 0; right: 0;
+            text-align: center; padding: 8px;
+            font: 12px/1 -apple-system, sans-serif;
+            color: #999; background: rgba(0,0,0,0.7);
+            z-index: 10; transition: opacity 0.5s;
+        }
+        #status.connected { opacity: 0; pointer-events: none; }
+    </style>
+    <script type="module" crossorigin="anonymous">
+        import RFB from './core/rfb.js';
+        const statusEl = document.getElementById('status');
+        function readParam(name, def) {
+            const m = document.location.href.concat(location.hash).match(new RegExp('.*[?&]' + name + '=([^&#]*)'));
+            return m ? decodeURIComponent(m[1]) : def;
+        }
+        statusEl.textContent = 'Connecting...';
+        const host = readParam('host', location.hostname);
+        const port = readParam('port', location.port);
+        const path = readParam('path', 'websockify');
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        const url = proto + '://' + host + (port ? ':' + port : '') + '/' + path;
+        const rfb = new RFB(document.getElementById('screen'), url, {
+            credentials: { password: readParam('password', '') }
+        });
+        rfb.addEventListener('connect', () => { statusEl.classList.add('connected'); });
+        rfb.addEventListener('disconnect', (e) => {
+            statusEl.classList.remove('connected');
+            statusEl.textContent = e.detail.clean ? 'Disconnected' : 'Connection lost';
+        });
+        rfb.addEventListener('credentialsrequired', () => { statusEl.textContent = 'Password required'; });
+        rfb.scaleViewport = readParam('scale', false);
+        rfb.resizeSession = readParam('resize', false);
+        rfb.viewOnly = readParam('view_only', false);
+    </script>
+</head>
+<body>
+    <div id="status">Loading</div>
+    <div id="screen"></div>
+</body>
+</html>
+VNCEMBED
 
 # ── Desktop (LXQt) setup — manual use via CrabsHQ Desktop panel ──────────────
 dlog "Installing desktop packages (LXQt, x11vnc, apps)..."
