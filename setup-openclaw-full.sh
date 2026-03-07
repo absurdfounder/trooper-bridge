@@ -1039,12 +1039,31 @@ When the user asks you to open a website, browse, or interact with a GUI, **alwa
 - Demos, debugging, "show me" requests → live desktop
 - If unsure → ask the user
 
+## Task Context (Persistent Memory)
+Tasks carry context from previous attempts. If you see "Previous Context" in the task prompt:
+- **Read it first.** Don't repeat what failed.
+- **Build on what worked.** Don't redo completed steps.
+- **Update your approach** based on blockers and failures listed.
+
+The system auto-saves context after each run. You don't need to write it manually.
+
+Format (auto-generated, ~500 tokens):
+```
+# Task: Title | Attempt: N | Last: YYYY-MM-DD
+## Status — Complete/Partial/Blocked
+## What works — one line per success
+## What failed — one line per failure + why
+## Files touched — space-separated paths
+```
+
 ## Context & Memory
 - **Read COMPANY.md first** — know the company, its products, its voice
 - **Read CAPABILITIES.md** — model routing slots & API reference for all capabilities (image gen, video, TTS, social search, web search, etc.)
 - **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings)
 - **Use memory_search before starting work** — check if the team has done related work before
 - **Write daily notes to memory/YYYY-MM-DD.md** — log delegations, outcomes, key decisions
+- **Facts** go in MEMORIES.md: "This repo uses pnpm", "Staging API at X"
+- **Task-specific notes** are auto-saved — don't dump task details into MEMORIES.md
 AGENTSMD
 
 # ── CAPABILITIES.md — Model routing & API reference for Lead + SPCs ──────
