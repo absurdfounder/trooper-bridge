@@ -1268,17 +1268,17 @@ docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
 # Download bridge, create poller, and start sandbox build concurrently
 
-# Download bridge files first (fast, needed for npm install)
+# Clone bridge repo (git clone always gets latest — no CDN caching issues)
 dlog "Setting up Bridge..."
-mkdir -p /opt/openclaw-bridge
-dlog "Downloading bridge from GitHub..."
+dlog "Cloning bridge from GitHub..."
+rm -rf /opt/openclaw-bridge 2>/dev/null || true
 for _dl_attempt in 1 2 3; do
- if curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/package.json" -o /opt/openclaw-bridge/package.json && \
- curl -fsSL --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/index.mjs" -o /opt/openclaw-bridge/index.mjs; then
- dlog "Bridge downloaded ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
+ if git clone --depth 1 https://github.com/absurdfounder/openclawbridge.git /opt/openclaw-bridge; then
+ dlog "Bridge cloned ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
  break
  fi
- dlog "Bridge download attempt ${_dl_attempt} failed, retrying..."
+ dlog "Bridge clone attempt ${_dl_attempt} failed, retrying..."
+ rm -rf /opt/openclaw-bridge 2>/dev/null || true
  sleep $((${_dl_attempt} * 3))
 done
 
