@@ -1135,12 +1135,15 @@ sed -i 's|/usr/bin/google-chrome-stable|/opt/chrome-wrapper.sh|g' /opt/openclaw-
 
 
 
-# Fix permissions: container runs as uid 1000, files should be private
+# Fix permissions: container runs as uid 1000, bridge runs as host node user
+# Config dir MUST be traversable (755) so both UIDs can access files inside
 chown -R 1000:1000 /opt/openclaw-data
 chmod 755 /opt/openclaw-data/config
-chmod 600 /opt/openclaw-data/config/openclaw.json
-chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
-chmod 600 /opt/openclaw-data/config/auth-profiles.json
+find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
+# Config files: readable by both container (uid 1000) and host node user
+chmod 664 /opt/openclaw-data/config/openclaw.json
+chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
+chmod 664 /opt/openclaw-data/config/auth-profiles.json
 
 # Bridge runs on HOST as node (uid may differ from container's 1000).
 # It needs write access to config files for API key sync, model updates, and device approval.
@@ -1792,13 +1795,16 @@ console.log('Pre-approved 2 devices: bridge + gateway internal');
 
 # Fix ownership — Docker runs as uid 1000, files were created by root
 chown -R 1000:1000 /opt/openclaw-data
-# Re-apply bridge-writable permissions (the chown above resets them)
-chmod 755 /opt/openclaw-data/config
+# ALL directories under config MUST be traversable (755) so both container (uid 1000)
+# and host bridge (uid varies) can access files. chown -R resets dir perms to 700.
+find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
+# Config files need to be readable by both UIDs
+chmod 664 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 HOST_NODE_UID=$(id -u node 2>/dev/null || echo 1000)
 if [ "$HOST_NODE_UID" != "1000" ]; then
+  # Host node user needs write access for bridge API key sync, model updates
   chown "$HOST_NODE_UID" /opt/openclaw/.env /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
   mkdir -p /opt/openclaw-data/config/devices && chown -R "$HOST_NODE_UID" /opt/openclaw-data/config/devices 2>/dev/null || true
-  chmod 660 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
 fi
 
 # CRITICAL: chown bridge identity AFTER creation (was written by root above, node user must be able to read it)
