@@ -1495,9 +1495,10 @@ fi
 # Set wallpaper
 feh --bg-fill /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
 
-# Start pcmanfm-qt in desktop mode (shows icons)
-if ! pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then
- nohup pcmanfm-qt --desktop > /var/log/pcmanfm-desktop.log 2>&1 &
+# Start pcmanfm-qt in desktop mode (shows icons) — retry if it fails
+for _try in 1 2 3; do
+ if pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then break; fi
+ nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
  sleep 1
 fi
 
@@ -1684,8 +1685,8 @@ cat > /root/Desktop/firefox.desktop << 'EOF'
 Version=1.0
 Type=Application
 Name=Firefox
-Exec=/snap/bin/firefox
-Icon=firefox-bin
+Exec=/snap/bin/firefox --no-sandbox
+Icon=firefox
 Terminal=false
 EOF
 cat > /root/Desktop/files.desktop << 'EOF'
@@ -1702,7 +1703,7 @@ cat > /root/Desktop/terminal.desktop << 'EOF'
 Version=1.0
 Type=Application
 Name=Terminal
-Exec=xterm
+Exec=qterminal
 Icon=utilities-terminal
 Terminal=false
 EOF
@@ -1910,6 +1911,8 @@ After=network.target
 
 [Service]
 Type=forking
+Environment=DISPLAY=:1
+Environment=XDG_RUNTIME_DIR=/tmp/runtime-root
 ExecStart=/usr/local/bin/crabhq-desktop-start
 ExecStop=/usr/local/bin/crabhq-desktop-stop
 RemainAfterExit=yes
