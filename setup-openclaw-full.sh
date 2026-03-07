@@ -321,11 +321,6 @@ ${HTTPS_DOMAIN} {
  }
  handle_path /desktop-vnc/* {
  uri replace /vnc.html /vnc_lite.html
- @blocked {
- not header_regexp Origin ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
- not header_regexp Referer ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
- }
- respond @blocked 403
  reverse_proxy 127.0.0.1:6081
  }
  handle_path /playwright-ws/* {
@@ -357,11 +352,6 @@ ${SSLIP_DOMAIN} {
  }
  handle_path /desktop-vnc/* {
  uri replace /vnc.html /vnc_lite.html
- @blocked {
- not header_regexp Origin ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
- not header_regexp Referer ".*(crabhq\\.com|crabhq\\.netlify\\.app|sslip\\.io).*"
- }
- respond @blocked 403
  reverse_proxy 127.0.0.1:6081
  }
  handle_path /playwright-ws/* {
