@@ -13,10 +13,16 @@ find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
 # Config files readable by everyone (secrets protected by container isolation)
 find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
 
-# Clear jiti cache — previous runs (or Xvnc startup as root) may have created
-# cache files owned by root in /tmp/jiti, which the node user can't read/write.
+# Clear jiti cache — previous runs may have created files as root.
+# Use chmod 1777 (world-writable + sticky) so both root and node can create/read files.
+# chown alone doesn't work because the gateway bootstrap creates files as root
+# before su takes effect (Xvnc + node startup race).
 rm -rf /tmp/jiti 2>/dev/null || true
-mkdir -p /tmp/jiti && chown 1000:1000 /tmp/jiti
+mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
+
+# Devices dir must be writable by host bridge process (different UID)
+chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
+chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Hand off to startup.sh (which drops to node for the gateway process)
 exec /bin/bash /opt/startup.sh "$@"

@@ -936,10 +936,16 @@ chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
 find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
 find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
 
-# Fix jiti cache permissions — Xvnc/root startup may have created files in /tmp/jiti owned by root
-# which blocks the node user from loading plugins
+# Fix jiti cache permissions — files in /tmp/jiti get created as root during startup
+# because the gateway bootstraps plugins before su fully takes effect.
+# Solution: make dir world-writable (1777 = sticky + rwx for all), so both root and
+# node can create/read files. Also nuke any stale files from previous runs.
 rm -rf /tmp/jiti 2>/dev/null || true
-mkdir -p /tmp/jiti && chown 1000:1000 /tmp/jiti
+mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
+
+# Fix devices dir permissions so bridge (host process) can write paired.json
+chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
+chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Drop back to node user for the gateway process
 exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
@@ -1194,6 +1200,15 @@ find /opt/openclaw-data/config -type d -exec chmod 755 {} \;
 chmod 664 /opt/openclaw-data/config/openclaw.json
 chmod 664 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json
 chmod 664 /opt/openclaw-data/config/auth-profiles.json
+
+# Devices dir and cron dir must be writable by BOTH container (uid 1000) and host bridge process.
+# Use 777 so any UID can read/write device approval and cron state.
+mkdir -p /opt/openclaw-data/config/devices /opt/openclaw-data/config/cron/runs
+chmod 777 /opt/openclaw-data/config/devices
+chmod 666 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
+chmod 777 /opt/openclaw-data/config/cron
+chmod 666 /opt/openclaw-data/config/cron/*.json 2>/dev/null || true
+chmod 777 /opt/openclaw-data/config/cron/runs
 
 # Bridge runs on HOST as node (uid may differ from container's 1000).
 # It needs write access to config files for API key sync, model updates, and device approval.
