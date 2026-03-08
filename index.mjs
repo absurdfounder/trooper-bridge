@@ -3688,6 +3688,65 @@ function normalizeModelId(model) {
  } finally { keysUpdateInProgress = false; }
 });
 
+// ── User Context — update USER.md and TOOLS.md with location/timezone/name ──
+app.post('/config/user-context', async (req, res) => {
+ try {
+ const { name, timezone, location, coordinates, notes } = req.body;
+ if (!name && !timezone && !location) {
+ return res.status(400).json({ error: 'Provide at least name, timezone, or location' });
+ }
+
+ const WORKSPACE = '/opt/openclaw-data/workspace';
+ const userMd = `# USER.md - About Your Human
+
+- **Name:** ${name || '(not set)'}
+- **What to call them:** ${name || '(not set)'}
+- **Timezone:** ${timezone || 'UTC'}
+- **Location:** ${location || '(not set)'}
+- **Coordinates:** ${coordinates || '(not set)'}
+
+## Context
+
+${notes || '_(set during onboarding)_'}
+
+## Location Notes
+
+Use the location above for weather, local recommendations, nearby services, time-based greetings, etc.
+When using browser tools that request geolocation, use the coordinates above.
+`;
+
+ const toolsMd = `# TOOLS.md - Local Notes
+
+## Location & Geolocation
+
+- **User location:** ${location || '(not set)'}
+- **Coordinates:** ${coordinates || '(not set)'}
+- **Timezone:** ${timezone || 'UTC'}
+- When fetching weather, local news, nearby places — use the location above
+
+## Browser
+
+- Running Chrome on headless VPS with virtual display (Xvnc :99)
+- Browser tool available for web searches, screenshots, automation
+- Use web_fetch for quick lookups, browser tool for interactive sites
+
+## Web Search
+
+- Brave Search API configured (when available)
+- Fallback: use browser tool with DuckDuckGo or Google
+`;
+
+ const fs = await import('fs');
+ fs.writeFileSync(`${WORKSPACE}/USER.md`, userMd);
+ fs.writeFileSync(`${WORKSPACE}/TOOLS.md`, toolsMd);
+ console.log(`[config] Updated USER.md + TOOLS.md: name=${name}, location=${location}`);
+ res.json({ ok: true, updated: ['USER.md', 'TOOLS.md'] });
+ } catch (err) {
+ console.error('[config] user-context error:', err.message);
+ res.status(500).json({ error: err.message });
+ }
+});
+
 // ── Secrets Management (wraps OpenClaw v2026.2.24+ `openclaw secrets` CLI) ──
 
 app.get('/config/secrets/audit', async (req, res) => {

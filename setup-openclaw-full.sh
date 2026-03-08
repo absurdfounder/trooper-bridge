@@ -1167,6 +1167,43 @@ Keys are stored in the org's Firestore doc under `keys.*` and in the VPS environ
 - Check org's Firestore `keys` for any additional provider keys
 CAPMD
 
+# USER.md — location + user context for personalized responses
+cat > /opt/openclaw-data/workspace/USER.md << 'USERMD'
+# USER.md - About Your Human
+
+- **Name:** (set during onboarding)
+- **Timezone:** Asia/Calcutta (GMT+5:30)
+- **Location:** (set during onboarding)
+- **Coordinates:** (set during onboarding)
+
+## Location Notes
+
+Use the location above for weather, local recommendations, nearby services, time-based greetings, etc.
+When using browser tools that request geolocation, use the coordinates above.
+USERMD
+
+# TOOLS.md — environment-specific tool notes
+cat > /opt/openclaw-data/workspace/TOOLS.md << 'TOOLSMD'
+# TOOLS.md - Local Notes
+
+## Browser
+
+- Running Chrome on headless VPS with virtual display (Xvnc :99)
+- Browser tool available for web searches, screenshots, automation
+- Use web_fetch for quick lookups, browser tool for interactive sites
+
+## Web Search
+
+- Brave Search API configured (when available)
+- Fallback: use browser tool with DuckDuckGo or Google
+
+## Environment
+
+- VPS: Hetzner Cloud
+- Docker: OpenClaw gateway container
+- Bridge: local service on port 3002
+TOOLSMD
+
 # ── Chrome wrapper with Xvnc for live browser view ───────────────────────
 # Chrome wrapper: starts Xvnc so noVNC live view works, then launches Chrome.
 cat > /opt/openclaw-data/chrome-wrapper.sh << 'CHROMEWRAP_BASE'
@@ -1181,6 +1218,8 @@ fi
 export DISPLAY=:99
 exec /usr/bin/google-chrome-stable \
  --disable-blink-features=AutomationControlled \
+ --use-fake-device-for-media-stream \
+ --use-fake-ui-for-media-stream \
  "$@"
 CHROMEWRAP_BASE
 chmod +x /opt/openclaw-data/chrome-wrapper.sh
