@@ -1803,8 +1803,11 @@ Requires=openclaw-docker.service
 
 [Service]
 Type=simple
-User=node
-Group=node
+# Run as root: bridge needs write access to Docker volume files owned by uid 1000
+# (paired.json, cron/jobs.json, auth-profiles.json). Running as host's node user
+# (uid 996) fails with EACCES since container creates files as uid 1000 mode 600.
+User=root
+Group=root
 WorkingDirectory=/opt/openclaw-bridge
 ExecStart=/usr/bin/node /opt/openclaw-bridge/index.mjs
 Restart=always
