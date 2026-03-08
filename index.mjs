@@ -1062,6 +1062,15 @@ class OpenClawGateway {
  if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
  inToolGap = false;
  const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called', startedAt: Date.now() };
+ // Capture write tool content for artifact rendering (HTML/JSX/React files)
+ const ARTIFACT_EXTS = /\.(html?|jsx|tsx|css|svg)$/i;
+ if ((entry.tool === 'write' || entry.tool === 'Write') && entry.params) {
+   const writePath = entry.params.file_path || entry.params.path || '';
+   const writeContent = entry.params.content || '';
+   if (ARTIFACT_EXTS.test(writePath) && writeContent.length > 20) {
+     entry._pendingArtifact = { path: writePath, content: writeContent };
+   }
+ }
  logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
  console.log(`[TOOL_USE] ${entry.tool} params=${JSON.stringify(entry.params).substring(0, 200)} raw_keys=${Object.keys(data).join(',')}`);
  // Replace any pending heuristic entry (guessed "processing"/"web_search"/etc.) with real data
@@ -1124,6 +1133,20 @@ class OpenClawGateway {
  summary: last?.summary || '',
  index: toolLog.length - 1,
  });
+ // Emit file_artifact for renderable files created by write tool
+ if (last?._pendingArtifact && !data.is_error) {
+   const art = last._pendingArtifact;
+   const fileName = art.path.split('/').pop();
+   const ext = fileName.split('.').pop()?.toLowerCase() || 'html';
+   const typeMap = { html: 'html', htm: 'html', jsx: 'react', tsx: 'react', css: 'css', svg: 'html' };
+   if (onEvent) onEvent('file_artifact', {
+     type: typeMap[ext] || 'html',
+     title: fileName,
+     code: art.content,
+     path: art.path,
+   });
+   delete last._pendingArtifact;
+ }
  // Extract screenshot from browser tool results (MEDIA: path or base64 image content)
  const isBrowserScreenshot = last && /browser|screenshot/i.test(last.tool || '');
  if (isBrowserScreenshot && !data.is_error) {
