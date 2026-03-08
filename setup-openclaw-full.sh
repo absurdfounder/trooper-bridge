@@ -1519,6 +1519,7 @@ echo "[setup] LXQt session config pre-seeded (openbox WM)"
 # Desktop start script — called by control API
 cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
 #!/bin/bash
+set +e  # Don't exit on errors — best-effort desktop startup
 # Start LXQt on display :1 + x11vnc + websockify on port 6081
 # Display :99 is reserved for AI browser live view
 
@@ -1583,6 +1584,7 @@ fi
 systemctl start crabhq-agent-daemon 2>/dev/null || true
 
 echo 'Desktop started on :1, noVNC on port 6081'
+exit 0
 DSTART
 chmod +x /usr/local/bin/crabhq-desktop-start
 
@@ -1985,14 +1987,12 @@ Description=CrabsHQ Desktop Environment (display :1)
 After=network.target
 
 [Service]
-Type=forking
+Type=oneshot
 Environment=DISPLAY=:1
 Environment=XDG_RUNTIME_DIR=/tmp/runtime-root
 ExecStart=/usr/local/bin/crabhq-desktop-start
 ExecStop=/usr/local/bin/crabhq-desktop-stop
 RemainAfterExit=yes
-Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
