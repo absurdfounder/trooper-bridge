@@ -436,13 +436,30 @@ if [ -n "${CF_API_TOKEN:-}" ] && [ -n "${ORG_ID:-}" ]; then
          {\"service\":\"http_status:404\"}
        ]}}" >/dev/null 2>&1
 
-     # Route DNS to tunnel (CNAME)
+     # Route DNS to tunnel (CNAME) — upsert to handle stale records from previous deploys
      CF_ZONE_ID="da3b8c817a0e3479c05f3f2aac6e04e7"
-     curl -sf -X POST \
+     EXISTING_DNS_ID=$(curl -sf \
        -H "Authorization: Bearer ${CF_API_TOKEN}" \
-       -H "Content-Type: application/json" \
-       "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
-       -d "{\"type\":\"CNAME\",\"name\":\"${HTTPS_DOMAIN}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}" >/dev/null 2>&1 || true
+       "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=${HTTPS_DOMAIN}" | \
+       python3 -c "import sys,json; r=json.load(sys.stdin).get('result',[]); print(r[0]['id'] if r else '')" 2>/dev/null || true)
+     DNS_PAYLOAD="{\"type\":\"CNAME\",\"name\":\"${HTTPS_DOMAIN}\",\"content\":\"${TUNNEL_ID}.cfargotunnel.com\",\"ttl\":1,\"proxied\":true}"
+     if [ -n "$EXISTING_DNS_ID" ]; then
+       # Update existing record (may be stale A record or old CNAME)
+       curl -sf -X PUT \
+         -H "Authorization: Bearer ${CF_API_TOKEN}" \
+         -H "Content-Type: application/json" \
+         "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${EXISTING_DNS_ID}" \
+         -d "$DNS_PAYLOAD" >/dev/null 2>&1 || true
+       echo "DNS record updated: ${HTTPS_DOMAIN} → ${TUNNEL_ID}.cfargotunnel.com"
+     else
+       # Create new record
+       curl -sf -X POST \
+         -H "Authorization: Bearer ${CF_API_TOKEN}" \
+         -H "Content-Type: application/json" \
+         "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
+         -d "$DNS_PAYLOAD" >/dev/null 2>&1 || true
+       echo "DNS record created: ${HTTPS_DOMAIN} → ${TUNNEL_ID}.cfargotunnel.com"
+     fi
 
      # Set up cloudflared as a systemd service using tunnel token
      if [ -n "$TUNNEL_TOKEN" ]; then
