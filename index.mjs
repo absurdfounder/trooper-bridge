@@ -866,6 +866,39 @@ class OpenClawGateway {
  }
  return; // Don't process sub-agent events as main agent events
  }
+
+ // ── Main agent: real tool_use/tool_result from gateway ──
+ // The gateway sends these with actual tool names (Read, Write, web_search, exec, etc.)
+ // This replaces the heuristic "processing" guessing for the main agent.
+ if (stream === 'tool_use' && data) {
+ const toolName = data.name || data.tool || 'processing';
+ const toolParams = data.input || data.params || {};
+ // Cancel any pending heuristic gap since we have a real tool event
+ if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
+ if (inToolGap) {
+   // Close the previous heuristic entry if one was open
+   const last = toolLog[toolLog.length - 1];
+   if (last && last.status === 'called' && last.tool === 'processing') {
+     toolLog.pop(); // Remove the fake "processing" entry
+   }
+   inToolGap = false;
+ }
+ toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now() });
+ if (onEvent) onEvent('tool_start', { tool: toolName, skillName: null, params: toolParams, index: toolLog.length - 1 });
+ return;
+ }
+ if (stream === 'tool_result' && data) {
+ const last = toolLog[toolLog.length - 1];
+ if (last && last.status === 'called') {
+   last.status = data.is_error ? 'failed' : 'ok';
+   last.durationMs = Date.now() - (last.startedAt || Date.now());
+   const summary = typeof data.content === 'string' ? data.content.substring(0, 120) : (data.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`);
+   last.summary = summary;
+   if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: !data.is_error, summary, index: toolLog.length - 1 });
+ }
+ return;
+ }
+
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
  lastTextTime = Date.now();
@@ -961,7 +994,10 @@ class OpenClawGateway {
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
  lifecycleDepth++;
- if (lifecycleDepth > 1 && onEvent) {
+ // Only use heuristic lifecycle guessing if we haven't received any real tool_use events.
+ // When the gateway sends tool_use events, they're authoritative — no guessing needed.
+ const hasRealToolEvents = toolLog.some(t => t.tool !== 'processing');
+ if (lifecycleDepth > 1 && onEvent && !hasRealToolEvents) {
  // Nested lifecycle = tool execution. Try to guess tool + skill from context
  let toolName = 'processing';
  let skillName = null;
@@ -1925,10 +1961,16 @@ async function handleIncomingTaskStream(req, res) {
  }
 
  // Send final done event with complete result + tool log
+ // Estimate token usage from response length (~4 chars/token for English)
+ // Also estimate input tokens from the prompt/context length
+ const estimatedOutputTokens = response ? Math.ceil(response.length / 4) : 0;
+ const estimatedInputTokens = message ? Math.ceil(message.length / 4) : 0;
+
  sendSSE('done', {
  requestId: id, agentId,
  result: response || '',
  toolLog: toolLog.length > 0 ? toolLog : undefined,
+ usage: { input_tokens: estimatedInputTokens, output_tokens: estimatedOutputTokens, estimated: true },
  desktopRecordingUrl: desktopRecordingUrl || undefined,
  });
 
