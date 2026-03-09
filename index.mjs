@@ -4652,6 +4652,87 @@ app.get('/api/browser-session', (req, res) => {
  res.json(session || { active: false });
 });
 
+// ── TTS Endpoint (OpenAI TTS API) ────────────────────────────────────
+app.post('/tts', async (req, res) => {
+ try {
+  const { text, voice } = req.body || {};
+  if (!text || typeof text !== 'string') return res.status(400).json({ error: 'text is required' });
+
+  // Read OpenAI API key from /opt/openclaw/.env
+  let openaiKey = process.env.OPENAI_API_KEY || '';
+  if (!openaiKey) {
+   try {
+    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+    const match = envContent.match(/^OPENAI_API_KEY=(.*)$/m);
+    if (match) openaiKey = match[1].trim();
+   } catch {}
+  }
+  if (!openaiKey) return res.status(500).json({ error: 'OpenAI API key not configured' });
+
+  const ttsRes = await fetch('https://api.openai.com/v1/audio/speech', {
+   method: 'POST',
+   headers: { 'Authorization': `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
+   body: JSON.stringify({ model: 'tts-1', voice: voice || 'nova', input: text.substring(0, 4096) }),
+  });
+
+  if (!ttsRes.ok) {
+   const err = await ttsRes.text().catch(() => 'Unknown error');
+   return res.status(ttsRes.status).json({ error: `OpenAI TTS failed: ${err}` });
+  }
+
+  res.set('Content-Type', 'audio/mpeg');
+  const buf = Buffer.from(await ttsRes.arrayBuffer());
+  res.send(buf);
+ } catch (err) {
+  console.error('[bridge] TTS error:', err.message);
+  res.status(500).json({ error: err.message });
+ }
+});
+
+// ── STT Endpoint (OpenAI Whisper API) ────────────────────────────────
+app.post('/stt', express.raw({ type: '*/*', limit: '25mb' }), async (req, res) => {
+ try {
+  // Read OpenAI API key
+  let openaiKey = process.env.OPENAI_API_KEY || '';
+  if (!openaiKey) {
+   try {
+    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+    const match = envContent.match(/^OPENAI_API_KEY=(.*)$/m);
+    if (match) openaiKey = match[1].trim();
+   } catch {}
+  }
+  if (!openaiKey) return res.status(500).json({ error: 'OpenAI API key not configured' });
+
+  const audioBuffer = req.body;
+  if (!audioBuffer || audioBuffer.length === 0) return res.status(400).json({ error: 'No audio data received' });
+
+  // Build multipart form data using native Node FormData + Blob
+  const contentType = req.headers['x-audio-content-type'] || 'audio/webm';
+  const ext = contentType.includes('webm') ? 'webm' : contentType.includes('mp4') ? 'mp4' : contentType.includes('wav') ? 'wav' : 'webm';
+  const blob = new Blob([audioBuffer], { type: contentType });
+  const formData = new FormData();
+  formData.append('file', blob, `recording.${ext}`);
+  formData.append('model', 'whisper-1');
+
+  const sttRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+   method: 'POST',
+   headers: { 'Authorization': `Bearer ${openaiKey}` },
+   body: formData,
+  });
+
+  if (!sttRes.ok) {
+   const err = await sttRes.text().catch(() => 'Unknown error');
+   return res.status(sttRes.status).json({ error: `OpenAI STT failed: ${err}` });
+  }
+
+  const result = await sttRes.json();
+  res.json({ text: result.text || '' });
+ } catch (err) {
+  console.error('[bridge] STT error:', err.message);
+  res.status(500).json({ error: err.message });
+ }
+});
+
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
  console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
