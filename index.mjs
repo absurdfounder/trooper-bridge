@@ -1030,10 +1030,14 @@ class OpenClawGateway {
  const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
  if (fm) params.path = fm[1];
  }
+ else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower) || /schedul|cron|remind|recurr/i.test(recentText)) {
+ toolName = 'cron';
+ }
  else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
  else if (/summar/i.test(promptLower)) { toolName = 'web_fetch'; skillName = skillName || 'Summarize'; }
- // Last resort: URL/domain found but no tool match
- else if (_eu || _ed) {
+ // Last resort: URL/domain found but no tool match — only if the domain appears intentional
+ // (skip if the prompt is about scheduling/reminders — domains in text are incidental)
+ else if ((_eu || _ed) && !/remind|cron|schedule|every\s+\d/i.test(promptLower)) {
  toolName = 'web_fetch';
  params.url = _eu || ('https://' + _ed);
  }
@@ -1126,8 +1130,12 @@ class OpenClawGateway {
  const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
  if (fm) heuristicParams.path = fm[1];
  }
+ else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower) || /schedul|cron|remind|recurr/i.test(recentText)) {
+ toolName = 'cron';
+ }
  // Last resort: if we found a URL/domain but no tool match, it's probably web_fetch
- else if (_extractedUrl || _extractedDomain) {
+ // Skip if the prompt is about scheduling/reminders — domains in text are incidental
+ else if ((_extractedUrl || _extractedDomain) && !/remind|cron|schedule|every\s+\d/i.test(promptLower)) {
  toolName = 'web_fetch';
  heuristicParams.url = _extractedUrl || ('https://' + _extractedDomain);
  }
@@ -1446,7 +1454,9 @@ class OpenClawGateway {
  }
  }
 
- const formattedToolLog = toolLog.map(t => ({
+ // Filter out heuristic 'processing' entries — they're guesses that add no real info
+ const cleanedToolLog = toolLog.filter(t => t.tool !== 'processing');
+ const formattedToolLog = cleanedToolLog.map(t => ({
  tool: t.tool,
  skillName: t.skillName || undefined,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
