@@ -3383,6 +3383,122 @@ app.get('/version', (req, res) => {
  } catch (err) { res.json({ error: err.message }); }
 });
 
+// ── Upgrade — pull latest Docker image + bridge code, restart services ──
+app.post('/upgrade', async (req, res) => {
+ const { scope = 'all' } = req.body || {}; // 'all' | 'gateway' | 'bridge'
+ const log = [];
+ const step = (msg) => { log.push({ t: Date.now(), msg }); console.log(`[upgrade] ${msg}`); };
+
+ try {
+   step('Starting upgrade...');
+
+   // 1. Pull latest gateway Docker image
+   if (scope === 'all' || scope === 'gateway') {
+     step('Pulling latest Docker image...');
+     try {
+       const pullOutput = execSync(
+         'docker pull ghcr.io/absurdfounder/crabhq-gateway:latest 2>&1',
+         { timeout: 120000, cwd: '/opt/openclaw' }
+       ).toString();
+       const alreadyUpToDate = pullOutput.includes('Image is up to date');
+       step(alreadyUpToDate ? 'Docker image already up to date' : 'Docker image pulled');
+
+       // Re-tag and recreate container
+       step('Tagging image and recreating container...');
+       execSync('docker tag ghcr.io/absurdfounder/crabhq-gateway:latest openclaw:local', { timeout: 10000 });
+       execSync('docker compose up -d --force-recreate 2>&1', { timeout: 60000, cwd: '/opt/openclaw' });
+       step('Gateway container recreated');
+
+       // Wait for gateway to be healthy
+       step('Waiting for gateway health...');
+       let healthy = false;
+       for (let i = 0; i < 30; i++) {
+         await new Promise(r => setTimeout(r, 2000));
+         try {
+           const hRes = await fetch('http://127.0.0.1:18789/health', { signal: AbortSignal.timeout(3000) });
+           if (hRes.ok) { healthy = true; break; }
+         } catch {}
+       }
+       if (healthy) {
+         step('Gateway is healthy');
+       } else {
+         step('⚠️ Gateway health check timed out (may still be starting)');
+       }
+     } catch (e) {
+       step(`❌ Gateway upgrade failed: ${e.message}`);
+     }
+   }
+
+   // 2. Update bridge code from GitHub
+   if (scope === 'all' || scope === 'bridge') {
+     step('Pulling latest bridge code...');
+     try {
+       const gitOutput = execSync(
+         'cd /opt/openclaw-bridge && git pull origin main 2>&1',
+         { timeout: 30000 }
+       ).toString();
+       const noChanges = gitOutput.includes('Already up to date');
+       step(noChanges ? 'Bridge code already up to date' : 'Bridge code updated');
+
+       if (!noChanges) {
+         // Install any new dependencies
+         step('Installing bridge dependencies...');
+         execSync('cd /opt/openclaw-bridge && npm install --production 2>&1', { timeout: 60000 });
+         step('Dependencies installed');
+
+         // Restart bridge service (this will kill the current process — the response is sent first)
+         step('Restarting bridge service...');
+         // Use spawn to restart after a short delay so the response can be sent
+         setTimeout(() => {
+           try {
+             execSync('systemctl restart openclaw-bridge', { timeout: 10000 });
+           } catch (e) {
+             console.error('[upgrade] Bridge restart failed:', e.message);
+           }
+         }, 1000);
+       }
+     } catch (e) {
+       step(`❌ Bridge upgrade failed: ${e.message}`);
+     }
+   }
+
+   // 3. Reconnect to gateway (if it was restarted)
+   if (scope === 'all' || scope === 'gateway') {
+     step('Reconnecting to gateway...');
+     try {
+       await gateway.ensureConnected();
+       step('Gateway connection re-established');
+     } catch (e) {
+       step(`⚠️ Gateway reconnect pending: ${e.message}`);
+     }
+   }
+
+   step('Upgrade complete');
+   res.json({ success: true, log });
+ } catch (err) {
+   step(`❌ Upgrade failed: ${err.message}`);
+   res.status(500).json({ success: false, error: err.message, log });
+ }
+});
+
+// GET /upgrade/status — check current versions
+app.get('/upgrade/status', (req, res) => {
+ try {
+   const versions = {};
+   try { versions.gatewayImage = execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19); } catch {}
+   try { versions.gatewayCreated = execSync("docker inspect openclaw:local --format='{{.Created}}' 2>/dev/null").toString().trim(); } catch {}
+   try { versions.bridgeGitHash = execSync('git -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null').toString().trim(); } catch {}
+   try { versions.bridgeGitDate = execSync('git -C /opt/openclaw-bridge log -1 --format=%ci 2>/dev/null').toString().trim(); } catch {}
+   try {
+     const containerStatus = execSync("docker inspect openclaw-openclaw-gateway-1 --format='{{.State.Status}}' 2>/dev/null").toString().trim();
+     versions.gatewayStatus = containerStatus;
+   } catch { versions.gatewayStatus = 'unknown'; }
+   res.json(versions);
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
 app.get('/logs', (req, res) => {
  try {
  const lines = parseInt(req.query.lines) || 100;
