@@ -1510,6 +1510,7 @@ VNCEMBED
 dlog "Installing desktop packages (LXQt, x11vnc, apps)..."
 run_cmd apt-get install -y -qq --no-install-recommends \
  xvfb xorg openbox x11vnc xterm xdotool \
+ dbus dbus-x11 \
  lxqt-core lxqt-panel lxqt-runner \
  pcmanfm-qt feh papirus-icon-theme \
  fonts-dejavu fonts-liberation \
@@ -1531,7 +1532,7 @@ set +e  # Don't exit on errors — best-effort desktop startup
 # Start LXQt on display :1 + x11vnc + websockify on port 6081
 # Display :99 is reserved for AI browser live view
 
-# Required for dbus-run-session
+# Required for dbus
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
@@ -1548,28 +1549,36 @@ export DISPLAY=:1
 mkdir -p /root/.config/lxqt
 printf '[General]\n__userfile__=true\nwindow_manager=openbox\n' > /root/.config/lxqt/session.conf
 
-# Start a persistent dbus session and save the address so all desktop
-# processes share the same bus (lxqt-panel, pcmanfm-qt, etc.)
+# ── Shared dbus session ──
+# Start a persistent dbus daemon and save env so ALL desktop processes
+# share the same bus. DO NOT use lxqt-session — it spawns its own
+# isolated dbus internally, causing panel/pcmanfm to lose connection.
 DBUS_ENV_FILE=/tmp/dbus-desktop-env
-if [ ! -f "$DBUS_ENV_FILE" ] || ! kill -0 "$(grep DBUS_SESSION_BUS_PID "$DBUS_ENV_FILE" 2>/dev/null | cut -d= -f2)" 2>/dev/null; then
- dbus-launch --sh-syntax > "$DBUS_ENV_FILE"
+DBUS_ALIVE=false
+if [ -f "$DBUS_ENV_FILE" ]; then
+ DBUS_PID="$(grep DBUS_SESSION_BUS_PID "$DBUS_ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d "'\"; ")"
+ if [ -n "$DBUS_PID" ] && kill -0 "$DBUS_PID" 2>/dev/null; then
+  DBUS_ALIVE=true
+ fi
 fi
-eval "$(cat "$DBUS_ENV_FILE")"
+if [ "$DBUS_ALIVE" = "false" ]; then
+ # Kill stale dbus if any
+ [ -n "$DBUS_PID" ] && kill "$DBUS_PID" 2>/dev/null || true
+ dbus-launch --sh-syntax > "$DBUS_ENV_FILE" 2>/dev/null
+ if [ $? -ne 0 ]; then
+  echo "WARNING: dbus-launch failed — panel/desktop icons may not work"
+ fi
+fi
+eval "$(cat "$DBUS_ENV_FILE" 2>/dev/null)"
 export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
 
-# Start openbox (window manager)
+# Start openbox (window manager) — must share dbus
 if ! pgrep -f 'openbox' > /dev/null 2>&1; then
  nohup openbox > /var/log/openbox.log 2>&1 &
  sleep 2
 fi
 
-# Start LXQt session
-if ! pgrep -f 'lxqt-session' > /dev/null 2>&1; then
- nohup lxqt-session > /var/log/lxqt.log 2>&1 &
- sleep 3
-fi
-
-# Start lxqt-panel (shares same dbus session)
+# Start lxqt-panel directly (NOT via lxqt-session which creates isolated dbus)
 if ! pgrep -f 'lxqt-panel' > /dev/null 2>&1; then
  nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
  sleep 1
@@ -1586,6 +1595,7 @@ fi
 feh --bg-fill /usr/local/share/crabhq-wallpaper.jpg 2>/dev/null || true
 
 # Start pcmanfm-qt in desktop mode (shows icons on desktop)
+# Must share the same DBUS_SESSION_BUS_ADDRESS as lxqt-panel
 for _try in 1 2 3; do
  if pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then break; fi
  nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
@@ -1611,8 +1621,15 @@ cat > /usr/local/bin/crabhq-desktop-stop << 'DSTOP'
 systemctl stop crabhq-agent-daemon 2>/dev/null || true
 pkill -f "websockify.*6081" 2>/dev/null || true
 pkill -f "x11vnc.*5901" 2>/dev/null || true
+pkill -f "pcmanfm-qt" 2>/dev/null || true
+pkill -f "lxqt-panel" 2>/dev/null || true
 pkill -f "lxqt-session" 2>/dev/null || true
-pkill -f "Xorg :1" 2>/dev/null || true
+pkill -f "openbox" 2>/dev/null || true
+pkill -f "Xvfb :1" 2>/dev/null || true
+# Kill the shared dbus session
+DBUS_PID="$(grep DBUS_SESSION_BUS_PID /tmp/dbus-desktop-env 2>/dev/null | cut -d= -f2 | tr -d "'\"; ")"
+[ -n "$DBUS_PID" ] && kill "$DBUS_PID" 2>/dev/null || true
+rm -f /tmp/dbus-desktop-env
 echo "Desktop stopped"
 DSTOP
 chmod +x /usr/local/bin/crabhq-desktop-stop
@@ -1647,12 +1664,12 @@ http.createServer(async (req, res) => {
  await run('/usr/local/bin/crabhq-desktop-stop');
  res.end(JSON.stringify({ ok: true }));
  } else if (req.method === 'GET' && url.pathname === '/desktop/status') {
- const [novnc, vnc, lxqt] = await Promise.all([
+ const [novnc, vnc, panel] = await Promise.all([
  running('websockify.*6081'),
  running('x11vnc.*5901'),
- running('lxqt-session'),
+ running('lxqt-panel'),
  ]);
- res.end(JSON.stringify({ active: novnc && vnc, novnc, vnc, lxqt }));
+ res.end(JSON.stringify({ active: novnc && vnc, novnc, vnc, panel }));
  } else if (req.method === 'GET' && url.pathname === '/browser/endpoint') {
  try {
  const token = readFileSync(TOKEN_FILE, 'utf8').trim();
