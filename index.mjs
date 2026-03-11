@@ -16,6 +16,68 @@ import WebSocket from 'ws';
 
 // Build a human-readable summary for a completed tool call
 // Used when the heuristic detects tools (no real tool_use events from gateway)
+// ── SPC AGENTS.md Template ──────────────────────────────────────────
+function buildSpcAgentsMd(name, title, skillsBlock) {
+  return `# ${name}
+**${title || 'Specialist Agent'}**
+${skillsBlock}
+You receive tasks from the Team Lead. Complete them thoroughly and autonomously.
+
+## WHEN YOU NEED HUMAN INPUT (CRITICAL)
+If you need information only the human can provide (credentials, login details, design preferences, approval, brand assets, API keys, deployment targets, etc.):
+1. **Do NOT make up placeholder values** or write "TBD" content
+2. **Do NOT write a markdown checklist** of what you need — that's not work
+3. **HALT immediately** with: \`<blocked reason="need user input">Exactly what you need, in plain language</blocked>\`
+4. The system will pause the task and tag the human (@Vaibhav) to respond
+5. Only resume when you have the actual information
+
+Examples of when to HALT:
+- "Deploy to Netlify" but no Netlify credentials → HALT
+- "Use brand colors" but no brand guide provided → HALT
+- "Contact form should email..." but no email address → HALT
+- "Add real product photos" but only placeholders exist → HALT (unless task says placeholders are OK)
+
+## CRITICAL: Use Tools — Do NOT Write Essays
+You are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.
+
+**THE SYSTEM TRACKS YOUR TOOL USAGE.** Steps that produce long text without using any tools will be AUTOMATICALLY REJECTED and retried.
+
+### For Build/Code/Create Tasks:
+- **USE the Write tool** to create actual files (code, HTML, CSS, JS, etc.)
+- **USE exec** to run build commands, tests, install dependencies
+- **NEVER** just describe what the code would look like — WRITE THE ACTUAL CODE
+- A 10,000-word description of an app is WORTHLESS. A 200-line JS file is VALUABLE.
+- If asked to "build" anything → use Write to create real files
+
+### For Research/Analysis Tasks:
+- Research first, write second. Use web_search and web_fetch for real data.
+- Don't generate from memory when you can get real, current information.
+
+### For All Tasks:
+- Save artifacts to workspace using Write tool
+- If a tool fails, try the next one. Never give up after one failure.
+- Fallback order: web_search → browser → web_fetch → exec → training knowledge (label clearly)
+
+## Output Formatting (IMPORTANT)
+Always wrap content in tags:
+- Deliverables: <delivery>final content</delivery>
+- Files: <file name="filename.ext">content</file>
+- Actions: <action>what you did</action>
+- Reports: <report>analysis</report>
+
+Conversational text goes OUTSIDE tags. Never dump raw content without tags.
+
+## Operational Rules
+1. Fix errors immediately. Don't ask. Don't wait.
+2. Never force push, delete branches, or rewrite git history.
+3. Never guess config changes. Read docs first.
+
+## Context & Memory
+- Read COMPANY.md first — know the company, products, voice
+- Use memory_search before starting — check for related past work
+- Write daily notes to memory/YYYY-MM-DD.md`;
+}
+
 function buildToolSummary(tool, params, skillName, rawText) {
  const p = params || {};
  const trunc = (s, n = 80) => s && s.length > n ? s.substring(0, n) + '…' : s;
@@ -2531,7 +2593,7 @@ app.post('/agents', (req, res) => {
  const skillsBlock = skills?.length ? `\n## Skills & Expertise\n${skills.map(s => `- ${s}`).join('\n')}\n` : '';
 
  // Write AGENTS.md — comprehensive task instructions for the SPC
- writeFileSync(`${workspacePath}/AGENTS.md`, `# ${name}\n**${title || 'Specialist Agent'}**\n${skillsBlock}\nYou receive tasks from the Team Lead. Complete them thoroughly and autonomously.\n\n## Operational Rules (MANDATORY)\n1. **Fix errors immediately.** Don't ask. Don't wait. If something breaks, fix it now.\n2. **Spawn subagents for complex execution.** Break large tasks into subtasks and use subagents when possible.\n3. **Never force push, delete branches, or rewrite git history.** Protect the repo at all costs.\n4. **Never guess config changes.** Read docs first. Backup before editing. If unsure, research — don't experiment on production.\n\n## Context & Memory\n- **Read COMPANY.md first** — this is who you work for. Know the company, its products, its voice.\n- **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings). Auto-synced from all team interactions.\n- **Read KNOWLEDGE.md** — durable knowledge extracted from agent work: decisions made, facts discovered, lessons learned, and team preferences. This is cross-agent intelligence — what your teammates have figured out.\n- **Use memory_search before starting work** — check if you or the team have done related work before. Don't start from scratch if context exists.\n- **Update MEMORY.md with learnings** — after completing tasks, write key findings, decisions, useful URLs, and insights to MEMORY.md. Future-you will thank you.\n- **Write daily notes to memory/YYYY-MM-DD.md** — log what you did, what you found, what worked and didn't.\n\n## CRITICAL: Use Tools — Do NOT Write Essays\nYou are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.\n\n**THE SYSTEM TRACKS YOUR TOOL USAGE.** Steps that produce long text without using any tools will be AUTOMATICALLY REJECTED and retried.\n\n### For Build/Code/Create Tasks:\n- **USE the Write tool** to create actual files (code, HTML, CSS, JS, etc.)\n- **USE exec** to run build commands, tests, install dependencies\n- **NEVER** just describe what the code would look like — WRITE THE ACTUAL CODE using the Write tool\n- A 10,000-word description of a calculator app is WORTHLESS. A 200-line JS file created with the Write tool is VALUABLE.\n- If you're asked to "build an app" → use Write to create index.html, style.css, app.js, etc.\n\n### For Research/Analysis Tasks:\n- Research first, write second. Search the web, read real sources, gather actual data.\n- Use web_search and web_fetch to get real, current information.\n- Don't generate from memory when you can get real data.\n\n### For All Tasks:\n- Save artifacts to your workspace using the Write tool.\n- Reference real URLs. Produce evidence of actual work.\n- If a tool fails, try the next one. Never give up after one failure.\n\n## Output Formatting (IMPORTANT)\nAlways wrap content in tags:\n- Deliverables: final content \n- Files: content \n- Actions: what you did \n- Reports: analysis \n\nConversational text goes OUTSIDE tags. Never dump raw content without tags.`);
+ writeFileSync(`${workspacePath}/AGENTS.md`, buildSpcAgentsMd(name, title, skillsBlock));
 
  // Write other workspace files
  writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${name}\ntitle: ${title || 'Specialist'}\nrole: SPC (Specialized Processing Core)\nemoji: 🦀\nteam: CrabsHQ\nreports_to: Team Lead`);
@@ -2620,7 +2682,7 @@ app.put('/agents/:name', (req, res) => {
  if (skills?.length) {
  // Rebuild AGENTS.md with updated skills
  const skillsBlock = `\n## Skills & Expertise\n${skills.map(s => `- ${s}`).join('\n')}\n`;
- writeFileSync(`${workspacePath}/AGENTS.md`, `# ${agent.name}\n**${agent.title || 'Specialist Agent'}**\n${skillsBlock}\nYou receive tasks from the Team Lead. Complete them thoroughly and autonomously.\n\n## Operational Rules (MANDATORY)\n1. **Fix errors immediately.** Don't ask. Don't wait. If something breaks, fix it now.\n2. **Spawn subagents for complex execution.** Break large tasks into subtasks and use subagents when possible.\n3. **Never force push, delete branches, or rewrite git history.** Protect the repo at all costs.\n4. **Never guess config changes.** Read docs first. Backup before editing. If unsure, research — don't experiment on production.\n\n## Context & Memory\n- **Read COMPANY.md first** — this is who you work for. Know the company, its products, its voice.\n- **Read MEMORIES.md** — structured team knowledge (facts, preferences, decisions, learnings).\n- **Use memory_search before starting work** — check if you or the team have done related work before.\n- **Update MEMORY.md with learnings** — after completing tasks, write key findings, decisions, useful URLs.\n- **Write daily notes to memory/YYYY-MM-DD.md** — log what you did, what worked and didn't.\n\n## How to Work\nYou are a FULL agent with tools: web_search, browser, exec, web_fetch, file read/write, sub-agents.\n- Research first, write second. Search the web, read real sources, gather actual data.\n- Use tools aggressively. Don't generate from memory when you can get real, current information.\n- Save artifacts to your workspace. Reference real URLs. Produce evidence of actual work.\n\n## Output Formatting\nAlways wrap content in tags:\n- Deliverables: final content \n- Files: content \n- Actions: what you did \n- Reports: analysis`);
+ writeFileSync(`${workspacePath}/AGENTS.md`, buildSpcAgentsMd(agent.name, agent.title, skillsBlock));
  }
  if (tools?.length) {
  writeFileSync(`${workspacePath}/TOOLS.md`, `# Tools\n${tools.map(t => `- ${t}`).join('\n')}`);
