@@ -1887,13 +1887,14 @@ async function handleIncomingTask(req, res) {
  }
 
  try {
- console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})...`);
+ const isTaskWork = !!(context?.taskId);
+ console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})${isTaskWork ? ' [TASK]' : ''}...`);
  const result = await gateway.runAgent(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
  extraSystemPrompt: registered ? undefined : (systemPrompt || undefined),
- timeoutMs: 180000,
+ timeoutMs: isTaskWork ? 600000 : 180000,
  });
 
  if (result) {
@@ -1985,12 +1986,16 @@ async function handleIncomingTaskStream(req, res) {
 
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${isBrowserTask ? ' [browser task]' : ''}...`);
+ // Task work needs longer inactivity timeout — gateway agents do internal tool work
+ // (read/write/exec) that doesn't emit WS events. 600s for tasks, 180s for chat.
+ const isTaskWork = !!(context?.taskId);
+ const inactivityMs = isTaskWork ? 600000 : 180000;
  const { response, toolLog } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
  extraSystemPrompt: resolvedSystemPrompt,
- timeoutMs: 180000,
+ timeoutMs: inactivityMs,
  }, (event, data) => {
  // Forward each event to SSE as it arrives
  sendSSE(event, data);
