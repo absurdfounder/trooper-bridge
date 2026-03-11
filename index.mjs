@@ -1030,7 +1030,7 @@ class OpenClawGateway {
  const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
  if (fm) params.path = fm[1];
  }
- else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower) || /schedul|cron|remind|recurr/i.test(recentText)) {
+ else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower)) {
  toolName = 'cron';
  }
  else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
@@ -1130,7 +1130,7 @@ class OpenClawGateway {
  const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
  if (fm) heuristicParams.path = fm[1];
  }
- else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower) || /schedul|cron|remind|recurr/i.test(recentText)) {
+ else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower)) {
  toolName = 'cron';
  }
  // Last resort: if we found a URL/domain but no tool match, it's probably web_fetch
