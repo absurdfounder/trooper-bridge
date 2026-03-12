@@ -2122,6 +2122,65 @@ async function handleIncomingTaskStream(req, res) {
  // (read/write/exec) that doesn't emit WS events. 600s for tasks, 180s for chat.
  const isTaskWork = !!(context?.taskId);
  const inactivityMs = isTaskWork ? 600000 : 180000;
+
+ // ── Live tool events via JSONL tail ──
+ // Gateway doesn't forward tool events over WS (issue #43986).
+ // Workaround: tail the session JSONL file inside Docker and parse tool events in real-time.
+ let jsonlTailProc = null;
+ const activeToolCalls = new Map(); // toolCallId → { name, startedAt }
+ try {
+   // Find the latest JSONL for this agent's sessions dir
+   const sessDir = `/home/node/.openclaw/agents/${agentId}/sessions`;
+   const findCmd = `docker exec openclaw-openclaw-gateway-1 sh -c "ls -t ${sessDir}/*.jsonl 2>/dev/null | head -1"`;
+   const latestFile = execSync(findCmd, { timeout: 3000 }).toString().trim();
+   if (latestFile) {
+     // Get current line count to only process NEW lines
+     const wcOut = execSync(`docker exec openclaw-openclaw-gateway-1 wc -l < "${latestFile}"`, { timeout: 3000 }).toString().trim();
+     const startLine = parseInt(wcOut) || 0;
+     console.log(`[${id}] Starting JSONL tail on ${latestFile} from line ${startLine}`);
+     jsonlTailProc = spawn('docker', ['exec', 'openclaw-openclaw-gateway-1', 'tail', '-n', '+' + (startLine + 1), '-f', latestFile]);
+     let lineBuf = '';
+     jsonlTailProc.stdout.on('data', (chunk) => {
+       lineBuf += chunk.toString();
+       const lines = lineBuf.split('\n');
+       lineBuf = lines.pop(); // keep incomplete line
+       for (const line of lines) {
+         if (!line.trim()) continue;
+         try {
+           const entry = JSON.parse(line);
+           if (entry.type === 'message' && entry.message?.role === 'assistant') {
+             // Look for toolCall items in content array
+             const content = entry.message.content;
+             if (Array.isArray(content)) {
+               for (const item of content) {
+                 if (item.type === 'toolCall' && item.name && item.id) {
+                   activeToolCalls.set(item.id, { name: item.name, startedAt: Date.now() });
+                   console.log(`[${id}:JSONL] tool_start: ${item.name} (${item.id})`);
+                   sendSSE('tool_start', { tool: item.name, params: item.arguments || {}, toolCallId: item.id });
+                 }
+               }
+             }
+           } else if (entry.type === 'message' && entry.message?.role === 'toolResult') {
+             const tcId = entry.message.toolCallId;
+             const tc = activeToolCalls.get(tcId);
+             const toolName = entry.message.toolName || tc?.name || 'unknown';
+             const isError = entry.message.isError || false;
+             const summary = Array.isArray(entry.message.content) ? entry.message.content.map(c => c.text || '').join('').substring(0, 300) : '';
+             const durationMs = tc ? Date.now() - tc.startedAt : 0;
+             console.log(`[${id}:JSONL] tool_result: ${toolName} ${isError ? 'FAIL' : 'ok'} (${durationMs}ms)`);
+             sendSSE('tool_result', { tool: toolName, success: !isError, summary, durationMs, toolCallId: tcId });
+             activeToolCalls.delete(tcId);
+           }
+         } catch { /* skip unparseable lines */ }
+       }
+     });
+     jsonlTailProc.stderr.on('data', () => {}); // suppress stderr
+     jsonlTailProc.on('error', () => {}); // suppress spawn errors
+   }
+ } catch (e) {
+   console.warn(`[${id}] JSONL tail setup failed: ${e.message}`);
+ }
+
  const { response, toolLog } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
@@ -2221,6 +2280,12 @@ async function handleIncomingTaskStream(req, res) {
  // Add per-tool overhead (~200 tokens per tool call for function definition + wrapping)
  const toolOverhead = toolLog.length * 200;
 
+ // Kill JSONL tail process
+ if (jsonlTailProc) {
+   try { jsonlTailProc.kill('SIGTERM'); } catch {}
+   jsonlTailProc = null;
+ }
+
  sendSSE('done', {
  requestId: id, agentId,
  result: response || '',
@@ -2290,6 +2355,7 @@ async function handleIncomingTaskStream(req, res) {
  forwardToMissionControl(taskId, agentName, fullResult, id);
  }
  } catch (err) {
+ if (jsonlTailProc) { try { jsonlTailProc.kill('SIGTERM'); } catch {} jsonlTailProc = null; }
  console.error(`[${id}] SSE agent failed: ${err.message}`);
  sendSSE('error', { message: err.message, requestId: id });
  } finally {
