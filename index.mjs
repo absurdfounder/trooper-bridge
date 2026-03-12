@@ -1964,10 +1964,10 @@ async function handleIncomingTask(req, res) {
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
- // Always route through agent:main — gateway only authenticates main agent.
- // The slug in the session key still identifies the agent's workspace/context.
- const agentId = 'main';
- const sessionKey = `hook:crabhq:main:${slug}:task`;
+ // Route SPCs to unified 'spc' agent, everything else to 'main'
+ const isSPC = registered?.role === 'SPC';
+ const agentId = isSPC ? 'spc' : 'main';
+ const sessionKey = `hook:crabhq:${agentId}:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
@@ -2021,9 +2021,10 @@ async function handleIncomingTaskStream(req, res) {
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
- // Always route through agent:main — gateway only authenticates main agent.
- const agentId = 'main';
- const sessionKey = `hook:crabhq:main:${slug}:task`;
+ // Route SPCs to unified 'spc' agent, everything else to 'main'
+ const isSPC = registered?.role === 'SPC';
+ const agentId = isSPC ? 'spc' : 'main';
+ const sessionKey = `hook:crabhq:${agentId}:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
