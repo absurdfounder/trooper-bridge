@@ -2179,16 +2179,22 @@ async function handleIncomingTaskStream(req, res) {
  }
 
  // Send final done event with complete result + tool log
- // Estimate token usage from response length (~4 chars/token for English)
- // Also estimate input tokens from the prompt/context length
- const estimatedOutputTokens = response ? Math.ceil(response.length / 4) : 0;
- const estimatedInputTokens = fullTask ? Math.ceil(fullTask.length / 4) : 0;
+ // Better token estimation: count input (prompt + context), output (response text),
+ // and tool I/O (params sent + results received). ~3.5 chars/token is closer for
+ // mixed code/english. Tool calls add significant hidden token overhead.
+ const charsPerToken = 3.5;
+ const toolInputChars = toolLog.reduce((sum, t) => sum + JSON.stringify(t.params || {}).length, 0);
+ const toolOutputChars = toolLog.reduce((sum, t) => sum + (t.summary || '').length, 0);
+ const estimatedOutputTokens = Math.ceil(((response || '').length + toolInputChars) / charsPerToken);
+ const estimatedInputTokens = Math.ceil(((fullTask || '').length + toolOutputChars) / charsPerToken);
+ // Add per-tool overhead (~200 tokens per tool call for function definition + wrapping)
+ const toolOverhead = toolLog.length * 200;
 
  sendSSE('done', {
  requestId: id, agentId,
  result: response || '',
  toolLog: toolLog.length > 0 ? toolLog : undefined,
- usage: { input_tokens: estimatedInputTokens, output_tokens: estimatedOutputTokens, estimated: true },
+ usage: { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true },
  desktopRecordingUrl: desktopRecordingUrl || undefined,
  });
 
