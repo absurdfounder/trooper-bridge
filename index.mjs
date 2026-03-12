@@ -772,7 +772,9 @@ class OpenClawGateway {
 
  const id = randomUUID();
  const idempotencyKey = opts.idempotencyKey || randomUUID();
- const sessionKey = opts.sessionKey || `hook:crabhq:${opts.agentId || 'main'}:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
+ // Session key in canonical format: agent:{agentId}:{rest}
+ const _agentId = opts.agentId || 'main';
+ const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
 
  const textChunks = [];
@@ -891,7 +893,9 @@ class OpenClawGateway {
 
  const id = randomUUID();
  const idempotencyKey = opts.idempotencyKey || randomUUID();
- const sessionKey = opts.sessionKey || `hook:crabhq:${opts.agentId || 'main'}:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
+ // Session key in canonical format: agent:{agentId}:{rest}
+ const _agentId2 = opts.agentId || 'main';
+ const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
 
  const textChunks = [];
@@ -1967,7 +1971,8 @@ async function handleIncomingTask(req, res) {
  // Route SPCs to unified 'spc' agent, everything else to 'main'
  const isSPC = registered?.role === 'SPC';
  const agentId = isSPC ? 'spc' : 'main';
- const sessionKey = `hook:crabhq:${agentId}:${slug}:task`;
+ // Session key MUST be in canonical format: agent:{agentId}:{rest}
+ const sessionKey = `agent:${agentId}:hook:crabhq:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
@@ -2024,7 +2029,8 @@ async function handleIncomingTaskStream(req, res) {
  // Route SPCs to unified 'spc' agent, everything else to 'main'
  const isSPC = registered?.role === 'SPC';
  const agentId = isSPC ? 'spc' : 'main';
- const sessionKey = `hook:crabhq:${agentId}:${slug}:task`;
+ // Session key MUST be in canonical format: agent:{agentId}:{rest}
+ const sessionKey = `agent:${agentId}:hook:crabhq:${slug}:task`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
@@ -3039,7 +3045,7 @@ app.post('/webhook/background', async (req, res) => {
  try {
  gateway.runAgent(task, {
  agentName: agentName || 'CrabsHQ',
- sessionKey: sessionKey || `hook:crabhq:bg:${Date.now()}`,
+ sessionKey: sessionKey || `agent:main:hook:crabhq:bg:${Date.now()}`,
  thinking: thinking || undefined,
  model: model || undefined,
  }).catch(err => console.error('Background agent failed:', err.message));
@@ -3054,7 +3060,7 @@ app.post('/webhook/background', async (req, res) => {
  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENCLAW_HOOK_TOKEN}` },
  body: JSON.stringify({
  message: task, name: agentName || 'CrabsHQ',
- sessionKey: sessionKey || `hook:crabhq:${Date.now()}`,
+ sessionKey: sessionKey || `agent:main:hook:crabhq:${Date.now()}`,
  wakeMode: 'now', deliver: false,
  model: model || undefined, thinking: thinking || undefined,
  timeoutSeconds: timeoutSeconds || 120,
@@ -3137,9 +3143,10 @@ app.post('/dm', async (req, res) => {
 
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
- const agentId = registered ? registered.agentId : 'main';
- // Session key scoped by agent + user for DM isolation
- const sessionKey = `hook:dm:${slug}:${userId || 'anon'}`;
+ const isSPC = registered?.role === 'SPC';
+ const agentId = isSPC ? 'spc' : 'main';
+ // Session key in canonical format: agent:{agentId}:{rest}
+ const sessionKey = `agent:${agentId}:hook:dm:${slug}:${userId || 'anon'}`;
 
  if (!gateway.isReady) {
  const reconnected = await gateway.ensureConnected();
@@ -3257,7 +3264,7 @@ app.post('/webhook/cron', async (req, res) => {
  headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${OPENCLAW_HOOK_TOKEN}` },
  body: JSON.stringify({
  message: `Use the cron tool to ${action || 'add'} a job: ${JSON.stringify({ name, schedule, message, sessionTarget, wakeMode, jobId })}`,
- name: 'CrabsHQ-Cron', sessionKey: 'hook:crabhq:cron', wakeMode: 'now', deliver: false,
+ name: 'CrabsHQ-Cron', sessionKey: 'agent:main:hook:crabhq:cron', wakeMode: 'now', deliver: false,
  }),
  });
  const data = await hookRes.json().catch(() => ({}));
