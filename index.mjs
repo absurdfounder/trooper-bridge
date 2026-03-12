@@ -790,7 +790,7 @@ class OpenClawGateway {
  const last = toolCalls[toolCalls.length - 1];
  if (last && last.status === 'called') {
  last.status = data.is_error ? 'failed' : 'ok';
- last.summary = typeof data.content === 'string' ? data.content.substring(0, 200) : (data.output || '').substring(0, 200);
+ last.summary = typeof data.content === 'string' ? data.content : (data.output || '');
  }
  }
  });
@@ -970,7 +970,7 @@ class OpenClawGateway {
  subAgentName: subInfo.name,
  });
  } else if (stream === 'tool_result' && data) {
- const summary = typeof data.content === 'string' ? data.content.substring(0, 500) : (data.output || '').substring(0, 500);
+ const summary = typeof data.content === 'string' ? data.content : (data.output || '');
  if (onEvent) onEvent('subagent_tool_result', {
  tool: data.name || 'unknown',
  success: !data.is_error,
@@ -1040,7 +1040,7 @@ class OpenClawGateway {
  if (last && last.status === 'called') {
    last.status = data.is_error ? 'failed' : 'ok';
    last.durationMs = Date.now() - (last.startedAt || Date.now());
-   const summary = typeof data.content === 'string' ? data.content.substring(0, 500) : (data.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`);
+   const summary = typeof data.content === 'string' ? data.content : (data.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`);
    last.summary = summary;
    if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: !data.is_error, summary, index: toolLog.length - 1 });
  }
@@ -1442,12 +1442,12 @@ class OpenClawGateway {
  spawnedAt: Date.now(),
  lastActivity: Date.now(),
  permissions: last.params?.permissions || 'approve-reads',
- output: (last.summary || '').substring(0, 500),
+ output: last.summary || '',
  });
  onEvent('acp_session_started', {
  sessionId: acpSessionId,
  agent: last.params?.agent || 'claude',
- summary: (last.summary || '').substring(0, 200),
+ summary: last.summary || '',
  });
  }
  } catch {}
