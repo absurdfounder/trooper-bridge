@@ -2232,6 +2232,7 @@ async function handleIncomingTaskStream(req, res) {
  // Post-completion: fetch real tool history from gateway session transcript
  // This gives us exec commands, Read/Write calls, browser actions etc.
  try {
+  console.log("[Post-completion] Starting history fetch for " + agentId + " / " + agentName);
   const sessionKey2 = `agent:${agentId}:hook:crabhq:${(agentName || 'default').toLowerCase().replace(/\s+/g, '-')}:task`;
   const historyMessages = await gateway.fetchSessionHistory(sessionKey2, 100);
   if (historyMessages && historyMessages.length > 0) {
