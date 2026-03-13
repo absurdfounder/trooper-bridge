@@ -1045,6 +1045,40 @@ class OpenClawGateway {
  return; // Don't process sub-agent events as main agent events
  }
 
+ function summarizeToolResult(toolName, params, raw, success) {
+   const t = String(toolName || '').toLowerCase();
+   const text = String(raw || '').trim();
+   if (!text) return success ? 'Completed' : 'Failed';
+   if (t === 'exec') {
+     const first = text.split('\n').find(Boolean) || '';
+     return `${success ? 'Command finished' : 'Command failed'}${params?.command ? `: ${String(params.command).slice(0, 80)}` : ''}${first ? ` — ${first.slice(0, 120)}` : ''}`;
+   }
+   if (t === 'memory_search') return `Memory search${params?.query ? ` for “${String(params.query).slice(0, 80)}”` : ''}`;
+   if (t === 'memory_get') return `Read memory snippet${params?.path ? ` from ${params.path}` : ''}`;
+   if (t === 'read') return `Read file${params?.path || params?.file_path ? `: ${(params.path || params.file_path)}` : ''}`;
+   if (t === 'write') return `Wrote file${params?.path || params?.file_path ? `: ${(params.path || params.file_path)}` : ''}`;
+   if (t === 'edit') return `Edited file${params?.path || params?.file_path ? `: ${(params.path || params.file_path)}` : ''}`;
+   if (t === 'browser' || t.startsWith('browser.')) return `Browser action${params?.url ? `: ${params.url}` : ''}`;
+   return text.split('\n').find(Boolean)?.slice(0, 180) || (success ? 'Completed' : 'Failed');
+ }
+
+ function normalizeToolEventPayload(kind, base = {}) {
+   return {
+     eventType: kind,
+     confidence: base.confidence || 'native',
+     tool: base.tool || 'unknown',
+     toolCallId: base.toolCallId,
+     params: base.params || {},
+     summary: base.summary || '',
+     raw: base.raw || '',
+     success: base.success,
+     durationMs: base.durationMs,
+     startedAt: base.startedAt,
+     endedAt: base.endedAt || Date.now(),
+     index: base.index,
+   };
+ }
+
  // ── Main agent: real tool_use/tool_result from gateway ──
  // The gateway sends these with actual tool names (Read, Write, web_search, exec, etc.)
  // This replaces the heuristic "processing" guessing for the main agent.
@@ -1062,12 +1096,12 @@ class OpenClawGateway {
    inToolGap = false;
  }
  toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now() });
- if (onEvent) onEvent('tool_start', { tool: toolName, skillName: null, params: toolParams, index: toolLog.length - 1 });
+ if (onEvent) onEvent('tool_start', normalizeToolEventPayload('tool_start', { tool: toolName, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' }));
  if ((String(toolName).toLowerCase() === 'write' || String(toolName).toLowerCase() === 'edit')) {
    const filePath = toolParams.file_path || toolParams.path || toolParams.filePath || '';
    if (filePath && onEvent) {
      const fileName = String(filePath).split('/').pop();
-     onEvent('file_written', { path: filePath, name: fileName, ext: fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '', tool: toolName });
+     onEvent('file_written', { eventType: 'file_written', confidence: 'native', path: filePath, name: fileName, ext: fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '', tool: toolName, time: Date.now() });
    }
  }
  return;
@@ -1077,10 +1111,10 @@ class OpenClawGateway {
  if (last && last.status === 'called') {
    last.status = data.is_error ? 'failed' : 'ok';
    last.durationMs = Date.now() - (last.startedAt || Date.now());
-   const summary = typeof data.content === 'string' ? data.content : (data.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`);
-   last.summary = summary;
    const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || data.result || data, null, 2).slice(0, 4000);
-   if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1 });
+   const summary = summarizeToolResult(last.tool, last.params, raw || data.summary || '', !data.is_error);
+   last.summary = summary;
+   if (onEvent) onEvent('tool_result', normalizeToolEventPayload('tool_result', { tool: last.tool, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' }));
  }
  return;
  }
@@ -2207,7 +2241,7 @@ async function handleIncomingTaskStream(req, res) {
                  if (item.type === 'toolCall' && item.name && item.id) {
                    activeToolCalls.set(item.id, { name: item.name, startedAt: Date.now(), params: item.arguments || {} });
                    console.log(`[${id}:JSONL] tool_start: ${item.name} (${item.id})`);
-                   sendSSE('tool_start', { tool: item.name, params: item.arguments || {}, toolCallId: item.id });
+                   sendSSE('tool_start', normalizeToolEventPayload('tool_start', { tool: item.name, params: item.arguments || {}, toolCallId: item.id, startedAt: Date.now(), confidence: 'jsonl' }));
                  }
                }
              }
@@ -2218,10 +2252,10 @@ async function handleIncomingTaskStream(req, res) {
              const isError = entry.message.isError || false;
              const parts = Array.isArray(entry.message.content) ? entry.message.content : [];
              const raw = parts.map(c => c.text || (typeof c === 'string' ? c : JSON.stringify(c))).join('\n').slice(0, 4000);
-             const summary = raw.substring(0, 300) || `${isError ? 'Failed' : 'Completed'} in ${Math.round((tc ? Date.now() - tc.startedAt : 0) / 1000)}s`;
              const durationMs = tc ? Date.now() - tc.startedAt : 0;
+             const summary = summarizeToolResult(toolName, tc?.params || {}, raw, !isError);
              console.log(`[${id}:JSONL] tool_result: ${toolName} ${isError ? 'FAIL' : 'ok'} (${durationMs}ms)`);
-             sendSSE('tool_result', { tool: toolName, params: tc?.params || {}, success: !isError, summary, raw, durationMs, toolCallId: tcId });
+             sendSSE('tool_result', normalizeToolEventPayload('tool_result', { tool: toolName, params: tc?.params || {}, success: !isError, summary, raw, durationMs, toolCallId: tcId, startedAt: tc?.startedAt, confidence: 'jsonl' }));
              activeToolCalls.delete(tcId);
            }
          } catch { /* skip unparseable lines */ }
