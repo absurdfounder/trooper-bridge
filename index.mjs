@@ -1063,6 +1063,13 @@ class OpenClawGateway {
  }
  toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now() });
  if (onEvent) onEvent('tool_start', { tool: toolName, skillName: null, params: toolParams, index: toolLog.length - 1 });
+ if ((String(toolName).toLowerCase() === 'write' || String(toolName).toLowerCase() === 'edit')) {
+   const filePath = toolParams.file_path || toolParams.path || toolParams.filePath || '';
+   if (filePath && onEvent) {
+     const fileName = String(filePath).split('/').pop();
+     onEvent('file_written', { path: filePath, name: fileName, ext: fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '', tool: toolName });
+   }
+ }
  return;
  }
  if (stream === 'tool_result' && data) {
@@ -2330,9 +2337,19 @@ async function handleIncomingTaskStream(req, res) {
    jsonlTailProc = null;
  }
 
+ // Structured outcome hint for CrabsHQ orchestration
+ const responseText = response || '';
+ const blockedMatch = typeof responseText === 'string' ? responseText.match(/<blocked\s+reason="([^"]*)">([\s\S]*?)<\/blocked>/i) : null;
+ const completedMatch = typeof responseText === 'string' ? responseText.match(/<completed[^>]*>([\s\S]*?)<\/completed>/i) : null;
+ if (blockedMatch) {
+   sendSSE('outcome', { type: 'blocked', reason: (blockedMatch[1] || '').trim(), detail: (blockedMatch[2] || '').trim() });
+ } else if (completedMatch) {
+   sendSSE('outcome', { type: 'completed', detail: (completedMatch[1] || '').trim() });
+ }
+
  sendSSE('done', {
  requestId: id, agentId,
- result: response || '',
+ result: responseText,
  toolLog: toolLog.length > 0 ? toolLog : undefined,
  usage: { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true },
  desktopRecordingUrl: desktopRecordingUrl || undefined,
