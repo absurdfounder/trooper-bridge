@@ -926,6 +926,7 @@ class OpenClawGateway {
  const _agentId2 = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
+ const _projectFolder = opts.projectFolder || null;
 
  const textChunks = [];
  const toolLog = [];
@@ -1330,6 +1331,27 @@ class OpenClawGateway {
    const writeContent = entry.params.content || '';
    if (ARTIFACT_EXTS.test(writePath) && writeContent.length > 20) {
      entry._pendingArtifact = { path: writePath, content: writeContent };
+   }
+   // ── Auto-relocate files written outside project folder ──
+   if (_projectFolder && writePath) {
+     const wsBase = '/home/node/.openclaw/workspace/';
+     const normPath = writePath.startsWith(wsBase) ? writePath.slice(wsBase.length) : writePath.replace(/^~\/\.openclaw\/workspace\//, '');
+     // Check if file is in workspace root (not in project folder, not a system file)
+     const systemFiles = ['AGENTS.md','SOUL.md','MEMORY.md','COMPANY.md','HEARTBEAT.md','IDENTITY.md','CAPABILITIES.md','MEMORIES.md','TEAM.md','SECRETS.md'];
+     const isInProjectFolder = normPath.startsWith(_projectFolder + '/');
+     const isSystemFile = systemFiles.includes(normPath) || normPath.startsWith('memory/') || normPath.startsWith('.');
+     const isRootFile = !normPath.includes('/');
+     if (!isInProjectFolder && !isSystemFile && (isRootFile || !normPath.startsWith(_projectFolder))) {
+       const fileName = normPath.split('/').pop();
+       const src = `${wsBase}${normPath}`;
+       const dst = `${wsBase}${_projectFolder}/${fileName}`;
+       try {
+         execSync(`docker exec openclaw-openclaw-gateway-1 sh -c "[ -f '${src}' ] && mv '${src}' '${dst}' && echo relocated || echo skip"`, { timeout: 5000 });
+         console.log(`[PROJECT_FOLDER] Relocated ${normPath} → ${_projectFolder}/${fileName}`);
+       } catch (e) {
+         console.warn(`[PROJECT_FOLDER] Failed to relocate ${normPath}: ${e.message}`);
+       }
+     }
    }
  }
  logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
@@ -2208,6 +2230,7 @@ async function handleIncomingTaskStream(req, res) {
  model: model || undefined,
  extraSystemPrompt: resolvedSystemPrompt,
  timeoutMs: inactivityMs,
+ projectFolder,
  }, (event, data) => {
  // Forward each event to SSE as it arrives
  sendSSE(event, data);
