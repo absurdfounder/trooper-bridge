@@ -3989,8 +3989,8 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks } = req.body;
- const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks].some(k => k !== undefined);
+ const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel } = req.body;
+ const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
@@ -4086,8 +4086,8 @@ function normalizeModelId(model) {
 
  const _syncWarnings = [];
 
- // Update default model + fallbacks in openclaw.json
- if (defaultModel !== undefined || defaultFallbacks !== undefined) {
+ // Update default/native models in openclaw.json
+ if (defaultModel !== undefined || defaultFallbacks !== undefined || imageModel !== undefined || pdfModel !== undefined) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.agents) config.agents = {};
@@ -4109,9 +4109,17 @@ function normalizeModelId(model) {
    config.agents.defaults.model.fallbacks = normalizedFallbacks;
    console.log(`[bridge] Updating default fallbacks to: ${normalizedFallbacks.join(', ') || '(none)'}`);
  }
+ if (imageModel !== undefined) {
+   config.agents.defaults.imageModel = imageModel ? normalizeModelId(imageModel) : undefined;
+   console.log(`[bridge] Updating image model to: ${config.agents.defaults.imageModel || '(none)'}`);
+ }
+ if (pdfModel !== undefined) {
+   config.agents.defaults.pdfModel = pdfModel ? normalizeModelId(pdfModel) : undefined;
+   console.log(`[bridge] Updating pdf model to: ${config.agents.defaults.pdfModel || '(none)'}`);
+ }
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
- } catch (e) { console.error('Failed to update default model/fallbacks in openclaw.json:', e.message); _syncWarnings.push(`Default model/fallback update failed: ${e.message}`); }
+ } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }
 
  // Update auth-profiles.json for ALL providers
