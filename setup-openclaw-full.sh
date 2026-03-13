@@ -1613,23 +1613,27 @@ echo "[setup] Desktop configs pre-seeded (icons, menu, pcmanfm, lxqt)"
 cat > /usr/local/bin/crabhq-desktop-start << 'DSTART'
 #!/bin/bash
 set +e
-# Desktop on :1 — NO lxqt-session (it creates isolated dbus, breaks everything)
-# Display :99 is reserved for AI browser live view
+# Stable desktop on :1 — deterministic boot, no fragile desktop-icon dependency.
+# Display :99 is reserved for AI browser live view.
 
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
-# Start Xvfb on display :1
-if ! pgrep -f 'Xvfb :1' > /dev/null 2>&1; then
- nohup Xvfb :1 -screen 0 1280x800x24 > /var/log/xvfb.log 2>&1 &
- sleep 2
-fi
+pkill -f 'pcmanfm-qt --desktop' 2>/dev/null || true
+pkill -f 'lxqt-session' 2>/dev/null || true
+pkill -f 'lxqt-panel' 2>/dev/null || true
+pkill -f 'openbox' 2>/dev/null || true
+pkill -f 'xterm -hold -geometry 100x28+80+60' 2>/dev/null || true
+pkill -f 'x11vnc.*5901' 2>/dev/null || true
+pkill -f 'websockify.*6081' 2>/dev/null || true
+pkill -f 'Xvfb :1' 2>/dev/null || true
+sleep 1
+
+nohup Xvfb :1 -screen 0 1280x800x24 > /var/log/xvfb.log 2>&1 &
+sleep 2
 export DISPLAY=:1
 
-# ── Fresh dbus session every start ──
-# NEVER reuse stale env files — dead bus address = black screen + no icons.
-# DO NOT use lxqt-session — it spawns its own isolated dbus internally.
 DBUS_ENV_FILE=/tmp/dbus-desktop-env
 rm -f "$DBUS_ENV_FILE"
 eval "$(dbus-launch --sh-syntax)"
@@ -1643,71 +1647,35 @@ DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID
 EOF2
 export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
 
-# openbox (window manager — right-click menu, window borders)
-if ! pgrep -f 'openbox' > /dev/null 2>&1; then
- nohup openbox > /var/log/openbox.log 2>&1 &
- sleep 1
-fi
+python3 - << 'PYBG'
+from pathlib import Path
+w,h=1280,800
+with open('/tmp/crabhq-bg.ppm','wb') as f:
+    f.write(f'P6\n{w} {h}\n255\n'.encode())
+    for y in range(h):
+        t=y/(h-1)
+        r=int(219*(1-t)+235*t)
+        g=int(228*(1-t)+239*t)
+        b=int(238*(1-t)+247*t)
+        f.write(bytes([r,g,b])*w)
+PYBG
+DISPLAY=:1 feh --bg-fill /tmp/crabhq-bg.ppm >/var/log/feh-desktop.log 2>&1 || DISPLAY=:1 xsetroot -solid '#dbe4ee'
 
-# lxqt-panel (taskbar) — NO lxqt-session
-if ! pgrep -f 'lxqt-panel' > /dev/null 2>&1; then
- mkdir -p /root/.config/lxqt
- nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
- sleep 1
-fi
+nohup openbox > /var/log/openbox.log 2>&1 &
+sleep 1
+nohup lxqt-panel > /var/log/lxqt-panel.log 2>&1 &
+sleep 1
 
-# x11vnc on display :1, port 5901
-if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
- nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 \
+# Always launch one visible terminal so the desktop never looks dead.
+nohup xterm -hold -geometry 100x28+80+60 -fa Monospace -fs 11 -bg '#111827' -fg '#e5e7eb' -e /bin/bash -lc "echo CrabsHQ Desktop Ready; echo; echo '- If panel/icons are missing, the session is still alive.'; echo '- Open apps can be launched from terminal or agent actions.'; echo; exec bash" > /var/log/xterm-desktop.log 2>&1 &
+sleep 1
+
+nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 -noxdamage \
  -o /var/log/x11vnc-desktop.log -quiet > /dev/null 2>&1 &
- sleep 1
-fi
-
-# pcmanfm-qt desktop icons (uses --profile lxqt, config at ~/.config/pcmanfm-qt/lxqt/)
-# WORKAROUND: pcmanfm-qt doesn't paint BgColor on first launch after fresh Xvfb.
-# Kill and restart it once so the second instance renders correctly.
-if ! pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then
- XDG_CURRENT_DESKTOP=LXQt nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
- sleep 2
- pkill -f 'pcmanfm-qt --desktop' 2>/dev/null
- sleep 1
- XDG_CURRENT_DESKTOP=LXQt nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
- sleep 1
-fi
-
-# websockify bridging port 6081 → VNC 5901
-if ! pgrep -f "websockify.*6081" > /dev/null 2>&1; then
- nohup websockify --web=/usr/share/novnc 6081 localhost:5901 \
- > /var/log/websockify-desktop.log 2>&1 &
-fi
+sleep 1
+nohup websockify --web=/usr/share/novnc 6081 localhost:5901 > /var/log/websockify-desktop.log 2>&1 &
 
 systemctl start crabhq-agent-daemon 2>/dev/null || true
-
-# ── Verify all critical processes are alive, restart any that died ──
-sleep 2
-RETRY=0
-while [ $RETRY -lt 3 ]; do
- NEED_RESTART=false
- if ! pgrep -f 'openbox' > /dev/null 2>&1; then
-  echo "openbox died — restarting (attempt $((RETRY+1)))"
-  nohup openbox > /var/log/openbox.log 2>&1 &
-  NEED_RESTART=true
- fi
- if ! pgrep -f 'pcmanfm-qt --desktop' > /dev/null 2>&1; then
-  echo "pcmanfm-qt died — restarting (attempt $((RETRY+1)))"
-  XDG_CURRENT_DESKTOP=LXQt nohup pcmanfm-qt --desktop --profile lxqt > /var/log/pcmanfm-desktop.log 2>&1 &
-  NEED_RESTART=true
- fi
- if ! pgrep -f 'x11vnc.*5901' > /dev/null 2>&1; then
-  echo "x11vnc died — restarting (attempt $((RETRY+1)))"
-  nohup x11vnc -display :1 -forever -nopw -shared -rfbport 5901 \
-  -o /var/log/x11vnc-desktop.log -quiet > /dev/null 2>&1 &
-  NEED_RESTART=true
- fi
- if [ "$NEED_RESTART" = "false" ]; then break; fi
- RETRY=$((RETRY+1))
- sleep 2
-done
 
 echo 'Desktop started on :1, noVNC on port 6081'
 exit 0
