@@ -2,6 +2,9 @@
   "name": "openclaw-bridge",
   "version": "1.0.0",
   "type": "module",
+  "scripts": {
+    "test": "node --test lib/event-contracts.test.mjs"
+  },
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",

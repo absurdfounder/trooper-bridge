@@ -3,6 +3,12 @@ process.on('unhandledRejection', (err) => console.error('[Bridge] Unhandled reje
 // Connects to OpenClaw gateway via persistent WebSocket for full agent capabilities
 // (workspace files, tools, memory, session persistence, sub-agent spawning)
 import express from 'express';
+import {
+  buildBrowserSessionEndPayload,
+  buildBrowserSessionPayload,
+  buildScreenshotFramePayload,
+  normalizeToolEventPayload,
+} from './lib/event-contracts.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execSync, spawn } from 'child_process';
@@ -1061,24 +1067,6 @@ class OpenClawGateway {
    if (t === 'edit') return `Edited file${params?.path || params?.file_path ? `: ${(params.path || params.file_path)}` : ''}`;
    if (t === 'browser' || t.startsWith('browser.')) return `Browser action${params?.url ? `: ${params.url}` : ''}`;
    return text.split('\n').find(Boolean)?.slice(0, 180) || (success ? 'Completed' : 'Failed');
- }
-
- function normalizeToolEventPayload(kind, base = {}) {
-   return {
-     eventType: kind,
-     confidence: base.confidence || 'native',
-     tool: base.tool || 'unknown',
-     toolCallId: base.toolCallId,
-     skillName: base.skillName || null,
-     params: base.params || {},
-     summary: base.summary || '',
-     raw: base.raw || '',
-     success: base.success,
-     durationMs: base.durationMs,
-     startedAt: base.startedAt,
-     endedAt: base.endedAt || Date.now(),
-     index: base.index,
-   };
  }
 
  function relocateIntoProjectFolder(projectFolder, writePath) {
@@ -2318,14 +2306,14 @@ async function handleIncomingTaskStream(req, res) {
  // Priority: skill-reported live view > VNC > screenshot polling
  const skillSession = getSkillBrowserSession();
  if (skillSession?.liveViewUrl) {
- sendSSE('browser_session', { liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider });
+ sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider }));
  console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
  } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
- sendSSE('browser_session', { liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' });
+ sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' }));
  console.log(`[VNC] Sent live view URL to client`);
  } else {
  // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
- sendSSE('browser_session', { domain, provider: 'screenshot', sessionId: null, liveViewUrl: null });
+ sendSSE('browser_session', buildBrowserSessionPayload({ domain, provider: 'screenshot' }));
  console.log(`[screenshot] Browser session started — polling screenshots from container`);
  // Fallback: poll screenshots from container every 1.5s
  // Search both the media root and common subdirs where screenshots may be saved
@@ -2340,7 +2328,7 @@ async function handleIncomingTaskStream(req, res) {
  { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
  ).toString().trim();
  if (out && out.length > 100) {
- sendSSE('screenshot_frame', { base64: out, timestamp: Date.now() });
+ sendSSE('screenshot_frame', buildScreenshotFramePayload({ base64: out, timestamp: Date.now() }));
  }
  } catch (e) { /* ignore */ }
  }, 1500);
@@ -2365,10 +2353,10 @@ async function handleIncomingTaskStream(req, res) {
  // Signal browser session end
  const endSession = getSkillBrowserSession();
  if (endSession) {
- try { sendSSE('browser_session_end', { sessionId: endSession.sessionId, recordingUrl }); } catch {}
+ try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: endSession.sessionId, recordingUrl })); } catch {}
  clearSkillBrowserSession();
  } else if (isBrowserTask) {
- try { sendSSE('browser_session_end', { sessionId: null, recordingUrl }); } catch {}
+ try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ recordingUrl })); } catch {}
  }
 
  // Send final done event with complete result + tool log
