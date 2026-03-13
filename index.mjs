@@ -1081,6 +1081,27 @@ class OpenClawGateway {
    };
  }
 
+ function relocateIntoProjectFolder(projectFolder, writePath) {
+   if (!projectFolder || !writePath) return;
+   const wsBase = '/home/node/.openclaw/workspace/';
+   const normPath = writePath.startsWith(wsBase) ? writePath.slice(wsBase.length) : writePath.replace(/^~\/\.openclaw\/workspace\//, '');
+   const systemFiles = ['AGENTS.md','SOUL.md','MEMORY.md','COMPANY.md','HEARTBEAT.md','IDENTITY.md','CAPABILITIES.md','MEMORIES.md','TEAM.md','SECRETS.md'];
+   const isInProjectFolder = normPath.startsWith(projectFolder + '/');
+   const isSystemFile = systemFiles.includes(normPath) || normPath.startsWith('memory/') || normPath.startsWith('.');
+   if (isInProjectFolder || isSystemFile) return;
+
+   const destRel = normPath.includes('/') ? `${projectFolder}/${normPath}` : `${projectFolder}/${normPath.split('/').pop()}`;
+   const src = `${wsBase}${normPath}`;
+   const dst = `${wsBase}${destRel}`;
+   const dstDir = dst.split('/').slice(0, -1).join('/');
+   try {
+     execSync(`docker exec openclaw-openclaw-gateway-1 sh -lc "mkdir -p '${dstDir}' && [ -f '${src}' ] && mv '${src}' '${dst}' && echo relocated || echo skip"`, { timeout: 5000 });
+     console.log(`[PROJECT_FOLDER] Relocated ${normPath} → ${destRel}`);
+   } catch (e) {
+     console.warn(`[PROJECT_FOLDER] Failed to relocate ${normPath}: ${e.message}`);
+   }
+ }
+
  // ── Main agent: real tool_use/tool_result from gateway ──
  // The gateway sends these with actual tool names (Read, Write, web_search, exec, etc.)
  // This replaces the heuristic "processing" guessing for the main agent.
@@ -1116,6 +1137,10 @@ class OpenClawGateway {
    const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || data.result || data, null, 2).slice(0, 4000);
    const summary = summarizeToolResult(last.tool, last.params, raw || data.summary || '', !data.is_error);
    last.summary = summary;
+   if (_projectFolder && /^(write|edit)$/i.test(String(last.tool || ''))) {
+     const p = last.params?.file_path || last.params?.path || last.params?.filePath || '';
+     if (p) relocateIntoProjectFolder(_projectFolder, p);
+   }
    if (onEvent) onEvent('tool_result', normalizeToolEventPayload('tool_result', { tool: last.tool, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' }));
  }
  return;
@@ -1379,26 +1404,8 @@ class OpenClawGateway {
      entry._pendingArtifact = { path: writePath, content: writeContent };
    }
    // ── Auto-relocate files written outside project folder ──
-   if (_projectFolder && writePath) {
-     const wsBase = '/home/node/.openclaw/workspace/';
-     const normPath = writePath.startsWith(wsBase) ? writePath.slice(wsBase.length) : writePath.replace(/^~\/\.openclaw\/workspace\//, '');
-     // Check if file is in workspace root (not in project folder, not a system file)
-     const systemFiles = ['AGENTS.md','SOUL.md','MEMORY.md','COMPANY.md','HEARTBEAT.md','IDENTITY.md','CAPABILITIES.md','MEMORIES.md','TEAM.md','SECRETS.md'];
-     const isInProjectFolder = normPath.startsWith(_projectFolder + '/');
-     const isSystemFile = systemFiles.includes(normPath) || normPath.startsWith('memory/') || normPath.startsWith('.');
-     const isRootFile = !normPath.includes('/');
-     if (!isInProjectFolder && !isSystemFile && (isRootFile || !normPath.startsWith(_projectFolder))) {
-       const fileName = normPath.split('/').pop();
-       const src = `${wsBase}${normPath}`;
-       const dst = `${wsBase}${_projectFolder}/${fileName}`;
-       try {
-         execSync(`docker exec openclaw-openclaw-gateway-1 sh -c "[ -f '${src}' ] && mv '${src}' '${dst}' && echo relocated || echo skip"`, { timeout: 5000 });
-         console.log(`[PROJECT_FOLDER] Relocated ${normPath} → ${_projectFolder}/${fileName}`);
-       } catch (e) {
-         console.warn(`[PROJECT_FOLDER] Failed to relocate ${normPath}: ${e.message}`);
-       }
-     }
-   }
+   // Try once here and again on tool_result after the write has actually completed.
+   if (_projectFolder && writePath) relocateIntoProjectFolder(_projectFolder, writePath);
  }
  logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
  console.log(`[TOOL_USE] ${entry.tool} params=${JSON.stringify(entry.params).substring(0, 200)} raw_keys=${Object.keys(data).join(',')}`);
@@ -2258,6 +2265,10 @@ async function handleIncomingTaskStream(req, res) {
              const raw = parts.map(c => c.text || (typeof c === 'string' ? c : JSON.stringify(c))).join('\n').slice(0, 4000);
              const durationMs = tc ? Date.now() - tc.startedAt : 0;
              const summary = summarizeToolResult(toolName, tc?.params || {}, raw, !isError);
+             if (_projectFolder && /^(write|edit)$/i.test(String(toolName || ''))) {
+               const p = tc?.params?.file_path || tc?.params?.path || tc?.params?.filePath || '';
+               if (p) relocateIntoProjectFolder(_projectFolder, p);
+             }
              console.log(`[${id}:JSONL] tool_result: ${toolName} ${isError ? 'FAIL' : 'ok'} (${durationMs}ms)`);
              sendSSE('tool_result', normalizeToolEventPayload('tool_result', { tool: toolName, params: tc?.params || {}, success: !isError, summary, raw, durationMs, toolCallId: tcId, startedAt: tc?.startedAt, confidence: 'jsonl' }));
              activeToolCalls.delete(tcId);
