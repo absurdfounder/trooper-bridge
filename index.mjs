@@ -2017,11 +2017,20 @@ async function handleIncomingTask(req, res) {
  try {
  const isTaskWork = !!(context?.taskId);
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})${isTaskWork ? ' [TASK]' : ''}...`);
+ // Build system prompt with project folder enforcement
+ let nonStreamSystemPrompt = registered?.soul ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}` : (systemPrompt || undefined);
+ const nonStreamProjectFolder = context?.projectFolder;
+ if (nonStreamProjectFolder) {
+ const wsBase = '/home/node/.openclaw/workspace';
+ try { execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p "${wsBase}/${nonStreamProjectFolder}"`, { timeout: 5000 }); } catch {}
+ const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${nonStreamProjectFolder}/\nExamples: ${nonStreamProjectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
+ nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${folderRule}` : folderRule;
+ }
  const result = await gateway.runAgent(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: model || undefined,
- extraSystemPrompt: registered?.soul ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}` : (systemPrompt || undefined),
+ extraSystemPrompt: nonStreamSystemPrompt,
  timeoutMs: isTaskWork ? 600000 : 180000,
  });
 
@@ -2114,6 +2123,17 @@ async function handleIncomingTaskStream(req, res) {
  if (isBrowserTask && !registered) {
  const browserHint = 'You have a browser tool available. Use it to complete this task. Navigate to URLs, interact with pages, take screenshots, and report results. Use DuckDuckGo instead of Google for web searches (Google blocks automated browsers).';
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${browserHint}` : browserHint;
+ }
+
+ // ── Project folder enforcement ──
+ // Server passes a deterministic projectFolder (title-slug + id-hash).
+ // Pre-create the folder and inject as a system-level constraint the agent can't ignore.
+ const projectFolder = context?.projectFolder;
+ if (projectFolder) {
+ const wsBase = '/home/node/.openclaw/workspace';
+ try { execSync(`docker exec openclaw-openclaw-gateway-1 mkdir -p "${wsBase}/${projectFolder}"`, { timeout: 5000 }); } catch {}
+ const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${projectFolder}/\nExamples: ${projectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
+ resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${folderRule}` : folderRule;
  }
 
  // ── Live tool events via JSONL tail ──
