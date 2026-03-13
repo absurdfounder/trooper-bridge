@@ -929,7 +929,7 @@ class OpenClawGateway {
  const _projectFolder = opts.projectFolder || null;
 
  const textChunks = [];
- if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: model || opts.model || null, time: Date.now() });
+ if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: opts.model || null, time: Date.now() });
  const toolLog = [];
  let lifecycleDepth = 0; // track nested lifecycle start/end to detect tool execution
  let lastTextTime = 0; // track when text stops (tool execution gap)
@@ -2398,7 +2398,7 @@ async function handleIncomingTaskStream(req, res) {
  } else if (completedMatch) {
    sendSSE('outcome', { type: 'completed', detail: (completedMatch[1] || '').trim() });
  }
- sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: model || opts.model || null, time: Date.now() });
+ sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: opts.model || null, time: Date.now() });
 
  sendSSE('done', {
  requestId: id, agentId,
