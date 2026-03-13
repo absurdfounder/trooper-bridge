@@ -1079,7 +1079,8 @@ class OpenClawGateway {
    last.durationMs = Date.now() - (last.startedAt || Date.now());
    const summary = typeof data.content === 'string' ? data.content : (data.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`);
    last.summary = summary;
-   if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: !data.is_error, summary, index: toolLog.length - 1 });
+   const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || data.result || data, null, 2).slice(0, 4000);
+   if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1 });
  }
  return;
  }
@@ -2204,7 +2205,7 @@ async function handleIncomingTaskStream(req, res) {
              if (Array.isArray(content)) {
                for (const item of content) {
                  if (item.type === 'toolCall' && item.name && item.id) {
-                   activeToolCalls.set(item.id, { name: item.name, startedAt: Date.now() });
+                   activeToolCalls.set(item.id, { name: item.name, startedAt: Date.now(), params: item.arguments || {} });
                    console.log(`[${id}:JSONL] tool_start: ${item.name} (${item.id})`);
                    sendSSE('tool_start', { tool: item.name, params: item.arguments || {}, toolCallId: item.id });
                  }
@@ -2215,10 +2216,12 @@ async function handleIncomingTaskStream(req, res) {
              const tc = activeToolCalls.get(tcId);
              const toolName = entry.message.toolName || tc?.name || 'unknown';
              const isError = entry.message.isError || false;
-             const summary = Array.isArray(entry.message.content) ? entry.message.content.map(c => c.text || '').join('').substring(0, 300) : '';
+             const parts = Array.isArray(entry.message.content) ? entry.message.content : [];
+             const raw = parts.map(c => c.text || (typeof c === 'string' ? c : JSON.stringify(c))).join('\n').slice(0, 4000);
+             const summary = raw.substring(0, 300) || `${isError ? 'Failed' : 'Completed'} in ${Math.round((tc ? Date.now() - tc.startedAt : 0) / 1000)}s`;
              const durationMs = tc ? Date.now() - tc.startedAt : 0;
              console.log(`[${id}:JSONL] tool_result: ${toolName} ${isError ? 'FAIL' : 'ok'} (${durationMs}ms)`);
-             sendSSE('tool_result', { tool: toolName, success: !isError, summary, durationMs, toolCallId: tcId });
+             sendSSE('tool_result', { tool: toolName, params: tc?.params || {}, success: !isError, summary, raw, durationMs, toolCallId: tcId });
              activeToolCalls.delete(tcId);
            }
          } catch { /* skip unparseable lines */ }
