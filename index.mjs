@@ -9,6 +9,7 @@ import {
   buildScreenshotFramePayload,
   normalizeToolEventPayload,
 } from './lib/event-contracts.mjs';
+import { ensureXvnc } from './lib/xvnc.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execSync, spawn } from 'child_process';
@@ -2572,7 +2573,7 @@ app.get('/deploy-logs-raw', (req, res) => {
  }
 });
 
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
  // During initial provisioning, return 'installing' so provision.js keeps polling
  // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
  // Fallback: if bridge has been running >5 min, assume setup is complete (handles existing VPS + reboots).
@@ -2580,13 +2581,24 @@ app.get('/health', (req, res) => {
    || existsSync('/opt/openclaw-bridge/.setup-complete')
    || process.uptime() > 300;
 
- // Check VNC (Xvnc on :99)
- let vncRunning = false;
- try { vncRunning = !!execSync('pgrep -f "Xvnc :99"', { timeout: 2000 }).toString().trim(); } catch {}
+ const xvnc = ensureXvnc(':99');
+ const vncRunning = xvnc.ok;
 
- // Check browser availability
+ // Check browser availability + browser control responsiveness
  let browserAvailable = false;
  try { browserAvailable = existsSync('/usr/bin/google-chrome-stable') || existsSync('/opt/chrome-wrapper.sh'); } catch {}
+ let browserResponsive = false;
+ let browserError = null;
+ try {
+   const controller = new AbortController();
+   const timeout = setTimeout(() => controller.abort(), 2000);
+   const r = await fetch('http://127.0.0.1:18791/status', { signal: controller.signal });
+   clearTimeout(timeout);
+   browserResponsive = r.ok;
+   if (!r.ok) browserError = `status ${r.status}`;
+ } catch (error) {
+   browserError = error.message;
+ }
 
  res.json({
  status: setupDone ? 'ok' : 'installing',
@@ -2597,10 +2609,13 @@ app.get('/health', (req, res) => {
  },
  browser: {
    available: browserAvailable,
+   responsive: browserResponsive,
+   error: browserError,
    port: 18791,
  },
  vnc: {
    running: vncRunning,
+   error: xvnc.ok ? null : xvnc.error,
    port: 5999,
  },
  agents: {
