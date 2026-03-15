@@ -1,0 +1,49 @@
+name: Publish Org Runtime Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/runtime-bundle.yml'
+      - 'scripts/publish-org-runtime.sh'
+
+jobs:
+  publish-runtime-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      CRABSHQ_REPO: absurdfounder/Crabs-HQ
+      CRABSHQ_REF: main
+      RELEASE_TAG: org-runtime-latest
+      ASSET_NAME: crabhq-org-runtime.tar.gz
+    steps:
+      - name: Checkout openclawbridge
+        uses: actions/checkout@v4
+
+      - name: Checkout Crabs-HQ server source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CRABSHQ_REPO }}
+          ref: ${{ env.CRABSHQ_REF }}
+          token: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          path: Crabs-HQ
+
+      - name: Build runtime tarball
+        run: |
+          chmod +x scripts/publish-org-runtime.sh
+          ./scripts/publish-org-runtime.sh build \
+            "${GITHUB_WORKSPACE}/Crabs-HQ/server" \
+            "${RUNNER_TEMP}/${ASSET_NAME}"
+
+      - name: Publish release asset
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${RELEASE_TAG}" >/dev/null 2>&1 || \
+            gh release create "${RELEASE_TAG}" \
+              --title "${RELEASE_TAG}" \
+              --notes "Public CrabsHQ org runtime bundle for fresh provisioning."
+
+          gh release upload "${RELEASE_TAG}" "${RUNNER_TEMP}/${ASSET_NAME}" --clobber
