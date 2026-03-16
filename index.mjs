@@ -3802,7 +3802,7 @@ app.get('/gateway/status', (req, res) => {
  const [state, running, restarts] = status.split(':');
  let logs = '';
  try { logs = execSync('docker logs --tail 20 openclaw-openclaw-gateway-1 2>&1', { timeout: 10000 }).toString(); } catch {}
- res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, websocketConnected: gateway.isReady, recentLogs: logs });
+ res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, websocketConnected: gateway.isReady, connected: gateway.isReady, paired: gateway.isReady, recentLogs: logs });
  } catch (err) {
  res.status(500).json({ error: 'Failed to get gateway status', details: err.message });
  }
