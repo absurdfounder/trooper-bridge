@@ -2291,15 +2291,7 @@ async function handleIncomingTaskStream(req, res) {
  }
 
  let response, toolLog;
- try {
- ({ response, toolLog } = await gateway.runAgentStreaming(fullTask, {
- agentId, agentName: agentName || 'default', sessionKey,
- thinking: thinking || undefined,
- model: model || undefined,
- extraSystemPrompt: resolvedSystemPrompt,
- timeoutMs: inactivityMs,
- projectFolder,
- }, (event, data) => {
+ const streamingCallback = (event, data) => {
  // Forward each event to SSE as it arrives
  sendSSE(event, data);
 
@@ -2311,59 +2303,71 @@ async function handleIncomingTaskStream(req, res) {
 
  // Start live browser view when browser tool begins
  if (event === 'tool_start' && isBrowserTool(data?.tool)) {
- if (screenshotPollerInterval) {
- clearInterval(screenshotPollerInterval);
- }
+  if (screenshotPollerInterval) {
+   clearInterval(screenshotPollerInterval);
+  }
 
- // Extract domain from browser tool params (url, query, etc.)
- const params = data?.params || data?.input || {};
- const navUrl = params.url || params.uri || '';
- let domain = '';
- try { domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : ''; } catch {}
+  // Extract domain from browser tool params (url, query, etc.)
+  const params = data?.params || data?.input || {};
+  const navUrl = params.url || params.uri || '';
+  let domain = '';
+  try {
+   domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : '';
+  } catch {}
 
- // Start screen recording for browser sessions
- startBrowserRecording();
+  // Start screen recording for browser sessions
+  startBrowserRecording();
 
- // Priority: skill-reported live view > VNC > screenshot polling
- const skillSession = getSkillBrowserSession();
- if (skillSession?.liveViewUrl) {
- sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider }));
- console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
- } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
- sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' }));
- console.log(`[VNC] Sent live view URL to client`);
- } else {
- // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
- sendSSE('browser_session', buildBrowserSessionPayload({ domain, provider: 'screenshot' }));
- console.log(`[screenshot] Browser session started — polling screenshots from container`);
- // Fallback: poll screenshots from container every 1.5s
- // Search both the media root and common subdirs where screenshots may be saved
- screenshotPollerInterval = setInterval(() => {
- if (res.writableEnded) {
- if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
- return;
- }
- try {
- const out = execSync(
- `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
- { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
- ).toString().trim();
- if (out && out.length > 100) {
- sendSSE('screenshot_frame', buildScreenshotFramePayload({ base64: out, timestamp: Date.now() }));
- }
- } catch (e) { /* ignore */ }
- }, 1500);
- }
+  // Priority: skill-reported live view > VNC > screenshot polling
+  const skillSession = getSkillBrowserSession();
+  if (skillSession?.liveViewUrl) {
+   sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider }));
+   console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
+  } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
+   sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' }));
+   console.log('[VNC] Sent live view URL to client');
+  } else {
+   // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
+   sendSSE('browser_session', buildBrowserSessionPayload({ domain, provider: 'screenshot' }));
+   console.log('[screenshot] Browser session started — polling screenshots from container');
+   // Fallback: poll screenshots from container every 1.5s
+   // Search both the media root and common subdirs where screenshots may be saved
+   screenshotPollerInterval = setInterval(() => {
+    if (res.writableEnded) {
+     if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
+     return;
+    }
+    try {
+     const out = execSync(
+      `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
+      { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
+     ).toString().trim();
+     if (out && out.length > 100) {
+      sendSSE('screenshot_frame', buildScreenshotFramePayload({ base64: out, timestamp: Date.now() }));
+     }
+    } catch (e) {
+     /* ignore */
+    }
+   }, 1500);
+  }
  }
 
  // Stop screenshot poller when stream ends (not on individual tool_result — there may be multiple browser tool calls)
  if (event === 'done' || event === 'error') {
- if (screenshotPollerInterval) {
- clearInterval(screenshotPollerInterval);
- screenshotPollerInterval = null;
+  if (screenshotPollerInterval) {
+   clearInterval(screenshotPollerInterval);
+   screenshotPollerInterval = null;
+  }
  }
- }
- });
+ };
+ ({ response, toolLog } = await gateway.runAgentStreaming(fullTask, {
+ agentId, agentName: agentName || 'default', sessionKey,
+ thinking: thinking || undefined,
+ model: model || undefined,
+ extraSystemPrompt: resolvedSystemPrompt,
+ timeoutMs: inactivityMs,
+ projectFolder,
+ }, streamingCallback));
 
  // Stop all screen recordings and get video paths before sending done event
  const recordingPath = stopBrowserRecording();
