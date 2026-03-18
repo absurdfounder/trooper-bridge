@@ -2259,8 +2259,7 @@ fi
 if curl -sf https://${HTTPS_DOMAIN}/runtime-api/health >/dev/null 2>&1 || curl -sf https://${SSLIP_DOMAIN}/runtime-api/health >/dev/null 2>&1; then
  echo "Org Runtime Public Health: OK"
 else
- echo "Org Runtime Public Health: FAILED"
- exit 1
+ echo "Org Runtime Public Health: PENDING (TLS may still be provisioning — backend will retry)"
 fi
 
 # Kill the background raw log pusher — setup is done, no need to keep POSTing to API
