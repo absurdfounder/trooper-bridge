@@ -3389,23 +3389,53 @@ app.delete('/skills/:slug', async (req, res) => {
 // List skills installed on OpenClaw (from filesystem, not registry)
 app.get('/skills/installed', (req, res) => {
  try {
- const skillsDir = '/opt/openclaw-data/workspace/skills';
- let skills = [];
+ const skills = [];
+ const seen = new Set();
+ // Scan all skill directories: workspace, managed, bundled
+ const skillDirs = [
+   '/opt/openclaw-data/workspace/skills',                    // workspace skills
+   '/home/node/.openclaw/skills',                             // managed skills (clawhub install)
+ ];
+ // Also try to find bundled skills from the OpenClaw package
  try {
- const dirs = readdirSync(skillsDir);
- for (const dir of dirs) {
- try {
- const skillMd = readFileSync(`${skillsDir}/${dir}/SKILL.md`, 'utf8');
- const nameMatch = skillMd.match(/^#\s+(.+)/m);
- const descMatch = skillMd.match(/^(?:>|description:)\s*(.+)/mi);
- skills.push({
- slug: dir,
- name: nameMatch ? nameMatch[1].trim() : dir,
- description: descMatch ? descMatch[1].trim() : '',
- installed: true,
- });
+   const ocDir = execSync('docker exec openclaw-openclaw-gateway-1 node -e "console.log(require.resolve(\'openclaw\').replace(/dist.*/, \'\'))"', { timeout: 5000 }).toString().trim();
+   if (ocDir) skillDirs.push(`${ocDir}dist/skills/bundled`);
  } catch {}
+
+ for (const skillsDir of skillDirs) {
+   try {
+     const dirs = readdirSync(skillsDir);
+     for (const dir of dirs) {
+       if (seen.has(dir)) continue;
+       try {
+         const skillMd = readFileSync(`${skillsDir}/${dir}/SKILL.md`, 'utf8');
+         const nameMatch = skillMd.match(/^#\s+(.+)/m);
+         const descMatch = skillMd.match(/^(?:>|description:)\s*(.+)/mi);
+         const summaryMatch = skillMd.match(/^summary:\s*["']?(.+?)["']?\s*$/m);
+         seen.add(dir);
+         skills.push({
+           slug: dir,
+           name: nameMatch ? nameMatch[1].trim() : dir,
+           description: summaryMatch ? summaryMatch[1].trim() : (descMatch ? descMatch[1].trim() : ''),
+           installed: true,
+           source: skillsDir.includes('workspace') ? 'workspace' : skillsDir.includes('managed') ? 'managed' : 'bundled',
+         });
+       } catch {}
+     }
+   } catch {}
  }
+ // Also get available (not installed) skills from clawhub CLI if available
+ try {
+   const out = execSync('docker exec openclaw-openclaw-gateway-1 bash -c "cd /home/node/.openclaw && npx clawhub@latest list --json 2>/dev/null || true"', { timeout: 15000 }).toString().trim();
+   if (out && out.startsWith('[')) {
+     const available = JSON.parse(out);
+     for (const s of available) {
+       if (s.slug && !seen.has(s.slug)) {
+         seen.add(s.slug);
+         skills.push({ slug: s.slug, name: s.displayName || s.name || s.slug, description: s.summary || s.description || '', installed: false, source: 'clawhub' });
+       }
+     }
+   }
  } catch {}
  res.json({ skills, total: skills.length });
  } catch (err) {
