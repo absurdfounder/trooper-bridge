@@ -22,7 +22,7 @@ const { dirname } = path;
 import WebSocket from 'ws';
 
 // Build a human-readable summary for a completed tool call
-// Used when the heuristic detects tools (no real tool_use events from gateway)
+// Used for native tool_use/tool_result events from gateway
 // ── SPC AGENTS.md Template ──────────────────────────────────────────
 function buildSpcAgentsMd(name, title, skillsBlock, teamRoster) {
   return `# ${name}
@@ -938,16 +938,7 @@ class OpenClawGateway {
  const textChunks = [];
  if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: opts.model || null, time: Date.now() });
  const toolLog = [];
- let lifecycleDepth = 0; // track nested lifecycle start/end to detect tool execution
- let lastTextTime = 0; // track when text stops (tool execution gap)
-
- // Installed skills for matching
- const installedSkills = (opts.installedSkills || []).map(s => ({
- name: s.name, content: (s.content || '').toLowerCase()
- }));
-
- let toolGapTimer = null;
- let inToolGap = false;
+ let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
 
  // Sub-agent tracking: tree-based for nested sub-agents
  let mainRunId = null;
@@ -1093,20 +1084,9 @@ class OpenClawGateway {
 
  // ── Main agent: real tool_use/tool_result from gateway ──
  // The gateway sends these with actual tool names (Read, Write, web_search, exec, etc.)
- // This replaces the heuristic "processing" guessing for the main agent.
  if (stream === 'tool_use' && data) {
  const toolName = data.name || data.tool || 'processing';
  const toolParams = data.input || data.params || {};
- // Cancel any pending heuristic gap since we have a real tool event
- if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
- if (inToolGap) {
-   // Close the previous heuristic entry if one was open
-   const last = toolLog[toolLog.length - 1];
-   if (last && last.status === 'called' && last.tool === 'processing') {
-     toolLog.pop(); // Remove the fake "processing" entry
-   }
-   inToolGap = false;
- }
  toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now() });
  if (onEvent) onEvent('tool_start', normalizeToolEventPayload('tool_start', { tool: toolName, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' }));
  if ((String(toolName).toLowerCase() === 'write' || String(toolName).toLowerCase() === 'edit')) {
@@ -1137,224 +1117,13 @@ class OpenClawGateway {
 
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
- lastTextTime = Date.now();
- // If we were in a tool gap, close the heuristic tool entry
- if (inToolGap) {
- inToolGap = false;
- const last = toolLog[toolLog.length - 1];
- if (last && last.status === 'called') {
- last.status = 'ok';
- last.durationMs = Date.now() - (last.startedAt || Date.now());
- const toolSummary = buildToolSummary(last.tool, last.params, last.skillName, data.text);
- last.summary = toolSummary;
- if (onEvent) onEvent('tool_result', { tool: last.tool, skillName: last.skillName, params: last.params, success: true, summary: toolSummary, index: toolLog.length - 1 });
- }
- // IMPORTANT: Don't return here — still forward the text as a streaming event.
- // The old `return` was swallowing ALL streaming text for short responses.
- }
- // Reset gap timer
- if (toolGapTimer) clearTimeout(toolGapTimer);
- toolGapTimer = setTimeout(() => {
- // Text stopped for 2s — likely executing a tool
- // But if we've already received a substantial response (>500 chars), the agent is
- // writing, not about to use a tool — skip heuristic to avoid false positives like
- // "Browsing google.com" when the response just mentions a domain.
- const totalText = textChunks.join('');
- if (!inToolGap && textChunks.length > 0 && totalText.length < 100) {
- inToolGap = true;
- let toolName = 'processing';
- let skillName = null;
- const recentText = textChunks.join('').slice(-300).toLowerCase();
- const promptLower = (message || '').toLowerCase();
- // Match against installed skills
- for (const skill of installedSkills) {
- const sn = skill.name.toLowerCase();
- if (recentText.includes(sn) || promptLower.includes(sn)) { skillName = skill.name; break; }
- }
- let params = {};
- // Extract URLs and domains from recent text
- const _um = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
- const _eu = _um ? _um[1] : '';
- const _dm = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
- const _ed = _dm ? _dm[1] : '';
- const _qm = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
- const _eq = _qm ? _qm[1].trim() : '';
-
- if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
- toolName = 'web_search';
- const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
- if (qm) params.query = qm[1].trim().replace(/[.!?]$/, '');
- else if (_eq) params.query = _eq;
- else { const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i); if (ctx) params.query = ctx[1].trim(); }
- // Fallback: extract search topic from user's original prompt
- if (!params.query && promptLower) {
-   const pm = promptLower.match(/(?:search|find|look up|what(?:'s| is))\s+(?:for\s+|the\s+|about\s+)?(.{5,60}?)(?:\?|$|\.|!)/i);
-   if (pm) params.query = pm[1].trim();
- }
- }
- else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
- toolName = 'browser';
- if (_eu) params.url = _eu;
- else if (_ed) params.url = 'https://' + _ed;
- }
- else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
- toolName = 'web_fetch';
- if (_eu) params.url = _eu;
- else if (_ed) params.url = 'https://' + _ed;
- // Fallback: describe what's being fetched from user prompt
- if (!params.url && promptLower) {
-   const fm = promptLower.match(/(?:weather|news|price|stock|forecast|info|data|details)\s+(?:in|for|of|about)\s+(.{3,40}?)(?:\?|$|\.|!|today)/i);
-   if (fm) params.query = fm[1].trim();
- }
- }
- else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
- toolName = 'memory_search';
- if (_eq) params.query = _eq;
- }
- else if (/read(?:ing)?.*(?:file|MEMORY|SOUL|AGENTS|\.md|\.json|\.txt)/i.test(recentText)) {
- toolName = 'read';
- const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
- if (fm) params.path = fm[1];
- }
- else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
- toolName = 'exec';
- const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
- if (cm) params.command = cm[1];
- }
- else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
- toolName = 'write';
- const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
- if (fm) params.path = fm[1];
- }
- else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower)) {
- toolName = 'cron';
- }
- else if (/weather|forecast/i.test(promptLower)) { toolName = 'exec'; skillName = skillName || 'Weather'; }
- else if (/summar/i.test(promptLower)) { toolName = 'web_fetch'; skillName = skillName || 'Summarize'; }
- // Last resort: URL/domain found but no tool match — only if the domain appears intentional
- // (skip if the prompt is about scheduling/reminders — domains in text are incidental)
- else if ((_eu || _ed) && !/remind|cron|schedule|every\s+\d/i.test(promptLower)) {
- toolName = 'processing';
- // Heuristic: domain found in text but cannot confirm actual tool use
- }
- logDebugEvent('heuristic_gap', { tool: toolName, params, textSnippet: recentText.substring(recentText.length - 100) });
- console.log(`[HEURISTIC:gap] tool=${toolName} params=${JSON.stringify(params)} text="${recentText.substring(recentText.length - 80)}"`);
- if (skillName && onEvent) onEvent('skill_start', { eventType: 'skill_start', confidence: 'heuristic', skillName, tool: toolName, params, time: Date.now() });
- if (onEvent) onEvent('tool_start', normalizeToolEventPayload('tool_start', { tool: toolName, skillName, params, index: toolLog.length, startedAt: Date.now(), confidence: 'heuristic' }));
- toolLog.push({ tool: toolName, skillName, params, status: 'called', startedAt: Date.now() });
- }
- }, 2000);
  if (onEvent) onEvent('text', { text: data.text });
  }
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
  lifecycleDepth++;
- // Only use heuristic lifecycle guessing if we haven't received any real tool_use events.
- // When the gateway sends tool_use events, they're authoritative — no guessing needed.
- const hasRealToolEvents = toolLog.some(t => t.tool !== 'processing');
- if (lifecycleDepth > 1 && onEvent && !hasRealToolEvents) {
- // Nested lifecycle = tool execution. Try to guess tool + skill from context
- let toolName = 'processing';
- let skillName = null;
- const recentText = textChunks.join('').slice(-300).toLowerCase();
- const promptLower = (message || '').toLowerCase();
- 
- // Try to match against installed skills first
- for (const skill of installedSkills) {
- const sn = skill.name.toLowerCase();
- if (recentText.includes(sn) || promptLower.includes(sn)) {
- skillName = skill.name;
- break;
- }
- // Check skill content keywords (first 200 chars)
- const keywords = skill.content.slice(0, 200).match(/\b\w{4,}\b/g) || [];
- const matches = keywords.filter(k => promptLower.includes(k) || recentText.includes(k));
- if (matches.length >= 2) {
- skillName = skill.name;
- break;
- }
- }
- 
- let heuristicParams = {};
- // Extract any URLs from recent text (useful for all web tools)
- const _urlMatch = recentText.match(/(https?:\/\/[^\s"'<>,]{5,120})/i);
- const _extractedUrl = _urlMatch ? _urlMatch[1] : '';
- // Extract domain-like strings (e.g., linear.app, trustradius.com)
- const _domainMatch = recentText.match(/\b([a-z0-9][-a-z0-9]*\.(?:com|io|ai|org|net|co|app|dev|xyz|me|info|gg|so|sh|cc)(?:\/[^\s"'<>,]{0,60})?)\b/i);
- const _extractedDomain = _domainMatch ? _domainMatch[1] : '';
- // Extract quoted strings as potential queries/labels
- const _quotedMatch = recentText.match(/[""]([^""]{3,80})[""]/i) || recentText.match(/[`]([^`]{3,80})[`]/i);
- const _extractedQuote = _quotedMatch ? _quotedMatch[1].trim() : '';
-
- if (/search(?:ing)?|looking up|let me (?:find|look|check)|querying/i.test(recentText)) {
- toolName = 'web_search';
- // Try multiple patterns for search queries
- const qm = recentText.match(/(?:search(?:ing)?\s+(?:for\s+|the web for\s+)?|looking (?:up|for)\s+|find(?:ing)?\s+|querying?\s+)[""]?([^"".\n]{5,80})/i);
- if (qm) heuristicParams.query = qm[1].trim().replace(/[.!?]$/, '');
- else if (_extractedQuote) heuristicParams.query = _extractedQuote;
- else {
- // Try to extract query from context: "search" + nearby meaningful text
- const ctx = recentText.match(/(?:search|look(?:ing)?\s+(?:up|for|into))\s+(.{5,60}?)(?:\.|$|\n|to\s)/i);
- if (ctx) heuristicParams.query = ctx[1].trim().replace(/[.!?]$/, '');
- }
- }
- else if (/brows|navigat|visit|check.*(?:site|page|website)|open.*(?:page|site|url)|go(?:ing)?\s+to\s/i.test(recentText)) {
- toolName = 'browser';
- if (_extractedUrl) heuristicParams.url = _extractedUrl;
- else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
- }
- else if (/fetch|read.*page|pull.*content|scrape|extract.*content/i.test(recentText)) {
- toolName = 'web_fetch';
- if (_extractedUrl) heuristicParams.url = _extractedUrl;
- else if (_extractedDomain) heuristicParams.url = 'https://' + _extractedDomain;
- }
- else if (/memory.*search|search.*memory|recall|remember/i.test(recentText)) {
- toolName = 'memory_search';
- if (_extractedQuote) heuristicParams.query = _extractedQuote;
- }
- else if (/read(?:ing)?.*(?:file|\.md|\.json|\.txt|\.js|\.py|\.yml|document)/i.test(recentText)) {
- toolName = 'read';
- const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|yml|yaml|toml|ts|jsx|tsx))/i);
- if (fm) heuristicParams.path = fm[1];
- }
- else if (/run(?:ning)?|exec|curl|command|shell|terminal|bash/i.test(recentText)) {
- toolName = 'exec';
- const cm = recentText.match(/[`""]([^`""]{3,80})[`""]/i);
- if (cm) heuristicParams.command = cm[1];
- }
- else if (/writ(?:ing)?|edit(?:ing)?|updat(?:ing)?|creat(?:ing)?/i.test(recentText)) {
- toolName = 'write';
- const fm = recentText.match(/([A-Za-z0-9_./-]+\.(?:md|json|txt|js|py|jsx|tsx|ts|yml|yaml|toml|css|html))/i);
- if (fm) heuristicParams.path = fm[1];
- }
- else if (/schedule|cron|remind|alarm|timer|every\s+\d+\s*(?:hour|hr|min|day|week)|(?:daily|weekly|hourly)\b/i.test(promptLower)) {
- toolName = 'cron';
- }
- // Last resort: if we found a URL/domain but no tool match, it's probably web_fetch
- // Skip if the prompt is about scheduling/reminders — domains in text are incidental
- else if ((_extractedUrl || _extractedDomain) && !/remind|cron|schedule|every\s+\d/i.test(promptLower)) {
- toolName = 'web_fetch';
- heuristicParams.url = _extractedUrl || ('https://' + _extractedDomain);
- }
-
- // Log heuristic result for debugging
- logDebugEvent('heuristic_lifecycle', { tool: toolName, params: heuristicParams, textSnippet: recentText.substring(recentText.length - 100) });
- console.log(`[HEURISTIC] tool=${toolName} params=${JSON.stringify(heuristicParams)} text="${recentText.substring(recentText.length - 80)}"`);
-
- onEvent('tool_start', { tool: toolName, skillName, params: heuristicParams, index: toolLog.length });
- toolLog.push({ tool: toolName, skillName, params: heuristicParams, status: 'called', startedAt: Date.now() });
- }
  }
  if (stream === 'lifecycle' && data?.phase === 'end') {
- if (lifecycleDepth > 1) {
- const last = toolLog[toolLog.length - 1];
- if (last && last.status === 'called') {
- last.status = 'ok';
- last.durationMs = Date.now() - (last.startedAt || Date.now());
- if (onEvent) onEvent('tool_result', normalizeToolEventPayload('tool_result', { tool: last.tool, skillName: last.skillName, params: {}, success: true, summary: `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'heuristic' }));
- if (last.skillName && onEvent) onEvent('skill_end', { eventType: 'skill_end', confidence: 'heuristic', skillName: last.skillName, tool: last.tool, summary: last.summary || `Completed in ${(last.durationMs / 1000).toFixed(1)}s`, durationMs: last.durationMs, time: Date.now() });
- }
- }
  lifecycleDepth = Math.max(0, lifecycleDepth - 1);
  }
  // Gateway auth/provider error — forward immediately and terminate
@@ -1380,9 +1149,6 @@ class OpenClawGateway {
  }
  }
  if (stream === 'tool_use' && data) {
- // Cancel any pending heuristic gap timer — we have real data now
- if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
- inToolGap = false;
  const entry = { tool: data.name || data.tool || 'unknown', params: data.input || data.params || {}, status: 'called', startedAt: Date.now() };
  // Capture write tool content for artifact rendering (HTML/JSX/React files)
  const ARTIFACT_EXTS = /\.(html?|jsx|tsx|css|svg)$/i;
@@ -1398,19 +1164,8 @@ class OpenClawGateway {
  }
  logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
  console.log(`[TOOL_USE] ${entry.tool} params=${JSON.stringify(entry.params).substring(0, 200)} raw_keys=${Object.keys(data).join(',')}`);
- // Replace any pending heuristic entry (guessed "processing"/"web_search"/etc.) with real data
- const lastEntry = toolLog[toolLog.length - 1];
- if (lastEntry && lastEntry.status === 'called' && !lastEntry._fromGateway) {
- // Heuristic entry — replace it with the real tool info
- lastEntry.tool = entry.tool;
- lastEntry.params = entry.params;
- lastEntry._fromGateway = true;
- if (onEvent) onEvent('tool_update', { tool: entry.tool, params: entry.params, index: toolLog.length - 1 });
- } else {
- entry._fromGateway = true;
  toolLog.push(entry);
  if (onEvent) onEvent('tool_start', { tool: entry.tool, params: entry.params, index: toolLog.length - 1 });
- }
  // Track sub-agent spawning so we can associate the next new runId with this spawn
  const toolLower = (entry.tool || '').toLowerCase();
  if (toolLower === 'sessions_spawn' || toolLower === 'task' || toolLower === 'spawn' || toolLower.includes('subagent')) {
@@ -1432,8 +1187,6 @@ class OpenClawGateway {
  }
  }
  if (stream === 'tool_result' && data) {
- if (toolGapTimer) { clearTimeout(toolGapTimer); toolGapTimer = null; }
- inToolGap = false;
  const last = toolLog[toolLog.length - 1];
  if (last && last.status === 'called') {
  last.status = data.is_error ? 'failed' : 'ok';
@@ -1623,71 +1376,7 @@ class OpenClawGateway {
  console.warn(`[OpenClaw] Screenshot check failed: ${e.message}`);
  }
  }
- // If no explicit tool events were captured, extract tool usage from response text + meta
- // The gateway doesn't stream tool_use/tool_result, so we infer from content
- if (response && toolLog.filter(t => t.tool !== 'processing').length === 0) {
- const toolPatterns = [
- { re: /\bweb[_\s]?search/gi, name: 'web_search' },
- { re: /\bweb[_\s]?fetch/gi, name: 'web_fetch' },
- { re: /\bbrowser/gi, name: 'browser' },
- { re: /\bexec\b|ran a command|executed|terminal|command line|curl\b/gi, name: 'exec' },
- { re: /\bread\b.*file|file.*\bread\b/gi, name: 'read' },
- { re: /\bwrite\b.*file|file.*\bwrite\b/gi, name: 'write' },
- { re: /\bmemory[_\s]?search/gi, name: 'memory_search' },
- { re: /\bsessions?[_\s]?spawn/gi, name: 'sessions_spawn' },
- { re: /web search|searched the web|search results|looked up|DuckDuckGo|Bing results|Google results|Brave Search|top result|here'?s what (?:I|the web) (?:found|says)|what the web (?:says|shows)/gi, name: 'web_search' },
- { re: /browsed|navigat(?:ed|ing)|screenshot|webpage|opened.*page|visited.*(?:site|page|url)|pulled up|went to.*\.\w{2,}|checked.*(?:site|page)|loaded the page/gi, name: 'browser' },
- { re: /fetched.*(?:page|url|content)|scraped|read.*(?:the )?page|extracted.*content/gi, name: 'web_fetch' },
- ];
- const detected = new Set();
- for (const { re, name } of toolPatterns) {
- if (re.test(response)) detected.add(name);
- }
- // Also check the original task/prompt for tool intent
- const durationMs = result?.result?.meta?.durationMs || 0;
- if (detected.size === 0 && durationMs > 4000) {
- // Check if prompt requested specific tool use
- const taskLower = (message || '').toLowerCase();
- if (/search the web|look up|find out about|what is \w|who is \w/.test(taskLower)) detected.add('web_search');
- else if (/browse|go to|visit|open|navigate|check.*site|\.com|\.ai|\.io/.test(taskLower)) detected.add('web_fetch');
- else if (/weather|forecast|temperature/.test(taskLower)) detected.add('exec');
- else if (/summarize|summarise|summary of/.test(taskLower)) detected.add('web_fetch');
- else detected.add('processing');
- }
- // Extract URLs mentioned in response
- const urlMatches = response.match(/https?:\/\/[^\s\)"\]>]+/gi) || [];
- const urls = [...new Set(urlMatches)].slice(0, 10);
-
- // Extract a short summary (first ~150 chars of response, first sentence)
- const firstSentence = response.replace(/\*\*/g, '').split(/[.!?\n]/)[0]?.trim()?.slice(0, 150) || '';
-
- // Build toolLog from detected tools (replace any generic 'processing' entries)
- const detectedArr = [...detected];
- // Clear generic processing entries
- while (toolLog.length > 0 && toolLog[0].tool === 'processing') toolLog.shift();
- for (const name of detectedArr) {
- const entry = { tool: name, params: {}, status: 'ok', summary: '' };
- if (name === 'web_search') {
- // Extract search query from the original message
- const queryMatch = (message || '').match(/(?:search|look up|find|what is|who is)\s+(?:the web\s+)?(?:for\s+)?["']?(.{5,60})["']?/i);
- if (queryMatch) entry.params = { query: queryMatch[1].trim() };
- entry.summary = urls.length > 0
- ? `Found ${urls.length} result${urls.length > 1 ? 's' : ''}: ${urls.slice(0, 3).join(', ')}`
- : firstSentence;
- } else if (name === 'web_fetch' || name === 'browser') {
- const targetUrl = urls[0] || (message || '').match(/(https?:\/\/[^\s]+|[\w-]+\.(?:com|ai|io|org|dev|net)[^\s]*)/i)?.[1] || '';
- if (targetUrl) entry.params = { url: targetUrl };
- entry.summary = firstSentence;
- } else {
- entry.summary = firstSentence;
- }
- toolLog.push(entry);
- }
- }
-
- // Filter out heuristic 'processing' entries — they're guesses that add no real info
- const cleanedToolLog = toolLog.filter(t => t.tool !== 'processing');
- const formattedToolLog = cleanedToolLog.map(t => ({
+ const formattedToolLog = toolLog.map(t => ({
  tool: t.tool,
  skillName: t.skillName || undefined,
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
@@ -1700,7 +1389,6 @@ class OpenClawGateway {
  } finally {
  // Clean up session listener and event listeners
  this._activeSessionListener = null;
- if (toolGapTimer) clearTimeout(toolGapTimer);
  const listener = this._eventListeners.get(idempotencyKey);
  this._eventListeners.delete(idempotencyKey);
  if (listener) {
@@ -2218,77 +1906,12 @@ async function handleIncomingTaskStream(req, res) {
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${folderRule}` : folderRule;
  }
 
- // ── Live tool events via JSONL tail ──
- // Gateway doesn't forward tool events over WS (issue #43986).
- // Workaround: tail the session JSONL file inside Docker and parse tool events in real-time.
- // Declared outside try/catch so cleanup in catch block can access it.
- let jsonlTailProc = null;
-
  try {
  console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${isBrowserTask ? ' [browser task]' : ''}...`);
  // Task work needs longer inactivity timeout — gateway agents do internal tool work
- // (read/write/exec) that doesn't emit WS events. 600s for tasks, 180s for chat.
+ // that emits WS events. 600s for tasks, 180s for chat.
  const isTaskWork = !!(context?.taskId);
  const inactivityMs = isTaskWork ? 600000 : 180000;
- const activeToolCalls = new Map(); // toolCallId → { name, startedAt }
- try {
-   // Find the latest JSONL for this agent's sessions dir
-   const sessDir = `/home/node/.openclaw/agents/${agentId}/sessions`;
-   const findCmd = `docker exec openclaw-openclaw-gateway-1 sh -c "ls -t ${sessDir}/*.jsonl 2>/dev/null | head -1"`;
-   const latestFile = execSync(findCmd, { timeout: 3000 }).toString().trim();
-   if (latestFile) {
-     // Get current line count to only process NEW lines
-     const wcOut = execSync(`docker exec openclaw-openclaw-gateway-1 wc -l < "${latestFile}"`, { timeout: 3000 }).toString().trim();
-     const startLine = parseInt(wcOut) || 0;
-     console.log(`[${id}] Starting JSONL tail on ${latestFile} from line ${startLine}`);
-     jsonlTailProc = spawn('docker', ['exec', 'openclaw-openclaw-gateway-1', 'tail', '-n', '+' + (startLine + 1), '-f', latestFile]);
-     let lineBuf = '';
-     jsonlTailProc.stdout.on('data', (chunk) => {
-       lineBuf += chunk.toString();
-       const lines = lineBuf.split('\n');
-       lineBuf = lines.pop(); // keep incomplete line
-       for (const line of lines) {
-         if (!line.trim()) continue;
-         try {
-           const entry = JSON.parse(line);
-           if (entry.type === 'message' && entry.message?.role === 'assistant') {
-             // Look for toolCall items in content array
-             const content = entry.message.content;
-             if (Array.isArray(content)) {
-               for (const item of content) {
-                 if (item.type === 'toolCall' && item.name && item.id) {
-                   activeToolCalls.set(item.id, { name: item.name, startedAt: Date.now(), params: item.arguments || {} });
-                   console.log(`[${id}:JSONL] tool_start: ${item.name} (${item.id})`);
-                   sendSSE('tool_start', normalizeToolEventPayload('tool_start', { tool: item.name, params: item.arguments || {}, toolCallId: item.id, startedAt: Date.now(), confidence: 'jsonl' }));
-                 }
-               }
-             }
-           } else if (entry.type === 'message' && entry.message?.role === 'toolResult') {
-             const tcId = entry.message.toolCallId;
-             const tc = activeToolCalls.get(tcId);
-             const toolName = entry.message.toolName || tc?.name || 'unknown';
-             const isError = entry.message.isError || false;
-             const parts = Array.isArray(entry.message.content) ? entry.message.content : [];
-             const raw = parts.map(c => c.text || (typeof c === 'string' ? c : JSON.stringify(c))).join('\n').slice(0, 4000);
-             const durationMs = tc ? Date.now() - tc.startedAt : 0;
-             const summary = summarizeToolResult(toolName, tc?.params || {}, raw, !isError);
-             if (_projectFolder && /^(write|edit)$/i.test(String(toolName || ''))) {
-               const p = tc?.params?.file_path || tc?.params?.path || tc?.params?.filePath || '';
-               if (p) relocateIntoProjectFolder(_projectFolder, p);
-             }
-             console.log(`[${id}:JSONL] tool_result: ${toolName} ${isError ? 'FAIL' : 'ok'} (${durationMs}ms)`);
-             sendSSE('tool_result', normalizeToolEventPayload('tool_result', { tool: toolName, params: tc?.params || {}, success: !isError, summary, raw, durationMs, toolCallId: tcId, startedAt: tc?.startedAt, confidence: 'jsonl' }));
-             activeToolCalls.delete(tcId);
-           }
-         } catch { /* skip unparseable lines */ }
-       }
-     });
-     jsonlTailProc.stderr.on('data', () => {}); // suppress stderr
-     jsonlTailProc.on('error', () => {}); // suppress spawn errors
-   }
- } catch (e) {
-   console.warn(`[${id}] JSONL tail setup failed: ${e.message}`);
- }
 
  let response, toolLog;
  const streamingCallback = (event, data) => {
@@ -2396,12 +2019,6 @@ async function handleIncomingTaskStream(req, res) {
  // Add per-tool overhead (~200 tokens per tool call for function definition + wrapping)
  const toolOverhead = toolLog.length * 200;
 
- // Kill JSONL tail process
- if (jsonlTailProc) {
-   try { jsonlTailProc.kill('SIGTERM'); } catch {}
-   jsonlTailProc = null;
- }
-
  // Structured outcome hint for CrabsHQ orchestration
  const responseText = response || '';
  const blockedMatch = typeof responseText === 'string' ? responseText.match(/<blocked\s+reason="([^"]*)">([\s\S]*?)<\/blocked>/i) : null;
@@ -2482,7 +2099,7 @@ async function handleIncomingTaskStream(req, res) {
  forwardToMissionControl(taskId, agentName, fullResult, id);
  }
  } catch (err) {
- if (jsonlTailProc) { try { jsonlTailProc.kill('SIGTERM'); } catch {} jsonlTailProc = null; }
+
  console.error(`[${id}] SSE agent failed: ${err.message}`);
  sendSSE('error', { message: err.message, requestId: id });
  } finally {
