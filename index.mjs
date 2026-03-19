@@ -936,6 +936,7 @@ class OpenClawGateway {
  const _projectFolder = opts.projectFolder || null;
 
  const textChunks = [];
+ let lastToolTextSnapshot = ''; // text snapshot at last tool boundary
  if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: opts.model || null, time: Date.now() });
  const toolLog = [];
  let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
@@ -1087,8 +1088,14 @@ class OpenClawGateway {
  if (stream === 'tool_use' && data) {
  const toolName = data.name || data.tool || 'processing';
  const toolParams = data.input || data.params || {};
- toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now() });
- if (onEvent) onEvent('tool_start', normalizeToolEventPayload('tool_start', { tool: toolName, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' }));
+ // Snapshot text before this tool call
+ const currentText = textChunks.join('');
+ const textSinceLastTool = currentText.slice(lastToolTextSnapshot.length).trim();
+ lastToolTextSnapshot = currentText;
+ toolLog.push({ tool: toolName, skillName: null, params: toolParams, status: 'called', startedAt: Date.now(), textBefore: textSinceLastTool });
+ const toolStartPayload = normalizeToolEventPayload('tool_start', { tool: toolName, params: toolParams, index: toolLog.length - 1, startedAt: Date.now(), confidence: 'native' });
+ toolStartPayload.textBefore = textSinceLastTool;
+ if (onEvent) onEvent('tool_start', toolStartPayload);
  if ((String(toolName).toLowerCase() === 'write' || String(toolName).toLowerCase() === 'edit')) {
    const filePath = toolParams.file_path || toolParams.path || toolParams.filePath || '';
    if (filePath && onEvent) {
@@ -1162,10 +1169,15 @@ class OpenClawGateway {
    // Try once here and again on tool_result after the write has actually completed.
    if (_projectFolder && writePath) relocateIntoProjectFolder(_projectFolder, writePath);
  }
+ // Snapshot text before this tool call
+ const _currentText2 = textChunks.join('');
+ const _textSinceLastTool2 = _currentText2.slice(lastToolTextSnapshot.length).trim();
+ lastToolTextSnapshot = _currentText2;
+ entry.textBefore = _textSinceLastTool2;
  logDebugEvent('tool_use', { tool: entry.tool, params: entry.params, rawKeys: Object.keys(data) });
  console.log(`[TOOL_USE] ${entry.tool} params=${JSON.stringify(entry.params).substring(0, 200)} raw_keys=${Object.keys(data).join(',')}`);
  toolLog.push(entry);
- if (onEvent) onEvent('tool_start', { tool: entry.tool, params: entry.params, index: toolLog.length - 1 });
+ if (onEvent) onEvent('tool_start', { tool: entry.tool, params: entry.params, index: toolLog.length - 1, textBefore: _textSinceLastTool2 });
  // Track sub-agent spawning so we can associate the next new runId with this spawn
  const toolLower = (entry.tool || '').toLowerCase();
  if (toolLower === 'sessions_spawn' || toolLower === 'task' || toolLower === 'spawn' || toolLower.includes('subagent')) {
@@ -1382,6 +1394,7 @@ class OpenClawGateway {
  params: t.params && Object.keys(t.params).length > 0 ? t.params : undefined,
  success: t.status !== 'failed',
  summary: t.summary || undefined,
+ textBefore: t.textBefore || undefined,
  }));
 
  if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
