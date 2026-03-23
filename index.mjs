@@ -1204,7 +1204,7 @@ class OpenClawGateway {
  last.status = data.is_error ? 'failed' : 'ok';
  last.durationMs = Date.now() - (last.startedAt || Date.now());
  // Larger summary limit for exec (show command output) and sessions_spawn (show sub-agent result)
- const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 1000 : 300;
+ const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 2000 : 500;
  last.summary = typeof data.content === 'string' ? data.content.substring(0, summaryLimit) : (data.output || '').substring(0, summaryLimit);
  }
  // When sessions_spawn completes, emit subagent_done for any agents not already
