@@ -86,6 +86,7 @@ If you need info only the human can provide:
 - **File extensions:** Use real ones: \`.html\`, \`.css\`, \`.js\`, \`.py\`, \`.json\`, \`.tsx\`
 - **Read before write:** ALWAYS \`Read\` existing files before modifying. Don't overwrite blindly.
 - **Edit > Rewrite:** Use \`Edit\` for surgical changes. Don't rewrite 500 lines to fix 3.
+- **Edit failures:** If \`Edit\` fails (old_string not found), IMMEDIATELY \`Read\` the file again, find the actual current text, and retry with the correct old_string. NEVER give up after one failed edit — read + retry. If it still fails, fall back to \`Write\` with the full corrected file.
 - **Report changes:** In your text response, list which files you created/modified and what changed.
 
 ## OUTPUT FORMAT
