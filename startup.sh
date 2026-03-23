@@ -34,5 +34,9 @@ mkdir -p /var/tmp/openclaw-compile-cache 2>/dev/null || true
 chown 1000:1000 /var/tmp/openclaw-compile-cache 2>/dev/null || true
 export OPENCLAW_NO_RESPAWN=1
 
+# Auto-fix config after upgrades (prevents crash loops from schema changes)
+echo "[startup] Running openclaw doctor --fix (auto-heal config)..."
+su -s /bin/bash node -c "node dist/index.js doctor --fix" 2>&1 || echo "[startup] WARNING: doctor --fix failed (non-fatal)"
+
 # Start gateway as node user
 exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
