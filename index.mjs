@@ -1117,7 +1117,32 @@ class OpenClawGateway {
      const p = last.params?.file_path || last.params?.path || last.params?.filePath || '';
      if (p) relocateIntoProjectFolder(_projectFolder, p);
    }
-   if (onEvent) onEvent('tool_result', normalizeToolEventPayload('tool_result', { tool: last.tool, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' }));
+   const toolResultPayload = normalizeToolEventPayload('tool_result', { tool: last.tool, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' });
+
+   // Extract details.media from tool_result (OpenClaw v2026.3.22+ — browser/canvas/nodes snapshots)
+   const detailsMedia = data.details?.media && typeof data.details.media === 'object' && !Array.isArray(data.details.media) ? data.details.media : null;
+   if (detailsMedia) {
+     toolResultPayload.media = detailsMedia;
+     // If it contains an image, also emit a screenshot_frame for the live browser view
+     for (const [key, mediaItem] of Object.entries(detailsMedia)) {
+       if (mediaItem?.data && /^image\//i.test(mediaItem.contentType || '')) {
+         if (onEvent) onEvent('screenshot_frame', { base64: mediaItem.data, timestamp: Date.now(), source: 'details.media', key });
+         try { saveBrowserScreenshot(mediaItem.data, (mediaItem.contentType || '').includes('jpeg') ? 'jpg' : 'png'); } catch {}
+       } else if (mediaItem?.url && /^image\//i.test(mediaItem.contentType || '')) {
+         toolResultPayload.mediaUrl = toolResultPayload.mediaUrl || {};
+         toolResultPayload.mediaUrl[key] = mediaItem.url;
+       }
+     }
+   }
+   // Also check for content-array image blocks (existing path for older gateway versions)
+   if (Array.isArray(data.content)) {
+     const imgBlock = data.content.find(b => b.type === 'image' && b.source?.data);
+     if (imgBlock && !detailsMedia) {
+       toolResultPayload.media = { screenshot: { data: imgBlock.source.data, contentType: imgBlock.source.media_type || 'image/png' } };
+     }
+   }
+
+   if (onEvent) onEvent('tool_result', toolResultPayload);
  }
  return;
  }
