@@ -477,7 +477,7 @@ class OpenClawGateway {
  existing[deviceIdentity.deviceId] = {
  deviceId: deviceIdentity.deviceId, publicKey: pubKey,
  displayName: 'CrabsHQ Bridge', platform: 'linux',
- role: 'operator', roles: ['operator'], scopes: ['operator.admin'],
+ role: 'operator', roles: ['operator'], scopes: ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'],
  clientId: 'gateway-client', clientMode: 'backend',
  approvedAt: Date.now(), approved: true, ts: Date.now(),
  };
@@ -612,7 +612,7 @@ class OpenClawGateway {
  });
 
  const role = 'operator';
- const scopes = ['operator.admin'];
+ const scopes = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'];
  const signedAtMs = Date.now();
  const nonce = this._connectNonce || undefined;
 
@@ -689,7 +689,7 @@ class OpenClawGateway {
  platform: 'linux',
  role: 'operator',
  roles: ['operator'],
- scopes: ['operator.admin'],
+ scopes: ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'],
  clientId: 'gateway-client',
  clientMode: 'backend',
  approvedAt: Date.now(),
@@ -3515,7 +3515,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  try { paired = JSON.parse(readFileSync(PAIRED_PATH, 'utf8')); } catch {}
  if (!paired[deviceIdentity.deviceId]) {
  const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
- paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: ['operator.admin'], clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
+ paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing'], clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
  writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
  execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
  console.log('[bridge] Added device to paired.json');
