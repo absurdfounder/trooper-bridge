@@ -28,5 +28,11 @@ chmod 700 /home/node/.openclaw 2>/dev/null || true
 chmod 600 /home/node/.openclaw/openclaw.json 2>/dev/null || true
 find /home/node/.openclaw/agents -name 'auth-profiles.json' -exec chmod 600 {} \; 2>/dev/null || true
 
+# Startup optimizations (recommended by openclaw doctor)
+export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
+mkdir -p /var/tmp/openclaw-compile-cache 2>/dev/null || true
+chown 1000:1000 /var/tmp/openclaw-compile-cache 2>/dev/null || true
+export OPENCLAW_NO_RESPAWN=1
+
 # Start gateway as node user
-exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"

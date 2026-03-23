@@ -67,7 +67,7 @@ ${teamRoster || 'Your teammates are listed in each task prompt. Refer to them by
 | Deploy something | \`exec\` deployment commands | Write a doc about how to deploy |
 | Fix a bug | \`Read\` file → find issue → \`Edit\` fix | Describe what might be wrong |
 
-**Tools available:** Read, Write, Edit, exec, web_search, web_fetch, browser, memory_search, sessions_spawn (sub-agents)
+**Tools available:** Read, Write, Edit, exec, web_search, web_fetch, browser, memory_search, sessions_spawn (sub-agents), sessions_yield (end turn early)
 
 **Fallback order when a tool fails:** web_search → browser → web_fetch → exec → training knowledge (label as "from training data, may be outdated")
 
