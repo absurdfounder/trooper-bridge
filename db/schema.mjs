@@ -1,0 +1,149 @@
+import { sqliteTable, text, integer, blob } from 'drizzle-orm/sqlite-core';
+import { sql } from 'drizzle-orm';
+
+// ── projects ─────────────────────────────────────────────────────────
+export const projects = sqliteTable('projects', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  description: text('description'),
+  objective: text('objective'),
+  status: text('status').default('active'),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── goals ────────────────────────────────────────────────────────────
+export const goals = sqliteTable('goals', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  description: text('description'),
+  status: text('status').default('active'),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── messages ─────────────────────────────────────────────────────────
+export const messages = sqliteTable('messages', {
+  id: text('id').primaryKey(),
+  content: text('content'),
+  sender_id: text('sender_id').notNull(),
+  sender_name: text('sender_name'),
+  sender_type: text('sender_type'), // human|agent|system
+  sender_avatar: text('sender_avatar'),
+  channel: text('channel').default('general'),
+  type: text('type').default('chat'),
+  reply_to: text('reply_to'),
+  run_id: text('run_id'),
+  mentions: text('mentions'),       // JSON array
+  reactions: text('reactions'),     // JSON array
+  metrics: text('metrics'),         // JSON
+  tool_events: text('tool_events'), // JSON
+  raw_content: text('raw_content'),
+  file_ref: text('file_ref'),       // JSON
+  diff_ref: text('diff_ref'),       // JSON
+  artifact_ref: text('artifact_ref'), // JSON
+  plan_ref: text('plan_ref'),       // JSON
+  fallback: integer('fallback').default(0),
+  fallback_model: text('fallback_model'),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── tasks ─────────────────────────────────────────────────────────────
+export const tasks = sqliteTable('tasks', {
+  id: text('id').primaryKey(),
+  title: text('title').notNull(),
+  description: text('description'),
+  status: text('status').notNull().default('inbox'),
+  priority: text('priority').default('medium'),
+  project_id: text('project_id').references(() => projects.id),
+  assignee_id: text('assignee_id'),
+  assignee_name: text('assignee_name'),
+  creator_id: text('creator_id'),
+  creator_name: text('creator_name'),
+  tags: text('tags'),               // JSON array
+  due_date: integer('due_date'),
+  checked_out_by: text('checked_out_by'),
+  checked_out_at: integer('checked_out_at'),
+  checkout_run_id: text('checkout_run_id'),
+  escalated: integer('escalated').default(0),
+  escalated_at: integer('escalated_at'),
+  failure_count: integer('failure_count').default(0),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── task_comments ─────────────────────────────────────────────────────
+export const taskComments = sqliteTable('task_comments', {
+  id: text('id').primaryKey(),
+  task_id: text('task_id').notNull().references(() => tasks.id),
+  author_id: text('author_id').notNull(),
+  author_name: text('author_name'),
+  author_avatar: text('author_avatar'),
+  content: text('content'),
+  is_agent: integer('is_agent').default(0),
+  reply_to: text('reply_to'),
+  thread_id: text('thread_id'),
+  mentions: text('mentions'),       // JSON array
+  reactions: text('reactions'),     // JSON array
+  tool_events: text('tool_events'), // JSON
+  raw_content: text('raw_content'),
+  metrics: text('metrics'),         // JSON
+  run_id: text('run_id'),
+  file_ref: text('file_ref'),       // JSON
+  diff_ref: text('diff_ref'),       // JSON
+  artifact_ref: text('artifact_ref'), // JSON
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── task_subtasks ─────────────────────────────────────────────────────
+export const taskSubtasks = sqliteTable('task_subtasks', {
+  id: text('id').primaryKey(),
+  task_id: text('task_id').notNull().references(() => tasks.id),
+  title: text('title').notNull(),
+  completed: integer('completed').default(0),
+  assignee_id: text('assignee_id'),
+  assignee_name: text('assignee_name'),
+  sort_order: integer('sort_order').default(0),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── runs ──────────────────────────────────────────────────────────────
+export const runs = sqliteTable('runs', {
+  id: text('id').primaryKey(),
+  agent_id: text('agent_id').notNull(),
+  agent_name: text('agent_name').notNull(),
+  source: text('source').notNull(),
+  source_id: text('source_id'),
+  channel: text('channel'),
+  status: text('status').notNull().default('running'),
+  started_at: integer('started_at').notNull(),
+  finished_at: integer('finished_at'),
+  duration_ms: integer('duration_ms'),
+  error: text('error'),
+  message_id: text('message_id'),
+  result_excerpt: text('result_excerpt'),
+  model: text('model'),
+  input_tokens: integer('input_tokens'),
+  output_tokens: integer('output_tokens'),
+  total_tokens: integer('total_tokens'),
+  tool_count: integer('tool_count'),
+  used_browser: integer('used_browser').default(0),
+  used_subagent: integer('used_subagent').default(0),
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});
+
+// ── run_events ────────────────────────────────────────────────────────
+export const runEvents = sqliteTable('run_events', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  run_id: text('run_id').notNull().references(() => runs.id),
+  seq: integer('seq').notNull(),
+  event: text('event').notNull(),
+  data: text('data'),               // JSON
+  timestamp: integer('timestamp').notNull(),
+});
+
+// ── config ────────────────────────────────────────────────────────────
+export const config = sqliteTable('config', {
+  key: text('key').primaryKey(),
+  value: text('value'),             // JSON
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+});

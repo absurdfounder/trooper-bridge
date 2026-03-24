@@ -20,8 +20,13 @@ import { ensureXvnc } from './lib/xvnc.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execSync, spawn } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { readFile, writeFile, readdir } from 'fs/promises';
+import { db, sqlite, DB_PATH } from './db/index.mjs';
+import { migrate } from './db/migrate.mjs';
+
+// Run DB migrations on startup
+migrate(sqlite);
 import os from 'os';
 import { randomUUID, generateKeyPairSync, createHash, createPrivateKey, createPublicKey, sign } from 'crypto';
 import path from 'path';
@@ -2406,6 +2411,19 @@ app.get('/admin/health', async (req, res) => {
      version: gatewayVersion,
    },
    disk: diskUsage,
+   db: (() => {
+     try {
+       const dbTables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
+       const dbFileSize = existsSync(DB_PATH) ? statSync(DB_PATH).size : 0;
+       return {
+         path: DB_PATH,
+         sizeBytes: dbFileSize,
+         sizeMB: (dbFileSize / 1024 / 1024).toFixed(2),
+         tableCount: dbTables.length,
+         walMode: sqlite.pragma('journal_mode')[0].journal_mode,
+       };
+     } catch (e) { return { error: e.message }; }
+   })(),
    agents,
    hostname: os.hostname(),
    platform: `${os.type()} ${os.release()} ${os.arch()}`,
@@ -2416,6 +2434,27 @@ app.get('/admin/health', async (req, res) => {
 // GET /admin/stats — lightweight stats for polling
 app.get('/admin/stats', (req, res) => {
  res.json(getStats());
+});
+
+// GET /admin/db — DB health check
+app.get('/admin/db', (req, res) => {
+  try {
+    const tables = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all();
+    const counts = {};
+    for (const t of tables) {
+      counts[t.name] = sqlite.prepare(`SELECT COUNT(*) as count FROM "${t.name}"`).get().count;
+    }
+    const fileSize = existsSync(DB_PATH) ? statSync(DB_PATH).size : 0;
+    res.json({
+      path: DB_PATH,
+      sizeBytes: fileSize,
+      sizeMB: (fileSize / 1024 / 1024).toFixed(2),
+      tables: counts,
+      walMode: sqlite.pragma('journal_mode')[0].journal_mode,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/healthz', (req, res) => res.status(200).json({ status: 'ok' }));
