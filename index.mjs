@@ -2477,16 +2477,18 @@ app.get('/health', async (req, res) => {
 // ── Kubernetes-style health/readiness probes (aligned with OpenClaw v2026.3.1) ──
 // ── Admin endpoints: fleet visibility ──────────────────────────────────────
 
-// GET /admin/logs — query structured logs
+// GET /admin/logs — query structured logs (persisted in SQLite)
 app.get('/admin/logs', (req, res) => {
- const { level, limit, since, search } = req.query;
- const logs = getLogs({
+ const { level, limit, since, before, search, page } = req.query;
+ const result = getLogs({
    level: level || undefined,
    limit: limit ? parseInt(limit) : 100,
    since: since ? parseInt(since) : undefined,
+   before: before ? parseInt(before) : undefined,
    search: search || undefined,
+   page: page ? parseInt(page) : undefined,
  });
- res.json({ logs, total: logs.length });
+ res.json(result);
 });
 
 // GET /admin/health — full health + stats snapshot for fleet dashboard
@@ -2517,11 +2519,29 @@ app.get('/admin/health', async (req, res) => {
    agents.push({ slug, name: reg.name, role: reg.role, title: reg.title });
  }
 
+ // OpenClaw version
+ let openclawVersion = null;
+ try {
+   openclawVersion = execSync("docker exec openclaw-openclaw-gateway-1 openclaw --version 2>/dev/null", { timeout: 5000 }).toString().trim();
+ } catch {}
+
+ // Bridge version (from git)
+ let bridgeVersion = null;
+ try {
+   bridgeVersion = execSync("git -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null", { timeout: 3000 }).toString().trim();
+ } catch {}
+
  res.json({
    ...stats,
    gateway: {
      connected: gateway.isReady,
      version: gatewayVersion,
+   },
+   openclaw: {
+     version: openclawVersion,
+   },
+   bridge: {
+     version: bridgeVersion,
    },
    disk: diskUsage,
    db: (() => {
@@ -2565,6 +2585,80 @@ app.get('/admin/ws', (req, res) => {
 // GET /admin/stats — lightweight stats for polling
 app.get('/admin/stats', (req, res) => {
  res.json(getStats());
+});
+
+// POST /admin/upgrade — trigger OpenClaw gateway + bridge upgrade
+app.post('/admin/upgrade', async (req, res) => {
+ const steps = [];
+ try {
+   // 1. Pull latest Docker image
+   captureLog('info', 'Upgrade triggered: pulling Docker image...');
+   steps.push({ step: 'docker_pull', status: 'running' });
+   try {
+     const pullOut = execSync('docker pull ghcr.io/absurdfounder/crabhq-gateway:latest 2>&1', { timeout: 120000 }).toString();
+     steps[steps.length - 1] = { step: 'docker_pull', status: 'ok', output: pullOut.slice(-500) };
+   } catch (e) {
+     steps[steps.length - 1] = { step: 'docker_pull', status: 'failed', error: e.message };
+   }
+
+   // 2. Recreate gateway container
+   steps.push({ step: 'gateway_restart', status: 'running' });
+   try {
+     const restartOut = execSync('cd /opt/openclaw && docker compose up -d --force-recreate 2>&1', { timeout: 60000 }).toString();
+     steps[steps.length - 1] = { step: 'gateway_restart', status: 'ok', output: restartOut.slice(-500) };
+   } catch (e) {
+     steps[steps.length - 1] = { step: 'gateway_restart', status: 'failed', error: e.message };
+   }
+
+   // 3. Pull latest bridge code
+   steps.push({ step: 'bridge_pull', status: 'running' });
+   try {
+     const gitOut = execSync('cd /opt/openclaw-bridge && git pull 2>&1', { timeout: 30000 }).toString();
+     steps[steps.length - 1] = { step: 'bridge_pull', status: 'ok', output: gitOut.trim() };
+   } catch (e) {
+     steps[steps.length - 1] = { step: 'bridge_pull', status: 'failed', error: e.message };
+   }
+
+   // 4. Install bridge dependencies
+   steps.push({ step: 'bridge_install', status: 'running' });
+   try {
+     const npmOut = execSync('cd /opt/openclaw-bridge && npm install --production 2>&1 | tail -5', { timeout: 60000 }).toString();
+     steps[steps.length - 1] = { step: 'bridge_install', status: 'ok', output: npmOut.trim() };
+   } catch (e) {
+     steps[steps.length - 1] = { step: 'bridge_install', status: 'failed', error: e.message };
+   }
+
+   // 5. Get new versions
+   let newOpenclawVersion = null;
+   try {
+     // Wait for gateway to start
+     await new Promise(r => setTimeout(r, 10000));
+     newOpenclawVersion = execSync('docker exec openclaw-openclaw-gateway-1 openclaw --version 2>/dev/null', { timeout: 10000 }).toString().trim();
+   } catch {}
+
+   const allOk = steps.every(s => s.status === 'ok');
+   captureLog(allOk ? 'info' : 'warn', `Upgrade ${allOk ? 'completed' : 'completed with errors'}`, { steps: steps.map(s => `${s.step}:${s.status}`) });
+
+   res.json({
+     success: allOk,
+     steps,
+     newVersion: newOpenclawVersion,
+     message: allOk
+       ? `Upgrade complete. OpenClaw: ${newOpenclawVersion || 'unknown'}. Bridge will restart momentarily.`
+       : 'Upgrade completed with some errors. Check steps for details.',
+     restartRequired: true,
+   });
+
+   // 6. Restart bridge (after response is sent)
+   setTimeout(() => {
+     captureLog('info', 'Bridge restarting after upgrade...');
+     try { execSync('pm2 restart openclaw-bridge 2>/dev/null || systemctl restart openclaw-bridge 2>/dev/null', { timeout: 5000 }); } catch {}
+   }, 2000);
+
+ } catch (err) {
+   captureLog('error', `Upgrade failed: ${err.message}`, { stack: err.stack });
+   res.status(500).json({ success: false, error: err.message, steps });
+ }
 });
 
 // GET /admin/db — DB health check

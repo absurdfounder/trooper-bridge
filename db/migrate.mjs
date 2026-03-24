@@ -146,7 +146,17 @@ export function migrate(sqlite) {
       updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
     );
 
+    CREATE TABLE IF NOT EXISTS logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      level TEXT NOT NULL,
+      message TEXT NOT NULL,
+      meta TEXT,
+      timestamp INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
     -- Indexes
+    CREATE INDEX IF NOT EXISTS idx_logs_level_time ON logs(level, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_logs_time ON logs(timestamp);
     CREATE INDEX IF NOT EXISTS idx_messages_channel_time ON messages(channel, created_at);
     CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
