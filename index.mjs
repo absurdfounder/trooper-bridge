@@ -32,6 +32,9 @@ import { randomUUID, generateKeyPairSync, createHash, createPrivateKey, createPu
 import path from 'path';
 const { dirname } = path;
 import WebSocket from 'ws';
+import { createServer } from 'http';
+import { initFirebaseAuth } from './lib/firebase-auth.mjs';
+import { BridgeWSServer } from './lib/ws-server.mjs';
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
@@ -392,6 +395,9 @@ const deviceIdentity = loadOrCreateDeviceIdentity();
 
 const app = express();
 const PORT = parseInt(process.env.BRIDGE_PORT || '3002');
+const server = createServer(app);
+const bridgeWS = new BridgeWSServer({ server, path: '/ws' });
+initFirebaseAuth();
 const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
 const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.CRABHQ_CALLBACK_URL || '';
 
@@ -2425,10 +2431,28 @@ app.get('/admin/health', async (req, res) => {
      } catch (e) { return { error: e.message }; }
    })(),
    agents,
+   wsClients: bridgeWS?.clientCount || 0,
    hostname: os.hostname(),
    platform: `${os.type()} ${os.release()} ${os.arch()}`,
    nodeVersion: process.version,
  });
+});
+
+// GET /admin/ws — WS connection info
+app.get('/admin/ws', (req, res) => {
+ const clients = [];
+ for (const [ws, client] of bridgeWS.clients) {
+   if (client.authenticated) {
+     clients.push({
+       uid: client.user?.uid,
+       email: client.user?.email,
+       name: client.user?.name,
+       connectedAt: client.connectedAt,
+       readyState: ws.readyState,
+     });
+   }
+ }
+ res.json({ clients, total: clients.length });
 });
 
 // GET /admin/stats — lightweight stats for polling
@@ -4980,72 +5004,11 @@ app.post('/callback/result', async (req, res) => {
  } catch (err) { res.status(500).json({ error: 'Failed to forward result' }); }
 });
 
-// ── WebSocket Relay (Frontend ↔ Render — transparent proxy) ──────────
-// Frontend connects to the bridge WS. Bridge relays everything to/from Render.
-// This isolates each org's WS connection and ensures Render's orgId is correct.
-// Chat AI routing still happens on Render → bridge HTTP → local OpenClaw.
-import { createServer } from 'http';
-import { WebSocketServer } from 'ws';
-
-const RENDER_WS_URL = (MISSION_CONTROL_URL || '').replace(/^http/, 'ws');
+// ── WebSocket Server (Phase 2+3 of Option C — direct browser connections) ──
+// Browsers connect directly to the bridge WS instead of going through Render.
+// Auth via Firebase ID tokens. Chat processing deferred to Phase 4.
+// (server, bridgeWS, and initFirebaseAuth() are initialized near the top of the file)
 const ORG_ID = process.env.ORG_ID || '';
-const server = createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
-
-wss.on('connection', (clientWs) => {
- console.log(`[WS-Relay] Frontend connected`);
-
- let renderWs = null;
- let renderReady = false;
- const pendingQ = [];
-
- const toRender = (d) => {
- const s = typeof d === 'string' ? d : JSON.stringify(d);
- if (renderWs && renderReady) renderWs.send(s); else pendingQ.push(s);
- };
-
- if (RENDER_WS_URL) {
- renderWs = new WebSocket(RENDER_WS_URL);
- renderWs.on('open', () => {
- renderReady = true;
- console.log(`[WS-Relay] Render upstream connected`);
- // Identify this org to Render immediately
- if (ORG_ID) renderWs.send(JSON.stringify({ type: 'identify', orgId: ORG_ID }));
- for (const m of pendingQ) renderWs.send(m);
- pendingQ.length = 0;
- });
- renderWs.on('message', (data) => {
- if (clientWs.readyState === WebSocket.OPEN) try { clientWs.send(data.toString()); } catch {}
- });
- renderWs.on('close', () => {
- renderReady = false;
- console.log(`[WS-Relay] Render disconnected, reconnecting in 5s...`);
- setTimeout(() => {
- if (clientWs.readyState === WebSocket.OPEN) {
- renderWs = new WebSocket(RENDER_WS_URL);
- renderWs.on('open', () => {
- renderReady = true;
- if (ORG_ID) renderWs.send(JSON.stringify({ type: 'identify', orgId: ORG_ID }));
- });
- renderWs.on('message', (data) => {
- if (clientWs.readyState === WebSocket.OPEN) try { clientWs.send(data.toString()); } catch {}
- });
- renderWs.on('close', () => { renderReady = false; });
- renderWs.on('error', () => {});
- }
- }, 5000);
- });
- renderWs.on('error', (err) => console.error(`[WS-Relay] Render error:`, err.message));
- }
-
- // All frontend messages → relay to Render
- clientWs.on('message', (raw) => toRender(raw.toString()));
-
- clientWs.on('close', () => {
- if (renderWs) try { renderWs.close(); } catch {}
- console.log(`[WS-Relay] Frontend disconnected`);
- });
-});
 
 // ── OpenClaw Config (read/write openclaw.json) ──────────────────────
 const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
@@ -5242,5 +5205,8 @@ app.post('/stt', express.raw({ type: '*/*', limit: '25mb' }), async (req, res) =
 
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
- console.log(`OpenClaw Bridge v2.1 on :${PORT} | WS Relay: ${RENDER_WS_URL ? 'active' : 'disabled'} | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
+ console.log(`OpenClaw Bridge v2.1 on :${PORT} (HTTP + WS) | DirectBridge: enabled | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
+ captureLog('info', `Bridge started on port ${PORT}`);
 });
+
+export { bridgeWS };
