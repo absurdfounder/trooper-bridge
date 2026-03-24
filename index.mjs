@@ -36,6 +36,7 @@ import { createServer } from 'http';
 import { initFirebaseAuth } from './lib/firebase-auth.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
 import { handleChatMessage, getRecentMessages } from './lib/chat-handler.mjs';
+import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
 import { messages as messagesTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 
@@ -1607,6 +1608,91 @@ bridgeWS.onChatMessage(async (msg, user, ws) => {
     bridgeWS,
     companyDocs: cachedCompanyDocs || '',
   });
+});
+
+// ── Wire task messages into WebSocket server ──────────────────────────────
+bridgeWS.onMessage(async (msg, user, ws) => {
+  try {
+    switch (msg.type) {
+      case 'task:create': {
+        const task = createTask({ ...msg, creatorId: user.uid, creatorName: user.name || user.email });
+        bridgeWS.broadcast('task:created', task);
+        break;
+      }
+      case 'task:update': {
+        const task = updateTask(msg.taskId, msg.patch);
+        if (task) bridgeWS.broadcast('task:updated', task);
+        break;
+      }
+      case 'task:delete': {
+        deleteTask(msg.taskId);
+        bridgeWS.broadcast('task:deleted', { taskId: msg.taskId });
+        break;
+      }
+      case 'task:comment': {
+        const comment = addComment(msg.taskId, {
+          authorId: user.uid,
+          authorName: user.name || user.email,
+          content: msg.content,
+          replyTo: msg.replyTo,
+        });
+        bridgeWS.broadcast('task:comment_added', { taskId: msg.taskId, comment });
+        break;
+      }
+      case 'task:assign': {
+        let agent = null;
+        for (const [slug, reg] of agentRegistry.entries()) {
+          if (slug === msg.agentSlug || reg.name === msg.agentName || reg.id === msg.agentId) {
+            agent = { id: reg.id || slug, slug, ...reg };
+            break;
+          }
+        }
+        if (agent) {
+          const task = updateTask(msg.taskId, { assigneeId: agent.id, assigneeName: agent.name, status: 'todo' });
+          bridgeWS.broadcast('task:updated', task);
+          if (msg.autoExecute) {
+            executeTaskWork(msg.taskId, agent, { gateway, agentRegistry, bridgeWS, companyDocs: cachedCompanyDocs }).catch(err => {
+              captureLog('error', `Auto-execute failed: ${err.message}`, { taskId: msg.taskId });
+            });
+          }
+        }
+        break;
+      }
+      case 'task:execute': {
+        const task = getTask(msg.taskId);
+        if (!task?.assignee_id) break;
+        let agent = null;
+        for (const [slug, reg] of agentRegistry.entries()) {
+          if (reg.id === task.assignee_id || slug === task.assignee_id) {
+            agent = { id: reg.id || slug, slug, ...reg };
+            break;
+          }
+        }
+        if (agent) {
+          executeTaskWork(msg.taskId, agent, { gateway, agentRegistry, bridgeWS, companyDocs: cachedCompanyDocs }).catch(err => {
+            captureLog('error', `Task execute failed: ${err.message}`, { taskId: msg.taskId });
+          });
+        }
+        break;
+      }
+      case 'subtask:add': {
+        addSubtask(msg.taskId, { title: msg.title, assigneeId: msg.assigneeId, assigneeName: msg.assigneeName });
+        bridgeWS.broadcast('task:updated', getTask(msg.taskId));
+        break;
+      }
+      case 'subtask:toggle': {
+        toggleSubtask(msg.subtaskId, msg.completed);
+        if (msg.taskId) bridgeWS.broadcast('task:updated', getTask(msg.taskId));
+        break;
+      }
+      default:
+        // Not a task message — ignore
+        break;
+    }
+  } catch (err) {
+    captureLog('error', `WS message handler error: ${err.message}`, { type: msg.type, stack: err.stack });
+    ws.send(JSON.stringify({ type: 'error', message: err.message }));
+  }
 });
 
 // ── Startup config migrations ──────────────────────────────────────────────
@@ -3253,6 +3339,104 @@ app.post('/llm/vision', async (req, res) => {
  console.error('[llm/vision] Error:', err.message);
  res.status(500).json({ error: err.message });
  }
+});
+
+// ── Task REST API ────────────────────────────────────────────────────────────
+
+app.get('/api/tasks', (req, res) => {
+  try {
+    const { status, assigneeId, projectId, limit } = req.query;
+    const result = listTasks({ status, assigneeId, projectId, limit: limit ? parseInt(limit) : 50 });
+    res.json({ tasks: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/tasks/:id', (req, res) => {
+  try {
+    const task = getTask(req.params.id);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/tasks', (req, res) => {
+  try {
+    const task = createTask(req.body);
+    bridgeWS.broadcast('task:created', task);
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/tasks/:id', (req, res) => {
+  try {
+    const task = updateTask(req.params.id, req.body);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    bridgeWS.broadcast('task:updated', task);
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/tasks/:id', (req, res) => {
+  try {
+    deleteTask(req.params.id);
+    bridgeWS.broadcast('task:deleted', { taskId: req.params.id });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Project + Goal REST API ───────────────────────────────────────────────────
+
+app.get('/api/projects', (req, res) => {
+  try {
+    res.json({ projects: listProjects() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/projects', (req, res) => {
+  try {
+    const project = createProject(req.body);
+    res.json(project);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/projects/:id', (req, res) => {
+  try {
+    const project = updateProject(req.params.id, req.body);
+    res.json(project);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/goals', (req, res) => {
+  try {
+    res.json({ goals: listGoals() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/goals', (req, res) => {
+  try {
+    const goal = createGoal(req.body);
+    res.json(goal);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Messages API ──────────────────────────────────────────────────────────
