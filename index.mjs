@@ -2587,6 +2587,84 @@ app.get('/admin/stats', (req, res) => {
  res.json(getStats());
 });
 
+// GET /admin/raw-logs/bridge — raw bridge process stdout/stderr (journald or pm2)
+app.get('/admin/raw-logs/bridge', (req, res) => {
+ const lines = parseInt(req.query.lines) || 200;
+ const search = req.query.search || '';
+ try {
+   // Try journald first (systemd), then pm2
+   let output;
+   try {
+     output = execSync(`journalctl -u openclaw-bridge --no-pager -n ${lines} --output=cat 2>/dev/null`, { timeout: 5000 }).toString();
+   } catch {
+     try {
+       output = execSync(`pm2 logs openclaw-bridge --nostream --lines ${lines} 2>/dev/null`, { timeout: 5000 }).toString();
+     } catch {
+       output = '(No bridge logs available — not running under systemd or pm2)';
+     }
+   }
+   if (search) {
+     output = output.split('\n').filter(l => l.toLowerCase().includes(search.toLowerCase())).join('\n');
+   }
+   res.json({ source: 'bridge', lines: output.split('\n').length, output });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// GET /admin/raw-logs/gateway — raw OpenClaw gateway Docker container logs
+app.get('/admin/raw-logs/gateway', (req, res) => {
+ const lines = parseInt(req.query.lines) || 200;
+ const search = req.query.search || '';
+ try {
+   let output = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${lines} 2>&1`, { timeout: 10000 }).toString();
+   // Strip ANSI color codes for clean display
+   output = output.replace(/\x1b\[[0-9;]*m/g, '');
+   if (search) {
+     output = output.split('\n').filter(l => l.toLowerCase().includes(search.toLowerCase())).join('\n');
+   }
+   res.json({ source: 'gateway', lines: output.split('\n').length, output });
+ } catch (err) {
+   res.json({ source: 'gateway', lines: 0, output: `(Gateway logs unavailable: ${err.message})` });
+ }
+});
+
+// GET /admin/raw-logs/all — combined bridge + gateway logs (interleaved by time)
+app.get('/admin/raw-logs/all', (req, res) => {
+ const lines = parseInt(req.query.lines) || 100;
+ const search = req.query.search || '';
+ try {
+   let bridgeOut = '';
+   try {
+     bridgeOut = execSync(`journalctl -u openclaw-bridge --no-pager -n ${lines} --output=short-iso 2>/dev/null`, { timeout: 5000 }).toString();
+   } catch {}
+   
+   let gatewayOut = '';
+   try {
+     gatewayOut = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${lines} --timestamps 2>&1`, { timeout: 10000 }).toString();
+     gatewayOut = gatewayOut.replace(/\x1b\[[0-9;]*m/g, '');
+   } catch {}
+
+   const bridgeLines = bridgeOut.split('\n').filter(Boolean).map(l => ({ source: 'bridge', line: l }));
+   const gatewayLines = gatewayOut.split('\n').filter(Boolean).map(l => ({ source: 'gateway', line: l }));
+   
+   let all = [...bridgeLines, ...gatewayLines];
+   if (search) {
+     all = all.filter(l => l.line.toLowerCase().includes(search.toLowerCase()));
+   }
+   // Keep last N
+   all = all.slice(-lines * 2);
+   
+   res.json({ 
+     sources: { bridge: bridgeLines.length, gateway: gatewayLines.length },
+     total: all.length,
+     lines: all,
+   });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
 // POST /admin/upgrade — trigger OpenClaw gateway + bridge upgrade
 app.post('/admin/upgrade', async (req, res) => {
  const steps = [];
