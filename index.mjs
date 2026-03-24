@@ -39,6 +39,7 @@ import { handleChatMessage, getRecentMessages } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
 import { messages as messagesTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
+import { registerApiRoutes } from './lib/api-routes.mjs';
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
@@ -5426,6 +5427,15 @@ app.post('/stt', express.raw({ type: '*/*', limit: '25mb' }), async (req, res) =
   console.error('[bridge] STT error:', err.message);
   res.status(500).json({ error: err.message });
  }
+});
+
+// ── Phase 6: Additional REST API routes ──────────────────────────────
+registerApiRoutes(app, {
+  agentRegistry,
+  gateway,
+  bridgeWS,
+  getCompanyDocs: () => cachedCompanyDocs,
+  setCompanyDocs: (docs) => { cachedCompanyDocs = docs; },
 });
 
 // ── Start Server ─────────────────────────────────────────────────────
