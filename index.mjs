@@ -3007,11 +3007,19 @@ app.get('/recording/status', (req, res) => {
 
 // Create a new SPC agent
 app.post('/agents', (req, res) => {
- const { name, title, soul, skills, tools, model, installedSkillIds, avatar } = req.body;
+ const { name, title, soul, skills, tools, model, installedSkillIds, avatar, role } = req.body;
  if (!name) return res.status(400).json({ error: 'Agent name required' });
 
  const id = agentSlug(name);
  if (agentRegistry.has(id)) return res.status(409).json({ error: `Agent "${name}" already exists` });
+
+ // LEAD agents share the 'main' gateway agent — just register in the registry, no OpenClaw config changes
+ if (role === 'LEAD') {
+ agentRegistry.set(id, { agentId: 'main', role: 'LEAD', title: title || 'Team Lead', soul: soul || '', name, installedSkillIds: installedSkillIds || [], avatar: avatar || null });
+ saveAgentRegistry();
+ console.log(`✅ Registered LEAD agent: ${name} (maps to main)`);
+ return res.json({ success: true, agentId: 'main', name, message: `Lead agent "${name}" registered` });
+ }
 
  const agentId = `spc-${id}`;
  const workspacePath = `/opt/openclaw-data/config/agents/${agentId}/workspace`;
@@ -3092,7 +3100,7 @@ app.post('/agents', (req, res) => {
  });
 
  // Register in memory and persist
- agentRegistry.set(id, { agentId, role: 'SPC', title: title || 'Specialist', soul: soulContent, name, installedSkillIds: installedSkillIds || [], avatar: avatar || null });
+ agentRegistry.set(id, { agentId, role: role || 'SPC', title: title || 'Specialist', soul: soulContent, name, installedSkillIds: installedSkillIds || [], avatar: avatar || null });
  saveAgentRegistry();
 
  console.log(`✅ Created SPC agent: ${name} (${agentId})`);
