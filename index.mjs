@@ -1943,7 +1943,7 @@ async function handleIncomingTask(req, res) {
  const isTaskWork = !!(context?.taskId);
  // CrabsHQ owns delegation. For task work, always route through main and preserve persona via prompt.
  const isSPC = registered?.role === 'SPC';
- const agentId = isTaskWork ? 'main' : (isSPC ? 'spc' : 'main');
+ const agentId = isTaskWork ? 'main' : (isSPC ? (registered?.agentId || 'main') : 'main');
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  // Task-scoped sessions: each task gets isolated context on the gateway
  // Chat messages share a single chat session per agent
@@ -2033,7 +2033,7 @@ async function handleIncomingTaskStream(req, res) {
  const isTaskWork = !!(context?.taskId);
  // CrabsHQ owns delegation. For task work, always route through main and preserve persona via prompt.
  const isSPC = registered?.role === 'SPC';
- const agentId = isTaskWork ? 'main' : (isSPC ? 'spc' : 'main');
+ const agentId = isTaskWork ? 'main' : (isSPC ? (registered?.agentId || 'main') : 'main');
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  // Task-scoped sessions: each task gets isolated context on the gateway
  // Chat messages share a single chat session per agent
@@ -3688,7 +3688,7 @@ app.post('/dm', async (req, res) => {
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
  const isSPC = registered?.role === 'SPC';
- const agentId = isSPC ? 'spc' : 'main';
+ const agentId = isSPC ? (registered?.agentId || 'main') : 'main';
  // Session key in canonical format: agent:{agentId}:{rest}
  const sessionKey = `agent:${agentId}:hook:dm:${slug}:${userId || 'anon'}`;
 
