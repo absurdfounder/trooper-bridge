@@ -2142,6 +2142,7 @@ async function handleIncomingTaskStream(req, res) {
  }
  }, 15000);
 
+ const requestStartedAt = Date.now();
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
 
  let screenshotPollerInterval = null;
@@ -2377,9 +2378,14 @@ async function handleIncomingTaskStream(req, res) {
      });
     }
    }
-   if (toolHistory.length > 0) {
-    console.log(`[OpenClaw] Post-completion: ${toolHistory.length} tool events from session history`);
-    sendSSE('tool_history', { requestId: id, agentId, events: toolHistory });
+   // Filter to only tool events from THIS run (after requestStartedAt - 5s buffer)
+   const runCutoff = requestStartedAt - 5000;
+   const recentTools = toolHistory.filter(e => (e.time || 0) >= runCutoff);
+   if (recentTools.length > 0) {
+    console.log(`[OpenClaw] Post-completion: ${recentTools.length} tool events for this run (${toolHistory.length} total in session)`);
+    sendSSE('tool_history', { requestId: id, agentId, events: recentTools });
+   } else if (toolHistory.length > 0) {
+    console.log(`[Post-completion] ${toolHistory.length} tool events in session but none from this run (cutoff=${new Date(runCutoff).toISOString()})`);
    } else {
     console.log(`[Post-completion] No tool events found in ${historyMessages.length} history messages`);
    }
