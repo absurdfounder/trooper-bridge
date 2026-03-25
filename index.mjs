@@ -3826,7 +3826,7 @@ app.post('/cron/jobs/:id/run', async (req, res) => {
    const { promisify } = await import('util');
    const run = promisify(exec);
    const jobId = req.params.id;
-   const { stdout, stderr } = await run(`openclaw cron run ${jobId} 2>&1`, { timeout: 20000 });
+   const { stdout, stderr } = await run(`docker exec openclaw-openclaw-gateway-1 openclaw cron run ${jobId} 2>&1`, { timeout: 20000 });
    res.json({ success: true, jobId, stdout, stderr });
  } catch (e) {
    res.status(500).json({ error: e.message, stdout: e.stdout || '', stderr: e.stderr || '' });
