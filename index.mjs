@@ -2306,8 +2306,21 @@ async function handleIncomingTaskStream(req, res) {
  // This gives us exec commands, Read/Write calls, browser actions etc.
  try {
   console.log("[Post-completion] Starting history fetch for " + agentId + " / " + agentName);
-  const sessionKey2 = `agent:${agentId}:hook:crabhq:${(agentName || 'default').toLowerCase().replace(/\s+/g, '-')}:task`;
-  const historyMessages = await gateway.fetchSessionHistory(sessionKey2, 100);
+  // Try both chat and task session keys — the agent may have used either
+  const sessionKeySuffixes = ['chat', 'task'];
+  let historyMessages = null;
+  for (const suffix of sessionKeySuffixes) {
+    const sessionKey2 = `agent:${agentId}:hook:crabhq:${(agentName || 'default').toLowerCase().replace(/\s+/g, '-')}:${suffix}`;
+    try {
+      historyMessages = await gateway.fetchSessionHistory(sessionKey2, 100);
+      if (historyMessages && historyMessages.length > 0) {
+        console.log(`[Post-completion] Got ${historyMessages.length} messages from ${suffix} session`);
+        break;
+      }
+    } catch (e) {
+      console.log(`[Post-completion] ${suffix} session fetch failed: ${e.message}`);
+    }
+  }
   if (historyMessages && historyMessages.length > 0) {
    // Extract tool calls from history (toolCall + toolResult pairs)
    const toolHistory = [];
