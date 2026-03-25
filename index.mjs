@@ -808,6 +808,11 @@ class OpenClawGateway {
  // Route unmatched events to the active session listener (captures nested runId events)
  this._activeSessionListener(stream, data, runId);
  }
+ // Broadcast ALL agent events (including unmatched cron/background runs) to CrabsHQ clients
+ // so the frontend can show live activity for cron jobs, background tasks, etc.
+ if (this._onAnyAgentEvent) {
+   this._onAnyAgentEvent(stream, data, runId);
+ }
  // Reset inactivity timeout for any agent event (including from sub-agents with unknown runIds)
  if (this._activeTimeoutReset) this._activeTimeoutReset();
  }
@@ -1490,6 +1495,30 @@ class OpenClawGateway {
 
 // Initialize the gateway client (connects on startup)
 const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
+
+// ── Live agent event forwarding (cron, background runs → CrabsHQ frontend) ──
+gateway._onAnyAgentEvent = (stream, data, runId) => {
+  // Only forward meaningful events, not high-frequency text chunks
+  if (stream === 'tool_use' || stream === 'tool_result' || stream === 'lifecycle') {
+    const eventType = stream === 'tool_use' ? 'tool_start' : stream === 'tool_result' ? 'tool_result' : 'lifecycle';
+    const toolName = data?.name || data?.tool || null;
+    const payload = {
+      event: eventType,
+      runId: runId || null,
+      data: {
+        tool: toolName,
+        params: stream === 'tool_use' ? (data?.input || data?.params || {}) : undefined,
+        success: stream === 'tool_result' ? !data?.is_error : undefined,
+        summary: stream === 'tool_result' ? (typeof data?.content === 'string' ? data.content.slice(0, 500) : '') : undefined,
+        phase: stream === 'lifecycle' ? data?.phase : undefined,
+        error: data?.error || undefined,
+      },
+      time: Date.now(),
+      source: 'background',
+    };
+    bridgeWS.broadcast('agent:background_event', payload);
+  }
+};
 
 // ── Cached company docs (synced from Render via /agents/company-context) ──
 let cachedCompanyDocs = '';
