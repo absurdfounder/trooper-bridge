@@ -800,7 +800,28 @@ class OpenClawGateway {
  this._pendingRequests.delete(frame.id);
  } else if (frame.type === 'event' && frame.event === 'agent') {
  const { runId, stream, data } = frame.payload || {};
+ // Log ALL stream types including tool events for debugging
  if (stream !== 'assistant') console.log(`[OpenClaw:DBG] agent event: stream=${stream} runId=${runId?.substring(0,8)} data=${JSON.stringify(data).substring(0, 200)}`);
+ // Handle gateway's native 'tool' stream (phase: start/update/end) — map to tool_use/tool_result
+ if (stream === 'tool' && data) {
+   const phase = data.phase || data.event;
+   if (phase === 'start' || phase === 'call') {
+     // Rewrite as tool_use for downstream handlers
+     const rewritten = { ...frame, payload: { ...frame.payload, stream: 'tool_use', data: { name: data.name || data.tool, input: data.args || data.input || data.params || {}, ...data } } };
+     const listener = this._eventListeners.get(runId);
+     if (listener) listener('tool_use', rewritten.payload.data, runId);
+     else if (this._activeSessionListener) this._activeSessionListener('tool_use', rewritten.payload.data, runId);
+     if (this._onAnyAgentEvent) this._onAnyAgentEvent('tool_use', rewritten.payload.data, runId);
+     return;
+   } else if (phase === 'end' || phase === 'result') {
+     const rewritten = { ...frame, payload: { ...frame.payload, stream: 'tool_result', data: { name: data.name || data.tool, content: data.result || data.output || data.summary || '', is_error: !!data.error, ...data } } };
+     const listener = this._eventListeners.get(runId);
+     if (listener) listener('tool_result', rewritten.payload.data, runId);
+     else if (this._activeSessionListener) this._activeSessionListener('tool_result', rewritten.payload.data, runId);
+     if (this._onAnyAgentEvent) this._onAnyAgentEvent('tool_result', rewritten.payload.data, runId);
+     return;
+   }
+ }
  const listener = this._eventListeners.get(runId);
  if (listener) {
  listener(stream, data, runId);
