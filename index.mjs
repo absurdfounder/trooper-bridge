@@ -4554,7 +4554,32 @@ const KNOWN_MODEL_ALIASES = {
 
 function normalizeModelId(model) {
  if (!model) return model;
- let m = model.replace(/(\d+)\.(\d+)/g, '$1-$2');
+ let m = String(model).trim();
+ // Only normalize explicit known aliases. Never blanket-convert dots↔dashes across providers.
+ const EXACT_MODEL_MAP = {
+   'gpt': 'openai/gpt-5.2',
+   'gpt-5.4': 'openai/gpt-5.4',
+   'openai/gpt-5.4': 'openai/gpt-5.4',
+   'openai-codex/gpt-5.4': 'openai/gpt-5.4',
+   'gpt-5-4': 'openai/gpt-5.4',
+   'openai/gpt-5-4': 'openai/gpt-5.4',
+   'openai-codex/gpt-5-4': 'openai/gpt-5.4',
+   'gpt-5.2': 'openai/gpt-5.2',
+   'openai/gpt-5.2': 'openai/gpt-5.2',
+   'gpt-5-2': 'openai/gpt-5.2',
+   'openai/gpt-5-2': 'openai/gpt-5.2',
+   'gpt-5.0': 'openai/gpt-5.0',
+   'openai/gpt-5.0': 'openai/gpt-5.0',
+   'gpt-5-0': 'openai/gpt-5.0',
+   'openai/gpt-5-0': 'openai/gpt-5.0',
+   'gpt-5-mini': 'openrouter/openai/gpt-5-mini',
+   'openai/gpt-5-mini': 'openrouter/openai/gpt-5-mini',
+ };
+ if (EXACT_MODEL_MAP[m]) {
+   const mapped = EXACT_MODEL_MAP[m];
+   if (mapped !== m) console.log(`[bridge] Normalized exact model "${model}" → "${mapped}"`);
+   m = mapped;
+ }
  // Extract provider prefix and bare model name
  let provider = '';
  let bare = m;
