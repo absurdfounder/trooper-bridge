@@ -4557,13 +4557,13 @@ function normalizeModelId(model) {
  let m = String(model).trim();
  // Only normalize explicit known aliases. Never blanket-convert dots↔dashes across providers.
  const EXACT_MODEL_MAP = {
-   'gpt': 'openai/gpt-5.2',
-   'gpt-5.4': 'openai/gpt-5.4',
-   'openai/gpt-5.4': 'openai/gpt-5.4',
-   'openai-codex/gpt-5.4': 'openai/gpt-5.4',
-   'gpt-5-4': 'openai/gpt-5.4',
-   'openai/gpt-5-4': 'openai/gpt-5.4',
-   'openai-codex/gpt-5-4': 'openai/gpt-5.4',
+   'gpt': 'openai-codex/gpt-5.4',
+   'gpt-5.4': 'openai-codex/gpt-5.4',
+   'openai/gpt-5.4': 'openai-codex/gpt-5.4',
+   'openai-codex/gpt-5.4': 'openai-codex/gpt-5.4',
+   'gpt-5-4': 'openai-codex/gpt-5.4',
+   'openai/gpt-5-4': 'openai-codex/gpt-5.4',
+   'openai-codex/gpt-5-4': 'openai-codex/gpt-5.4',
    'gpt-5.2': 'openai/gpt-5.2',
    'openai/gpt-5.2': 'openai/gpt-5.2',
    'gpt-5-2': 'openai/gpt-5.2',
