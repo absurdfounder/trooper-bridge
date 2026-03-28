@@ -328,7 +328,7 @@ ${HTTPS_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /api/* {
- reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ reverse_proxy 127.0.0.1:3001
  }
  handle /agents/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
@@ -343,6 +343,9 @@ ${HTTPS_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /files/* {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ handle /skills/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle_path /vnc/* {
@@ -387,7 +390,7 @@ ${SSLIP_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /api/* {
- reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ reverse_proxy 127.0.0.1:3001
  }
  handle /agents/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
@@ -401,10 +404,10 @@ ${SSLIP_DOMAIN} {
  handle /debug/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
- handle /api/proxy/* {
+ handle /files/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
- handle /files/* {
+ handle /skills/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle_path /vnc/* {
@@ -2068,6 +2071,51 @@ StandardError=append:/var/log/crabhq-org-runtime.log
 WantedBy=multi-user.target
 CRUNTIME
 
+# CrabsHQ full server (replaces Render — handles tasks, agents, API, WS)
+cat > /etc/default/crabhq-server << CSENV
+PORT=3001
+NODE_ENV=production
+ORG_ID=${ORG_ID}
+DEFAULT_ORG_ID=${ORG_ID}
+FIREBASE_PROJECT_ID=${FIREBASE_PROJECT_ID}
+FIREBASE_CLIENT_EMAIL=${FIREBASE_CLIENT_EMAIL}
+FIREBASE_PRIVATE_KEY=${FIREBASE_PRIVATE_KEY}
+RUNTIME_AUTH_SECRET=${RUNTIME_AUTH_SECRET}
+OPENAI_API_KEY=${OPENAI_API_KEY}
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+GEMINI_API_KEY=${GEMINI_API_KEY}
+BRIDGE_URL=http://127.0.0.1:${BRIDGE_PORT}
+BRIDGE_PORT=${BRIDGE_PORT}
+OPENCLAW_GATEWAY_URL=http://127.0.0.1:${GATEWAY_PORT}
+OPENCLAW_GATEWAY_TOKEN=${GATEWAY_TOKEN}
+OPENCLAW_HOOK_TOKEN=oc-hook-${HOOK_TOKEN}
+FRONTEND_URL=https://crabhq.netlify.app
+COMPOSIO_API_KEY=${COMPOSIO_API_KEY}
+CSENV
+
+cat > /etc/systemd/system/crabhq-server.service << CSSVC
+[Unit]
+Description=CrabsHQ Server (full API + task runner)
+After=network-online.target openclaw-bridge.service openclaw-docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/crabhq-org-runtime/server
+EnvironmentFile=/etc/default/crabhq-server
+ExecStart=/usr/bin/node /opt/crabhq-org-runtime/server/index.js
+Restart=always
+RestartSec=5
+User=root
+Group=root
+StandardOutput=append:/var/log/crabhq-server.log
+StandardError=append:/var/log/crabhq-server.log
+
+[Install]
+WantedBy=multi-user.target
+CSSVC
+
 # Poller service
 cat > /etc/systemd/system/openclaw-poller.service << PSVC
 [Unit]
@@ -2241,7 +2289,7 @@ if [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
 fi
 
 run_cmd systemctl daemon-reload
-run_cmd systemctl enable openclaw-docker openclaw-bridge crabhq-org-runtime openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
+run_cmd systemctl enable openclaw-docker openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
@@ -2272,6 +2320,7 @@ fi
 
 # Start org runtime, poller, VNC, desktop API, playwright (bridge already running)
 run_cmd systemctl start crabhq-org-runtime
+run_cmd systemctl start crabhq-server
 run_cmd systemctl start openclaw-poller
 run_cmd systemctl start openclaw-vnc
 run_cmd systemctl start crabhq-desktop
