@@ -147,3 +147,32 @@ export const config = sqliteTable('config', {
   value: text('value'),             // JSON
   updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
 });
+
+// ── memories ──────────────────────────────────────────────────────────
+export const memories = sqliteTable('memories', {
+  id: text('id').primaryKey(),
+  scope: text('scope').default('org'),           // org|user|workflow|runtime|relationship
+  title: text('title').notNull(),
+  summary: text('summary'),
+  details: text('details'),
+  tags: text('tags'),                             // JSON array
+  confidence: text('confidence').default('0.8'),
+  source: text('source'),                         // JSON object
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  updated_at: integer('updated_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  last_used_at: integer('last_used_at'),
+  deleted_at: integer('deleted_at'),              // soft-delete for sync
+});
+
+// ── memory_conflicts ─────────────────────────────────────────────────
+export const memoryConflicts = sqliteTable('memory_conflicts', {
+  id: text('id').primaryKey(),
+  memory_id: text('memory_id').notNull(),
+  local_version: text('local_version').notNull(),   // JSON: full memory object from Obsidian
+  server_version: text('server_version').notNull(),  // JSON: full memory object from VPS
+  status: text('status').default('unresolved'),      // unresolved|resolved|dismissed
+  resolution: text('resolution'),                    // 'local'|'server'|'merged'
+  resolved_version: text('resolved_version'),        // JSON: the winning/merged memory
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  resolved_at: integer('resolved_at'),
+});
