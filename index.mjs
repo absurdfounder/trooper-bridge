@@ -1921,6 +1921,53 @@ try {
  }
 } catch (e) { /* auth profiles not available yet */ }
 
+// ── Startup migration: fix openai profiles that should be openai-codex ────
+// When Codex OAuth tokens get saved through the wrong code path they end up
+// as "openai:default" { type: "api_key" } instead of "openai-codex:default"
+// { type: "oauth" }. Detect this by checking if an "openai:default" profile
+// exists but NO "openai-codex:*" profile exists, and the key looks like an
+// OAuth-derived token (JWT or has access/refresh fields).
+try {
+ const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
+ const auth = JSON.parse(readFileSync(authPath, 'utf8'));
+ let authChanged = false;
+ if (auth.profiles) {
+  const openaiProfile = auth.profiles['openai:default'];
+  const hasCodexProfile = Object.keys(auth.profiles).some(k => k.startsWith('openai-codex:'));
+  // If openai:default has OAuth fields (access/refresh) it was meant to be openai-codex
+  if (openaiProfile && !hasCodexProfile && openaiProfile.access && openaiProfile.refresh) {
+   auth.profiles['openai-codex:default'] = {
+    type: 'oauth',
+    provider: 'openai-codex',
+    access: openaiProfile.access,
+    refresh: openaiProfile.refresh,
+    expires: openaiProfile.expires,
+    ...(openaiProfile.accountId ? { accountId: openaiProfile.accountId } : {}),
+    ...(openaiProfile.email ? { email: openaiProfile.email } : {}),
+   };
+   delete auth.profiles['openai:default'];
+   if (!auth.lastGood) auth.lastGood = {};
+   auth.lastGood['openai-codex'] = 'openai-codex:default';
+   if (auth.lastGood['openai'] === 'openai:default') delete auth.lastGood['openai'];
+   authChanged = true;
+   console.log('[bridge] Migrated auth profile "openai:default" → "openai-codex:default" (OAuth profile detected)');
+  }
+ }
+ if (authChanged) {
+  writeFileSync(authPath, JSON.stringify(auth, null, 2));
+  try { execSync(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`, { timeout: 3000 }); } catch {}
+  try {
+   const agentsDir = '/opt/openclaw-data/config/agents';
+   const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
+   const updated = readFileSync(authPath, 'utf8');
+   for (const d of dirs) {
+    const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
+    if (existsSync(sub)) { writeFileSync(sub, updated); }
+   }
+  } catch {}
+ }
+} catch (e) { /* auth profiles not available yet */ }
+
 // Helper: slugify agent name to valid OpenClaw agentId
 function agentSlug(name) {
  return (name || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
