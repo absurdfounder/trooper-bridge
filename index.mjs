@@ -4725,6 +4725,7 @@ function normalizeModelId(model) {
  const providerKeyMap = [
  { key: anthropicKey, profileId: 'anthropic:default', provider: 'anthropic' },
  { key: openaiKey, profileId: 'openai:default', provider: 'openai' },
+ { key: openaiKey, profileId: 'openai-codex:default', provider: 'openai-codex' },
  { key: openrouterKey, profileId: 'openrouter:default', provider: 'openrouter' },
  { key: geminiKey, profileId: 'google:default', provider: 'google' },
  { key: mistralKey, profileId: 'mistral:default', provider: 'mistral' },
