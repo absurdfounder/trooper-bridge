@@ -4600,7 +4600,7 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel } = req.body;
+ const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel, openaiCodexAuthProfile } = req.body;
  const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
@@ -4797,9 +4797,25 @@ function normalizeModelId(model) {
  auth.lastGood[provider] = profileId;
  }
 
+ // Write Codex OAuth profile if included in the same request (avoids race with container restart)
+ if (openaiCodexAuthProfile?.access) {
+ const codexId = openaiCodexAuthProfile.id || 'openai-codex:default';
+ auth.profiles[codexId] = {
+  type: 'oauth',
+  provider: 'openai-codex',
+  access: openaiCodexAuthProfile.access,
+  refresh: openaiCodexAuthProfile.refresh,
+  expires: openaiCodexAuthProfile.expires,
+  ...(openaiCodexAuthProfile.accountId ? { accountId: openaiCodexAuthProfile.accountId } : {}),
+  ...(openaiCodexAuthProfile.email ? { email: openaiCodexAuthProfile.email } : {}),
+ };
+ auth.lastGood['openai-codex'] = codexId;
+ console.log(`[bridge] Included Codex OAuth profile: ${codexId}`);
+ }
+
  writeFileSync(authPath, JSON.stringify(auth, null, 2));
  await run(`chown 1000:1000 ${authPath} 2>/dev/null; chmod 664 ${authPath}`).catch(() => {});
- console.log(`[bridge] Updated auth-profiles.json for: ${keysToUpdate.map(e => e.provider).join(', ')}`);
+ console.log(`[bridge] Updated auth-profiles.json for: ${keysToUpdate.map(e => e.provider).join(', ')}${openaiCodexAuthProfile?.access ? ', openai-codex' : ''}`);
 
  // Propagate updated auth-profiles to any existing sub-agent directories
  try {
