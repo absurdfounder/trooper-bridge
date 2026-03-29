@@ -1952,14 +1952,33 @@ try {
    authChanged = true;
    console.log('[bridge] Migrated auth profile "openai:default" → "openai-codex:default" (OAuth profile detected)');
   }
-  // If openai:default exists as api_key but no openai-codex profile, clone it
-  // so openai-codex/ model prefix can authenticate with the same API key
+  // If openai:default exists as api_key but no openai-codex OAuth profile,
+  // rewrite openai-codex/ model references to openai/ in openclaw.json since
+  // the openai-codex provider requires OAuth tokens (not API keys).
   if (openaiProfile && !hasCodexProfile && openaiProfile.type === 'api_key' && openaiProfile.key) {
-   auth.profiles['openai-codex:default'] = { type: 'api_key', provider: 'openai-codex', key: openaiProfile.key };
-   if (!auth.lastGood) auth.lastGood = {};
-   auth.lastGood['openai-codex'] = 'openai-codex:default';
-   authChanged = true;
-   console.log('[bridge] Created openai-codex:default from openai:default API key');
+   try {
+    const configPath = '/opt/openclaw-data/config/openclaw.json';
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    let configChanged = false;
+    const rewrite = (v) => typeof v === 'string' && v.startsWith('openai-codex/') ? 'openai/' + v.slice('openai-codex/'.length) : v;
+    if (config.agents?.defaults?.model?.primary?.startsWith('openai-codex/')) {
+     config.agents.defaults.model.primary = rewrite(config.agents.defaults.model.primary);
+     configChanged = true;
+    }
+    if (Array.isArray(config.agents?.defaults?.model?.fallbacks)) {
+     config.agents.defaults.model.fallbacks = config.agents.defaults.model.fallbacks.map(rewrite);
+     if (config.agents.defaults.model.fallbacks.some((f, i) => f !== config.agents.defaults.model.fallbacks[i])) configChanged = true;
+    }
+    if (config.agents?.defaults?.subagents?.model?.startsWith?.('openai-codex/')) {
+     config.agents.defaults.subagents.model = rewrite(config.agents.defaults.subagents.model);
+     configChanged = true;
+    }
+    if (configChanged) {
+     writeFileSync(configPath, JSON.stringify(config, null, 2));
+     try { execSync(`chown 1000:1000 ${configPath} && chmod 600 ${configPath}`, { timeout: 3000 }); } catch {}
+     console.log('[bridge] Rewrote openai-codex/ model references to openai/ (no Codex OAuth available, only API key)');
+    }
+   } catch (e) { console.warn('[bridge] Failed to rewrite openai-codex model references:', e.message); }
   }
  }
  if (authChanged) {
@@ -4734,7 +4753,6 @@ function normalizeModelId(model) {
  const providerKeyMap = [
  { key: anthropicKey, profileId: 'anthropic:default', provider: 'anthropic' },
  { key: openaiKey, profileId: 'openai:default', provider: 'openai' },
- { key: openaiKey, profileId: 'openai-codex:default', provider: 'openai-codex' },
  { key: openrouterKey, profileId: 'openrouter:default', provider: 'openrouter' },
  { key: geminiKey, profileId: 'google:default', provider: 'google' },
  { key: mistralKey, profileId: 'mistral:default', provider: 'mistral' },
