@@ -333,6 +333,10 @@ ${HTTPS_DOMAIN} {
  handle /api/memories {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
+ @orgmemory path_regexp orgmem ^/api/organizations/[^/]+/memory(/.*)?$
+ handle @orgmemory {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
  handle /api/api-keys/* {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
@@ -408,6 +412,10 @@ ${SSLIP_DOMAIN} {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /api/memories {
+ reverse_proxy 127.0.0.1:${BRIDGE_PORT}
+ }
+ @orgmemory path_regexp orgmem ^/api/organizations/[^/]+/memory(/.*)?$
+ handle @orgmemory {
  reverse_proxy 127.0.0.1:${BRIDGE_PORT}
  }
  handle /api/api-keys/* {
