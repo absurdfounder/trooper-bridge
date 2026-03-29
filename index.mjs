@@ -1952,10 +1952,20 @@ try {
    authChanged = true;
    console.log('[bridge] Migrated auth profile "openai:default" → "openai-codex:default" (OAuth profile detected)');
   }
+  // Clean up invalid openai-codex profiles that have type "api_key" —
+  // the openai-codex provider only works with OAuth tokens, not API keys.
+  const codexProfile = auth.profiles['openai-codex:default'];
+  if (codexProfile && codexProfile.type === 'api_key') {
+   delete auth.profiles['openai-codex:default'];
+   if (auth.lastGood?.['openai-codex'] === 'openai-codex:default') delete auth.lastGood['openai-codex'];
+   authChanged = true;
+   console.log('[bridge] Removed invalid openai-codex:default profile (api_key type not supported, requires OAuth)');
+  }
   // If openai:default exists as api_key but no openai-codex OAuth profile,
   // rewrite openai-codex/ model references to openai/ in openclaw.json since
   // the openai-codex provider requires OAuth tokens (not API keys).
-  if (openaiProfile && !hasCodexProfile && openaiProfile.type === 'api_key' && openaiProfile.key) {
+  const hasValidCodexProfile = Object.entries(auth.profiles).some(([k, v]) => k.startsWith('openai-codex:') && v.type === 'oauth');
+  if (openaiProfile && !hasValidCodexProfile && openaiProfile.type === 'api_key' && openaiProfile.key) {
    try {
     const configPath = '/opt/openclaw-data/config/openclaw.json';
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
