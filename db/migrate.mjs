@@ -184,6 +184,20 @@ export function migrate(sqlite) {
     CREATE INDEX IF NOT EXISTS idx_memories_updated ON memories(updated_at);
     CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope);
     CREATE INDEX IF NOT EXISTS idx_memories_deleted ON memories(deleted_at);
+
+    CREATE TABLE IF NOT EXISTS memory_conflicts (
+      id TEXT PRIMARY KEY,
+      memory_id TEXT NOT NULL,
+      local_version TEXT NOT NULL,
+      server_version TEXT NOT NULL,
+      status TEXT DEFAULT 'unresolved',
+      resolution TEXT,
+      resolved_version TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      resolved_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_conflicts_status ON memory_conflicts(status);
+    CREATE INDEX IF NOT EXISTS idx_memory_conflicts_memory ON memory_conflicts(memory_id);
   `);
 
   console.log('[DB] Migrations complete.');

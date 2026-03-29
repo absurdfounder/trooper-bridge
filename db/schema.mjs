@@ -163,3 +163,16 @@ export const memories = sqliteTable('memories', {
   last_used_at: integer('last_used_at'),
   deleted_at: integer('deleted_at'),              // soft-delete for sync
 });
+
+// ── memory_conflicts ─────────────────────────────────────────────────
+export const memoryConflicts = sqliteTable('memory_conflicts', {
+  id: text('id').primaryKey(),
+  memory_id: text('memory_id').notNull(),
+  local_version: text('local_version').notNull(),   // JSON: full memory object from Obsidian
+  server_version: text('server_version').notNull(),  // JSON: full memory object from VPS
+  status: text('status').default('unresolved'),      // unresolved|resolved|dismissed
+  resolution: text('resolution'),                    // 'local'|'server'|'merged'
+  resolved_version: text('resolved_version'),        // JSON: the winning/merged memory
+  created_at: integer('created_at').notNull().default(sql`(unixepoch('now') * 1000)`),
+  resolved_at: integer('resolved_at'),
+});
