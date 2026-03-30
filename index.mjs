@@ -1133,7 +1133,7 @@ class OpenClawGateway {
    return text.split('\n').find(Boolean)?.slice(0, 180) || (success ? 'Completed' : 'Failed');
  }
 
- function relocateIntoProjectFolder(projectFolder, writePath) {
+function relocateIntoProjectFolder(projectFolder, writePath) {
    if (!projectFolder || !writePath) return;
    const wsBase = '/home/node/.openclaw/workspace/';
    const normPath = writePath.startsWith(wsBase) ? writePath.slice(wsBase.length) : writePath.replace(/^~\/\.openclaw\/workspace\//, '');
@@ -1151,8 +1151,27 @@ class OpenClawGateway {
      console.log(`[PROJECT_FOLDER] Relocated ${normPath} → ${destRel}`);
    } catch (e) {
      console.warn(`[PROJECT_FOLDER] Failed to relocate ${normPath}: ${e.message}`);
-   }
- }
+  }
+}
+
+function extractPatchFilePaths(patchText = '') {
+ const text = String(patchText || '');
+ if (!text) return [];
+ const seen = new Set();
+ const paths = [];
+ const pushPath = (candidate) => {
+ const value = String(candidate || '').trim();
+ if (!value || value === '/dev/null') return;
+ const normalized = value.replace(/^[ab]\//, '');
+ if (!normalized || seen.has(normalized)) return;
+ seen.add(normalized);
+ paths.push(normalized);
+ };
+ for (const match of text.matchAll(/^\*\*\* (?:Update|Add|Delete) File:\s+(.+)$/gm)) pushPath(match[1]);
+ for (const match of text.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) pushPath(match[2] || match[1]);
+ for (const match of text.matchAll(/^\+\+\+\s+(?:b\/)?(.+)$/gm)) pushPath(match[1]);
+ return paths;
+}
 
  // ── Main agent: real tool_use/tool_result from gateway ──
  // The gateway sends these with actual tool names (Read, Write, web_search, exec, etc.)
@@ -1168,13 +1187,6 @@ class OpenClawGateway {
  toolStartPayload.textBefore = textSinceLastTool;
  toolStartPayload.runId = runId || mainRunId || null;
  if (onEvent) onEvent('tool_start', toolStartPayload);
- if ((String(toolName).toLowerCase() === 'write' || String(toolName).toLowerCase() === 'edit')) {
-   const filePath = toolParams.file_path || toolParams.path || toolParams.filePath || '';
-   if (filePath && onEvent) {
-     const fileName = String(filePath).split('/').pop();
-     onEvent('file_written', { eventType: 'file_written', confidence: 'native', path: filePath, name: fileName, ext: fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : '', tool: toolName, time: Date.now() });
-   }
- }
  return;
  }
  if (stream === 'tool_result' && data) {
@@ -1185,10 +1197,16 @@ class OpenClawGateway {
    const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || data.result || data, null, 2).slice(0, 4000);
    const summary = summarizeToolResult(last.tool, last.params, raw || data.summary || '', !data.is_error);
    last.summary = summary;
-   if (_projectFolder && /^(write|edit)$/i.test(String(last.tool || ''))) {
-     const p = last.params?.file_path || last.params?.path || last.params?.filePath || '';
-     if (p) relocateIntoProjectFolder(_projectFolder, p);
-   }
+  if (_projectFolder) {
+    const toolLower = String(last.tool || '').toLowerCase();
+    if (/^(write|edit)$/i.test(toolLower)) {
+      const p = last.params?.file_path || last.params?.path || last.params?.filePath || '';
+      if (p) relocateIntoProjectFolder(_projectFolder, p);
+    } else if (toolLower === 'apply_patch') {
+      const patchPaths = extractPatchFilePaths(last.params?.patch || raw || data.summary || '');
+      for (const patchPath of patchPaths) relocateIntoProjectFolder(_projectFolder, patchPath);
+    }
+  }
    const toolResultPayload = normalizeToolEventPayload('tool_result', { tool: last.tool, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' });
 
    // Extract details.media from tool_result (OpenClaw v2026.3.22+ — browser/canvas/nodes snapshots)
@@ -1304,6 +1322,16 @@ class OpenClawGateway {
  // Larger summary limit for exec (show command output) and sessions_spawn (show sub-agent result)
  const summaryLimit = (last.tool === 'exec' || last.tool === 'sessions_spawn') ? 2000 : 500;
  last.summary = typeof data.content === 'string' ? data.content.substring(0, summaryLimit) : (data.output || '').substring(0, summaryLimit);
+ if (_projectFolder && !data.is_error) {
+ const toolLower = String(last.tool || '').toLowerCase();
+ if (toolLower === 'write' || toolLower === 'edit') {
+   const writePath = last.params?.file_path || last.params?.path || last.params?.filePath || '';
+   if (writePath) relocateIntoProjectFolder(_projectFolder, writePath);
+ } else if (toolLower === 'apply_patch') {
+   const patchPaths = extractPatchFilePaths(last.params?.patch || last.summary || '');
+   for (const patchPath of patchPaths) relocateIntoProjectFolder(_projectFolder, patchPath);
+ }
+ }
  }
  // When sessions_spawn completes, emit subagent_done for any agents not already
  // cleaned up by lifecycle:end or task_completion events (fallback for older gateways)
