@@ -791,6 +791,7 @@ class OpenClawGateway {
  const listener = this._eventListeners.get(pending.idempotencyKey);
  if (listener) {
  this._eventListeners.set(frame.payload.runId, listener);
+ listener('lifecycle', { phase: 'start', startedAt: Date.now(), accepted: true }, frame.payload.runId);
  }
  }
  return;
@@ -1012,6 +1013,11 @@ class OpenClawGateway {
  const toolLog = [];
  let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
  let emittedMainRunStart = false;
+ let sawLiveStreamPayload = false;
+ let historyPoller = null;
+ let historyPollInFlight = false;
+ let lastHistoryAssistantText = '';
+ let lastHistoryThinkingText = '';
 
  // Sub-agent tracking: tree-based for nested sub-agents
  let mainRunId = null;
@@ -1038,6 +1044,10 @@ class OpenClawGateway {
  } else if (data?.text) {
  // Log text events more compactly (they're frequent)
  console.log(`[TEXT:DBG] runId=${runId?.substring(0,8)} isSubAgent=${isSubAgent} chars=${data.text.length} snippet="${data.text.substring(0, 60).replace(/\n/g, '\\n')}"`);
+ }
+
+ if (!isSubAgent && ['assistant', 'thinking', 'tool_use', 'tool_result'].includes(stream)) {
+ sawLiveStreamPayload = true;
  }
 
  // Track main runId from first event
@@ -1494,6 +1504,49 @@ function extractPatchFilePaths(patchText = '') {
  }));
 
  console.log(`[OpenClaw] Agent streaming request sent (session=${sessionKey})`);
+
+ const pollSessionHistory = async () => {
+ if (historyPollInFlight || sawLiveStreamPayload) return;
+ historyPollInFlight = true;
+ try {
+ const historyMessages = await this.fetchSessionHistory(sessionKey, 30);
+ if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
+ let latestAssistantText = '';
+ let latestThinkingText = '';
+ for (const msg of historyMessages) {
+   const m = msg?.message || msg;
+   if ((m?.role || '') !== 'assistant') continue;
+   const content = m?.content;
+   if (Array.isArray(content)) {
+     const textBlocks = content.filter(block => block?.type === 'text').map(block => block?.text || '').filter(Boolean);
+     const thinkingBlocks = content.filter(block => block?.type === 'thinking').map(block => block?.text || '').filter(Boolean);
+     if (textBlocks.length > 0) latestAssistantText = textBlocks.join('\n\n');
+     if (thinkingBlocks.length > 0) latestThinkingText = thinkingBlocks.join('\n\n');
+   } else if (typeof content === 'string' && content.trim()) {
+     latestAssistantText = content.trim();
+   }
+ }
+ const effectiveRunId = mainRunId || this._pendingRequests.get(id)?.runId || null;
+ if (latestThinkingText && latestThinkingText !== lastHistoryThinkingText) {
+   lastHistoryThinkingText = latestThinkingText;
+   if (onEvent) onEvent('thinking', { text: latestThinkingText, runId: effectiveRunId, source: 'history_poll' });
+ }
+ if (latestAssistantText && latestAssistantText !== lastHistoryAssistantText) {
+   lastHistoryAssistantText = latestAssistantText;
+   if (onEvent) onEvent('text', { text: latestAssistantText, runId: effectiveRunId, source: 'history_poll' });
+ }
+ } catch (err) {
+ console.warn('[OpenClaw] Live history poll failed:', err.message);
+ } finally {
+ historyPollInFlight = false;
+ }
+ };
+
+ setTimeout(() => {
+ if (historyPoller || sawLiveStreamPayload) return;
+ historyPoller = setInterval(pollSessionHistory, 1500);
+ pollSessionHistory().catch(() => {});
+ }, 2500);
  });
 
  const resultText = result?.result?.payloads?.map(p => p.text).filter(Boolean).join('\n\n');
@@ -1539,6 +1592,7 @@ function extractPatchFilePaths(patchText = '') {
  if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
  return { response, toolLog: formattedToolLog };
  } finally {
+ if (historyPoller) clearInterval(historyPoller);
  // Clean up session listener and event listeners
  this._activeSessionListener = null;
  const listener = this._eventListeners.get(idempotencyKey);
