@@ -1082,6 +1082,34 @@ class OpenClawGateway {
   }
  }
 
+ async abortSession(sessionKey) {
+  if (!sessionKey) throw new Error('sessionKey is required');
+  if (!this.connected) {
+   const ok = await this.connect();
+   if (!ok) throw new Error('Cannot connect to OpenClaw gateway');
+  }
+  const id = randomUUID();
+  try {
+   const result = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+     this._pendingRequests.delete(id);
+     reject(new Error('Abort timeout'));
+    }, 10000);
+    this._pendingRequests.set(id, {
+     resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
+     reject: (err) => { clearTimeout(timeout); reject(err); },
+    });
+    this.ws.send(JSON.stringify({
+     type: 'req', id, method: 'chat.abort',
+     params: { sessionKey },
+    }));
+   });
+   return result || { ok: true };
+  } finally {
+   this._pendingRequests.delete(id);
+  }
+ }
+
  // Streaming variant — calls onEvent(type, data) for each event as it arrives.
  // Returns a promise that resolves with { response, toolLog } when agent finishes.
  async runAgentStreaming(message, opts = {}, onEvent) {
@@ -1860,6 +1888,20 @@ bridgeWS.onChatMessage(async (msg, user, ws) => {
   });
 });
 
+bridgeWS.onStopGeneration(async (msg, user, ws) => {
+  try {
+    const sessionKey = resolveMissionControlSessionKey({
+      sessionKey: msg.sessionKey,
+      agentName: msg.agentName,
+      context: { taskId: msg.taskId || msg.taskRef || null },
+    });
+    await gateway.abortSession(sessionKey);
+    ws.send(JSON.stringify({ type: 'stop_generation:done', sessionKey }));
+  } catch (err) {
+    ws.send(JSON.stringify({ type: 'stop_generation:error', error: err.message }));
+  }
+});
+
 // ── Wire task messages into WebSocket server ──────────────────────────────
 bridgeWS.onMessage(async (msg, user, ws) => {
   try {
@@ -2198,6 +2240,18 @@ try {
 // Helper: slugify agent name to valid OpenClaw agentId
 function agentSlug(name) {
  return (name || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}) {
+ if (sessionKey) return sessionKey;
+ const taskId = context?.taskId || null;
+ const slug = agentSlug(agentName);
+ const registered = agentRegistry.get(slug);
+ const isSPC = registered?.role === 'SPC';
+ const gatewayAgentId = taskId ? 'main' : (isSPC ? (registered?.agentId || 'main') : 'main');
+ return taskId
+   ? `agent:${gatewayAgentId}:hook:crabhq:${slug}:task:${taskId}`
+   : `agent:${gatewayAgentId}:hook:crabhq:${slug}:chat`;
 }
 
 // Helper: write file inside OpenClaw container
@@ -3273,6 +3327,23 @@ app.post('/files/write', (req, res) => {
 app.post('/webhook/crabhq', handleIncomingTask);
 app.post('/webhook/mission-control', handleIncomingTask);
 app.post('/webhook/mission-control/stream', handleIncomingTaskStream);
+app.post('/webhook/mission-control/stop', async (req, res) => {
+ try {
+  const sessionKey = resolveMissionControlSessionKey(req.body || {});
+  if (!sessionKey) return res.status(400).json({ error: 'Missing session target' });
+  if (!gateway.isReady) {
+   const reconnected = await gateway.ensureConnected();
+   if (!reconnected) {
+    return res.status(503).json({ error: 'OpenClaw gateway not connected' });
+   }
+  }
+  await gateway.abortSession(sessionKey);
+  return res.json({ success: true, sessionKey });
+ } catch (err) {
+  console.error('[stop] Failed to abort session:', err.message);
+  return res.status(502).json({ error: err.message });
+ }
+});
 
 // ── Screen Recording — ffmpeg x11grab on display :99 ─────────────────
 // Used by the develop → test → record → approve workflow.
