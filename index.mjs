@@ -43,6 +43,7 @@ import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, add
 import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
+import { createSSESender } from './lib/sse-stream.mjs';
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
@@ -2565,32 +2566,32 @@ async function handleIncomingTaskStream(req, res) {
  'X-Accel-Buffering': 'no',
  });
 
- let sseSequence = 0;
- const sendSSE = (event, data) => {
- if (res.writableEnded) return;
- const payload = data?.payloadVersion
-   ? data
-   : normalizeBridgeEventPayload(event, data, {
-       sessionKey: data?.sessionKey || sessionKey || null,
-       runId: data?.runId || null,
-       source: data?.source || 'sse_stream',
-       sequence: sseSequence++,
-       time: data?.time || Date.now(),
-       parentSessionKey: data?.parentSessionKey || null,
-       parentRunId: data?.parentRunId || null,
-       childSessionKey: data?.childSessionKey || null,
-       childRunId: data?.childRunId || data?.subAgentRunId || null,
-     });
- res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
- // Debug: log every SSE event sent to CrabsHQ
- const dataStr = JSON.stringify(payload).substring(0, 150);
- if (event !== 'text' && event !== 'typing_keepalive') {
-  logDebugEvent('sse_to_crabhq', { event, data: dataStr });
-  console.log(`[SSE→CrabsHQ] event=${event} data=${dataStr}`);
- } else if (event === 'text') {
-  logDebugEvent('sse_to_crabhq', { event, chars: payload?.text?.length || 0 });
- }
- };
+ const sendSSE = createSSESender(res, {
+ normalize: (event, data, sequence) => (
+   data?.payloadVersion
+     ? data
+     : normalizeBridgeEventPayload(event, data, {
+         sessionKey: data?.sessionKey || sessionKey || null,
+         runId: data?.runId || null,
+         source: data?.source || 'sse_stream',
+         sequence,
+         time: data?.time || Date.now(),
+         parentSessionKey: data?.parentSessionKey || null,
+         parentRunId: data?.parentRunId || null,
+         childSessionKey: data?.childSessionKey || null,
+         childRunId: data?.childRunId || data?.subAgentRunId || null,
+       })
+ ),
+ onSend: (event, payload) => {
+   const dataStr = JSON.stringify(payload).substring(0, 150);
+   if (event !== 'text' && event !== 'typing_keepalive') {
+    logDebugEvent('sse_to_crabhq', { event, data: dataStr });
+    console.log(`[SSE→CrabsHQ] event=${event} data=${dataStr}`);
+   } else if (event === 'text') {
+    logDebugEvent('sse_to_crabhq', { event, chars: payload?.text?.length || 0 });
+   }
+ },
+ });
 
  // Keep-alive to prevent proxy timeouts + typing indicator keepalive (v2026.3.1)
  const keepAlive = setInterval(() => {
@@ -5902,9 +5903,7 @@ app.post('/deep-research', async (req, res) => {
  'Cache-Control': 'no-cache',
  'Connection': 'keep-alive',
  });
- const sendSSE = (event, data) => {
- if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
- };
+ const sendSSE = createSSESender(res);
 
  sendSSE('start', { query: query.trim(), outputDir });
 
