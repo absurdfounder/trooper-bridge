@@ -2341,6 +2341,15 @@ kill $LOG_SERVER_PID 2>/dev/null; sleep 1
 
 # Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
 run_cmd systemctl start openclaw-bridge
+sleep 2
+if systemctl is-active --quiet openclaw-bridge; then
+ echo "Bridge Service: RUNNING"
+else
+ echo "Bridge Service: NOT RUNNING"
+ journalctl -u openclaw-bridge --no-pager -n 60 || true
+ echo "FATAL: openclaw-bridge service failed to start"
+ exit 1
+fi
 
 # Start docker containers
 run_cmd systemctl start openclaw-docker
@@ -2404,10 +2413,25 @@ else
  journalctl -u crabhq-org-runtime --no-pager -n 20 || true
 fi
 
-if curl -sf http://127.0.0.1:${CRABHQ_RUNTIME_PORT}/health >/dev/null 2>&1; then
- echo "Org Runtime Local Health: OK"
-else
+_org_runtime_ready=0
+for i in $(seq 1 90); do
+ if curl -sf http://127.0.0.1:${CRABHQ_RUNTIME_PORT}/health >/dev/null 2>&1; then
+ echo "Org Runtime Local Health: OK (ready after $((i * 2))s)"
+ _org_runtime_ready=1
+ break
+ fi
+ if ! systemctl is-active --quiet crabhq-org-runtime; then
+ echo "Org Runtime: NOT RUNNING DURING HEALTH WAIT"
+ journalctl -u crabhq-org-runtime --no-pager -n 60 || true
+ echo "FATAL: crabhq-org-runtime service exited before local health became ready"
+ exit 1
+ fi
+ sleep 2
+done
+if [ "$_org_runtime_ready" -eq 0 ]; then
  echo "Org Runtime Local Health: FAILED"
+ journalctl -u crabhq-org-runtime --no-pager -n 60 || true
+ echo "FATAL: crabhq-org-runtime local health did not become ready after 180s"
  exit 1
 fi
 
