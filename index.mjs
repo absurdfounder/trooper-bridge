@@ -151,6 +151,35 @@ When a task involves creating a trackable dashboard or recurring data collection
 4. The human's satisfaction is the only metric that matters`;
 }
 
+function detectDisplayGeometry(display = ':99') {
+  let geometry = '1280x800';
+  try {
+    const xdpyInfo = execSync(`DISPLAY=${display} xdpyinfo 2>/dev/null | grep dimensions`, {
+      encoding: 'utf8',
+      timeout: 3000,
+    });
+    const match = xdpyInfo.match(/(\d+x\d+)/);
+    if (match) geometry = match[1];
+  } catch {}
+  return geometry;
+}
+
+function captureViewportFrame(display = ':99') {
+  try {
+    const geometry = detectDisplayGeometry(display);
+    const frame = execSync(
+      `DISPLAY=${display} ffmpeg -v error -video_size ${geometry} -f x11grab -draw_mouse 0 -i ${display} -frames:v 1 -f image2pipe -vcodec png -`,
+      { timeout: 8000, maxBuffer: 12 * 1024 * 1024 },
+    );
+    const base64 = Buffer.from(frame).toString('base64');
+    if (!base64 || base64.length <= 100) return null;
+    return { base64, geometry };
+  } catch (error) {
+    console.warn(`[viewport] Failed to capture ${display}: ${error.message}`);
+    return null;
+  }
+}
+
 function buildToolSummary(tool, params, skillName, rawText) {
  const p = params || {};
  const trunc = (s, n = 80) => s && s.length > n ? s.substring(0, n) + '…' : s;
@@ -2714,18 +2743,37 @@ async function handleIncomingTaskStream(req, res) {
  projectFolder,
  }, streamingCallback));
 
- // Stop all screen recordings and get video paths before sending done event
- const recordingPath = stopBrowserRecording();
- const desktopRecordingPath = stopDesktopRecording();
- const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
- const desktopRecordingUrl = desktopRecordingPath ? `/files${desktopRecordingPath}` : null;
+// Stop all screen recordings and get video paths before sending done event
+const recordingPath = stopBrowserRecording();
+const desktopRecordingPath = stopDesktopRecording();
+const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
+const desktopRecordingUrl = desktopRecordingPath ? `/files${desktopRecordingPath}` : null;
 
- // Signal browser session end
- const endSession = getSkillBrowserSession();
- if (endSession) {
+const endSession = getSkillBrowserSession();
+const shouldCaptureViewportFrame = Boolean(
+ endSession?.liveViewUrl || (isBrowserTask && getVNCLiveViewUrl() && isVNCAvailable())
+);
+if (shouldCaptureViewportFrame) {
+ const viewportFrame = captureViewportFrame(':99');
+ if (viewportFrame) {
+  try {
+   sendSSE('screenshot_frame', buildScreenshotFramePayload({
+    base64: viewportFrame.base64,
+    timestamp: Date.now(),
+    action: 'Visible browser viewport',
+    label: 'Visible browser viewport',
+    captureKind: 'viewport',
+    geometry: viewportFrame.geometry,
+   }));
+  } catch {}
+ }
+}
+
+// Signal browser session end
+if (endSession) {
  try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: endSession.sessionId, recordingUrl })); } catch {}
  clearSkillBrowserSession();
- } else if (isBrowserTask) {
+} else if (isBrowserTask) {
  try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ recordingUrl })); } catch {}
  }
 
