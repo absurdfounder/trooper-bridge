@@ -1127,6 +1127,7 @@ class OpenClawGateway {
  const _agentId2 = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
+ const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
 
  const textChunks = [];
@@ -1140,6 +1141,23 @@ class OpenClawGateway {
  let historyPollInFlight = false;
  let lastHistoryAssistantText = '';
  let lastHistoryThinkingText = '';
+ const seenHistoryEventKeys = new Set();
+ const INTERNAL_MEMORY_ARRAY_PREFIX_RE = /^\s*\[\s*\{[\s\S]*?"category"\s*:\s*"[^"]+"[\s\S]*?"key"\s*:\s*"[^"]+"[\s\S]*?"value"\s*:\s*"[^"]+"[\s\S]*?"confidence"\s*:\s*(?:0(?:\.\d+)?|1(?:\.0+)?)\s*[\s\S]*?\}\s*\]\s*/;
+ const INTERNAL_INSIGHTS_OBJECT_PREFIX_RE = /^\s*\{\s*"preferences"\s*:\s*\[[\s\S]*?\]\s*,\s*"patterns"\s*:\s*\[[\s\S]*?\]\s*,\s*"expertise"\s*:\s*\[[\s\S]*?\]\s*,\s*"facts"\s*:\s*\[[\s\S]*?\]\s*\}\s*/;
+ const stripInternalRunMetadataPrefix = (text = '') => {
+   let current = String(text || '');
+   let next = current
+     .replace(INTERNAL_MEMORY_ARRAY_PREFIX_RE, '')
+     .replace(INTERNAL_INSIGHTS_OBJECT_PREFIX_RE, '');
+   while (next !== current) {
+     current = next;
+     next = current
+       .replace(INTERNAL_MEMORY_ARRAY_PREFIX_RE, '')
+       .replace(INTERNAL_INSIGHTS_OBJECT_PREFIX_RE, '');
+   }
+   return current.replace(/^\s+/, '');
+ };
+ const sanitizeVisibleAssistantText = (text = '') => stripInternalRunMetadataPrefix(text).trim();
 
  // Sub-agent tracking: tree-based for nested sub-agents
  let mainRunId = null;
@@ -1243,9 +1261,11 @@ class OpenClawGateway {
  subAgentName: subInfo.name,
  });
  } else if (stream === 'assistant' && data?.text) {
- if (onEvent) onEvent('subagent_text', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
+ const visibleText = sanitizeVisibleAssistantText(data.text);
+ if (visibleText && onEvent) onEvent('subagent_text', { text: visibleText, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
  } else if (stream === 'thinking' && data?.text) {
- if (onEvent) onEvent('subagent_thinking', { text: data.text, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
+ const visibleText = sanitizeVisibleAssistantText(data.text);
+ if (visibleText && onEvent) onEvent('subagent_thinking', { text: visibleText, subAgentRunId: runId, parentRunId: subInfo.parentRunId, depth: subInfo.depth, subAgentName: subInfo.name });
  } else if (stream === 'lifecycle' && data?.phase === 'end') {
  // Sub-agent lifecycle ended — emit subagent_done with real completion data
  console.log(`[SUBAGENT:done] ${subInfo.name} (runId=${runId}) lifecycle ended`);
@@ -1403,7 +1423,8 @@ function extractPatchFilePaths(patchText = '') {
 
  if (stream === 'assistant' && data?.text) {
  textChunks.push(data.text);
- if (onEvent) onEvent('text', { text: data.text, runId: runId || mainRunId || null });
+ const visibleText = sanitizeVisibleAssistantText(data.text);
+ if (visibleText && onEvent) onEvent('text', { text: visibleText, runId: runId || mainRunId || null });
  }
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
@@ -1617,7 +1638,8 @@ function extractPatchFilePaths(patchText = '') {
  }
  }
  if (stream === 'thinking' && data?.text) {
- if (onEvent) onEvent('thinking', { text: data.text });
+ const visibleText = sanitizeVisibleAssistantText(data.text);
+ if (visibleText && onEvent) onEvent('thinking', { text: visibleText });
  }
  };
 
@@ -1665,32 +1687,71 @@ function extractPatchFilePaths(patchText = '') {
  if (historyPollInFlight || sawLiveStreamPayload) return;
  historyPollInFlight = true;
  try {
- const historyMessages = await this.fetchSessionHistory(sessionKey, 30);
- if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
- let latestAssistantText = '';
- let latestThinkingText = '';
- for (const msg of historyMessages) {
+  const historyMessages = await this.fetchSessionHistory(sessionKey, 30);
+  if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
+  const runCutoff = runStartedAt - 5000;
+  let latestAssistantText = '';
+  let latestThinkingText = '';
+  for (const msg of historyMessages) {
    const m = msg?.message || msg;
-   if ((m?.role || '') !== 'assistant') continue;
+   const ts = new Date(msg?.timestamp || m?.timestamp || 0).getTime() || Date.now();
+   if (ts < runCutoff) continue;
+   const role = m?.role || '';
    const content = m?.content;
-   if (Array.isArray(content)) {
-     const textBlocks = content.filter(block => block?.type === 'text').map(block => block?.text || '').filter(Boolean);
-     const thinkingBlocks = content.filter(block => block?.type === 'thinking').map(block => block?.text || '').filter(Boolean);
-     if (textBlocks.length > 0) latestAssistantText = textBlocks.join('\n\n');
-     if (thinkingBlocks.length > 0) latestThinkingText = thinkingBlocks.join('\n\n');
-   } else if (typeof content === 'string' && content.trim()) {
-     latestAssistantText = content.trim();
+   if (role === 'assistant') {
+     if (Array.isArray(content)) {
+       for (const block of content) {
+         if (block?.type === 'toolCall' || block?.type === 'tool_use') {
+           const key = `tool_start:${block.id || block.name || ts}`;
+           if (!seenHistoryEventKeys.has(key)) {
+             seenHistoryEventKeys.add(key);
+             if (onEvent) onEvent('tool_start', {
+               tool: block.name || block.tool || 'tool',
+               params: block.arguments || block.input || {},
+               toolCallId: block.id || undefined,
+               runId: mainRunId || null,
+               source: 'history_poll',
+             });
+           }
+         }
+       }
+       const textBlocks = content.filter(block => block?.type === 'text').map(block => block?.text || '').filter(Boolean);
+       const thinkingBlocks = content.filter(block => block?.type === 'thinking').map(block => block?.text || '').filter(Boolean);
+       if (textBlocks.length > 0) latestAssistantText = textBlocks.join('\n\n');
+       if (thinkingBlocks.length > 0) latestThinkingText = thinkingBlocks.join('\n\n');
+     } else if (typeof content === 'string' && content.trim()) {
+       latestAssistantText = content.trim();
+     }
    }
- }
- const effectiveRunId = mainRunId || this._pendingRequests.get(id)?.runId || null;
- if (latestThinkingText && latestThinkingText !== lastHistoryThinkingText) {
-   lastHistoryThinkingText = latestThinkingText;
-   if (onEvent) onEvent('thinking', { text: latestThinkingText, runId: effectiveRunId, source: 'history_poll' });
- }
- if (latestAssistantText && latestAssistantText !== lastHistoryAssistantText) {
-   lastHistoryAssistantText = latestAssistantText;
-   if (onEvent) onEvent('text', { text: latestAssistantText, runId: effectiveRunId, source: 'history_poll' });
- }
+   if ((role === 'toolResult' || role === 'tool') && content) {
+     const resultText = Array.isArray(content)
+       ? content.filter(c => c?.type === 'text').map(c => c?.text || '').join('\n')
+       : typeof content === 'string' ? content : JSON.stringify(content).slice(0, 500);
+     const key = `tool_result:${m.toolCallId || m.tool_use_id || m.name || ts}`;
+     if (!seenHistoryEventKeys.has(key)) {
+       seenHistoryEventKeys.add(key);
+       if (onEvent) onEvent('tool_result', {
+         tool: m.toolName || m.name || 'unknown',
+         toolCallId: m.toolCallId || m.tool_use_id || undefined,
+         success: !m.isError && !m.is_error,
+         summary: resultText.slice(0, 500),
+         runId: mainRunId || null,
+         source: 'history_poll',
+       });
+     }
+   }
+  }
+  const effectiveRunId = mainRunId || this._pendingRequests.get(id)?.runId || null;
+  const visibleThinkingText = sanitizeVisibleAssistantText(latestThinkingText);
+  if (visibleThinkingText && visibleThinkingText !== lastHistoryThinkingText) {
+    lastHistoryThinkingText = visibleThinkingText;
+    if (onEvent) onEvent('thinking', { text: visibleThinkingText, runId: effectiveRunId, source: 'history_poll' });
+  }
+  const visibleAssistantText = sanitizeVisibleAssistantText(latestAssistantText);
+  if (visibleAssistantText && visibleAssistantText !== lastHistoryAssistantText) {
+    lastHistoryAssistantText = visibleAssistantText;
+    if (onEvent) onEvent('text', { text: visibleAssistantText, runId: effectiveRunId, source: 'history_poll' });
+  }
  } catch (err) {
  console.warn('[OpenClaw] Live history poll failed:', err.message);
  } finally {
