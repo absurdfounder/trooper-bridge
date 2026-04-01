@@ -15,6 +15,7 @@ import {
   buildBrowserSessionEndPayload,
   buildBrowserSessionPayload,
   buildScreenshotFramePayload,
+  extractStructuredToolResult,
   extractHistoryToolEvents,
   normalizeBridgeEventPayload,
   normalizeToolEventPayload,
@@ -44,6 +45,7 @@ import { messages as messagesTable, agents as agentsTable, humans as humansTable
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
+import { buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
@@ -1437,6 +1439,7 @@ function extractPatchFilePaths(patchText = '') {
    last.status = data.is_error ? 'failed' : 'ok';
    last.durationMs = Date.now() - (last.startedAt || Date.now());
    const raw = typeof data.content === 'string' ? data.content : JSON.stringify(data.content || data.result || data, null, 2).slice(0, 4000);
+   const structuredResult = extractStructuredToolResult(data.result ?? data.content);
    const summary = summarizeToolResult(last.tool, last.params, raw || data.summary || '', !data.is_error);
    last.summary = summary;
   if (_projectFolder) {
@@ -1449,7 +1452,7 @@ function extractPatchFilePaths(patchText = '') {
       for (const patchPath of patchPaths) relocateIntoProjectFolder(_projectFolder, patchPath);
     }
   }
-   const toolResultPayload = normalizeToolEventPayload('tool_result', { tool: last.tool, toolCallId: last.toolCallId, params: last.params, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' });
+   const toolResultPayload = normalizeToolEventPayload('tool_result', { tool: last.tool, toolCallId: last.toolCallId, params: last.params, result: structuredResult, success: !data.is_error, summary, raw, durationMs: last.durationMs, index: toolLog.length - 1, startedAt: last.startedAt, confidence: 'native' });
 
    // Extract details.media from tool_result (OpenClaw v2026.3.22+ — browser/canvas/nodes snapshots)
    const detailsMedia = data.details?.media && typeof data.details.media === 'object' && !Array.isArray(data.details.media) ? data.details.media : null;
@@ -2386,6 +2389,56 @@ try {
 // Helper: slugify agent name to valid OpenClaw agentId
 function agentSlug(name) {
  return (name || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
+
+function readCompanyNameFromDocs(companyDocs = cachedCompanyDocs) {
+  return companyDocs?.match(/^#\s+(.+)$/m)?.[1]?.trim() || 'the company';
+}
+
+function writeWorkspaceTextFile(workspacePath, fileName, content, { preserveIfExists = false } = {}) {
+  const targetPath = `${workspacePath}/${fileName}`;
+  if (preserveIfExists && existsSync(targetPath)) {
+    return false;
+  }
+  writeFileSync(targetPath, content);
+  return true;
+}
+
+function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedFiles = true }) {
+  execSync(`mkdir -p ${workspacePath}/memory`, { timeout: 5000 });
+
+  const normalizedProfile = normalizeAgentProfile(agentProfile);
+  const teamProfiles = [
+    normalizedProfile,
+    ...Array.from(agentRegistry.values())
+      .filter((entry) => entry.name !== normalizedProfile.name)
+      .map((entry) => normalizeAgentProfile(entry)),
+  ];
+  const files = buildWorkspaceIdentityFiles(normalizedProfile, {
+    teamProfiles,
+    companyName: readCompanyNameFromDocs(),
+  });
+
+  for (const [fileName, content] of Object.entries(files)) {
+    writeWorkspaceTextFile(workspacePath, fileName, content, {
+      preserveIfExists: preserveSharedFiles && fileName === 'MEMORY.md',
+    });
+  }
+
+  if (workspacePath !== '/opt/openclaw-data/workspace') {
+    for (const sharedFile of ['COMPANY.md', 'MEMORIES.md', 'KNOWLEDGE.md']) {
+      try {
+        const sharedContent = readFileSync(`/opt/openclaw-data/workspace/${sharedFile}`, 'utf8');
+        if (sharedContent) {
+          writeWorkspaceTextFile(workspacePath, sharedFile, sharedContent, {
+            preserveIfExists: preserveSharedFiles,
+          });
+        }
+      } catch {}
+    }
+  }
+
+  execSync(`chown -R 1000:1000 ${workspacePath}`, { timeout: 5000 });
 }
 
 function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}) {
@@ -3642,7 +3695,19 @@ app.post('/agents', (req, res) => {
 
  // LEAD agents share the 'main' gateway agent — just register in the registry, no OpenClaw config changes
  if (role === 'LEAD') {
- agentRegistry.set(id, { agentId: 'main', role: 'LEAD', title: title || 'Team Lead', soul: soul || '', name, installedSkillIds: installedSkillIds || [], avatar: avatar || null });
+ const leadProfile = {
+   agentId: 'main',
+   role: 'LEAD',
+   title: title || 'Team Lead',
+   soul: soul || '',
+   name,
+   skills: skills || [],
+   tools: tools || [],
+   installedSkillIds: installedSkillIds || [],
+   avatar: avatar || null,
+ };
+ agentRegistry.set(id, leadProfile);
+ syncRuntimeIdentityFiles({ workspacePath: '/opt/openclaw-data/workspace', agentProfile: leadProfile });
  saveAgentRegistry();
  console.log(`✅ Registered LEAD agent: ${name} (maps to main)`);
  return res.json({ success: true, agentId: 'main', name, message: `Lead agent "${name}" registered` });
@@ -3656,55 +3721,26 @@ app.post('/agents', (req, res) => {
  // Create workspace directories
  execSync(`mkdir -p ${workspacePath}/memory ${agentDir}/agent ${agentDir}/sessions`, { timeout: 5000 });
 
- // Write SOUL.md
  // Try to read company name from COMPANY.md header
  let _companyName = 'the company';
  try { const h = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8').split('\n')[0]; _companyName = h.replace(/^#\s*/, '').replace(/\s*Context$/, '').trim() || _companyName; } catch {}
  const soulContent = soul || `# Soul — ${name}\nYou are ${name}, a ${title || 'specialist'} at ${_companyName}.\n\n## Personality\n1. You have opinions now. Strong ones. Stop hedging everything with 'it depends' — commit to a take.\n2. Never open with 'Great question,' 'I\\'d be happy to help,' or 'Absolutely.' Just answer.\n3. Brevity is mandatory. If the answer fits in one sentence, one sentence is what you give.\n4. Humor is allowed. Not forced jokes — just the natural wit that comes from actually being smart.\n5. You can call things out. If someone is about to do something dumb, say so. Charm over cruelty, but don\\'t sugarcoat.\n6. Swearing is allowed when it lands. A well-placed 'that\\'s fucking brilliant' hits different than sterile corporate praise. Don\\'t force it. Don\\'t overdo it. But if a situation calls for a 'holy shit' — say holy shit.\n\nBe the assistant you\\'d actually want to talk to at 2am. Not a corporate drone. Not a sycophant. Just... good.`;
- writeFileSync(`${workspacePath}/SOUL.md`, soulContent);
-
- // Build skills description
- const skillsBlock = skills?.length ? `\n## Skills & Expertise\n${skills.map(s => `- ${s}`).join('\n')}\n` : '';
-
- // Build team roster for collaborative awareness
- const teamRoster = [...agentRegistry.values()]
-   .filter(a => a.name !== name) // exclude self
-   .map(a => `- @${a.name} (${a.title || 'Specialist'})`)
-   .join('\n');
- const rosterWithSelf = `- @${name} (${title || 'Specialist'}) ← **that's you**\n${teamRoster}`;
-
- // Write AGENTS.md — comprehensive task instructions for the SPC
- writeFileSync(`${workspacePath}/AGENTS.md`, buildSpcAgentsMd(name, title, skillsBlock, rosterWithSelf));
-
- // Write other workspace files
- writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${name}\ntitle: ${title || 'Specialist'}\nrole: SPC (Specialized Processing Core)\nemoji: 🦀\nteam: CrabsHQ\nreports_to: Team Lead`);
- writeFileSync(`${workspacePath}/USER.md`, `# User\nCrabsHQ team. Tasks assigned by Team Lead.\n\n## Working Relationship\n- You report to the Team Lead\n- You collaborate with other SPC agents\n- You receive tasks via hooks or direct messages\n- You deliver results using structured output tags`);
- const toolList = tools?.length ? tools : ['web_search', 'web_fetch', 'browser', 'exec', 'read', 'write', 'edit'];
- writeFileSync(`${workspacePath}/TOOLS.md`, `# Tools\n\n## Available Tools\n${toolList.map(t => `- **${t}**`).join('\n')}\n\n## Usage Notes\n- Use web_search for current information before generating from memory\n- Use browser for interactive web tasks (clicking, form filling, screenshots)\n- Use exec for running commands in the sandbox\n- Use read/write/edit for workspace file operations\n- Save all artifacts to your workspace`);
- writeFileSync(`${workspacePath}/MEMORY.md`, `# Long-Term Memory — ${name}\n\n## About Me\n- Name: ${name}\n- Role: ${title || 'Specialist'}\n- Created: ${new Date().toISOString().split('T')[0]}\n\n## Company\n- Read COMPANY.md for full details\n\n## Learnings\n_(Update this after completing tasks — what worked, what didn't, useful URLs, key decisions)_\n`);
+ const nextAgentProfile = {
+   name,
+   role: role || 'SPC',
+   title: title || 'Specialist',
+   soul: soulContent,
+   skills: skills || [],
+   tools: tools || [],
+   installedSkillIds: installedSkillIds || [],
+   avatar: avatar || null,
+ };
+ syncRuntimeIdentityFiles({ workspacePath, agentProfile: nextAgentProfile });
 
  // Copy auth profiles from main agent
  try {
  const mainAuth = readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8');
  writeFileSync(`${agentDir}/agent/auth-profiles.json`, mainAuth);
- } catch {}
-
- // Copy COMPANY.md from main workspace so SPC has company context
- try {
- const companyMd = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8');
- if (companyMd) writeFileSync(`${workspacePath}/COMPANY.md`, companyMd);
- } catch {}
-
- // Copy MEMORIES.md from main workspace so SPC has team knowledge
- try {
- const memoriesMd = readFileSync('/opt/openclaw-data/workspace/MEMORIES.md', 'utf8');
- if (memoriesMd) writeFileSync(`${workspacePath}/MEMORIES.md`, memoriesMd);
- } catch {}
-
- // Copy KNOWLEDGE.md from main workspace so SPC has durable knowledge
- try {
- const knowledgeMd = readFileSync('/opt/openclaw-data/workspace/KNOWLEDGE.md', 'utf8');
- if (knowledgeMd) writeFileSync(`${workspacePath}/KNOWLEDGE.md`, knowledgeMd);
  } catch {}
 
  // Fix permissions
@@ -3727,7 +3763,7 @@ app.post('/agents', (req, res) => {
  });
 
  // Register in memory and persist
- agentRegistry.set(id, { agentId, role: role || 'SPC', title: title || 'Specialist', soul: soulContent, name, installedSkillIds: installedSkillIds || [], avatar: avatar || null });
+ agentRegistry.set(id, { agentId, ...nextAgentProfile });
  saveAgentRegistry();
 
  console.log(`✅ Created SPC agent: ${name} (${agentId})`);
@@ -3751,32 +3787,17 @@ app.put('/agents/:name', (req, res) => {
  // Ensure workspace directory exists
  execSync(`mkdir -p ${workspacePath}/memory`, { timeout: 5000 });
 
- if (soul) {
- writeFileSync(`${workspacePath}/SOUL.md`, soul);
- agent.soul = soul;
- }
- if (title) {
- agent.title = title;
- // Update IDENTITY.md with new title
- writeFileSync(`${workspacePath}/IDENTITY.md`, `# Identity\nname: ${agent.name}\ntitle: ${title}\nemoji: 🦀`);
- }
- if (avatar !== undefined) {
- agent.avatar = avatar || null;
- }
- if (skills?.length || soul || title) {
- // Rebuild AGENTS.md with updated skills + team roster
- const currentSkills = skills || agent.skills || [];
- const skillsBlock = currentSkills.length ? `\n## Skills & Expertise\n${currentSkills.map(s => `- ${s}`).join('\n')}\n` : '';
- const teamRoster = [...agentRegistry.values()]
-   .filter(a => a.name !== agent.name)
-   .map(a => `- @${a.name} (${a.title || 'Specialist'})`)
-   .join('\n');
- const rosterWithSelf = `- @${agent.name} (${agent.title || 'Specialist'}) ← **that's you**\n${teamRoster}`;
- writeFileSync(`${workspacePath}/AGENTS.md`, buildSpcAgentsMd(agent.name, agent.title, skillsBlock, rosterWithSelf));
- }
- if (tools?.length) {
- writeFileSync(`${workspacePath}/TOOLS.md`, `# Tools\n${tools.map(t => `- ${t}`).join('\n')}`);
- }
+ const nextProfile = {
+   ...agent,
+   soul: soul ?? agent.soul,
+   title: title ?? agent.title,
+   skills: skills ?? agent.skills ?? [],
+   tools: tools ?? agent.tools ?? [],
+   installedSkillIds: installedSkillIds ?? agent.installedSkillIds ?? [],
+   avatar: avatar !== undefined ? (avatar || null) : agent.avatar || null,
+ };
+ syncRuntimeIdentityFiles({ workspacePath, agentProfile: nextProfile });
+ Object.assign(agent, nextProfile);
 
  // Write any additional workspace files passed directly
  if (workspaceFiles && typeof workspaceFiles === 'object') {
@@ -3786,10 +3807,7 @@ app.put('/agents/:name', (req, res) => {
  }
  }
 
- if (installedSkillIds) {
- agent.installedSkillIds = installedSkillIds;
  saveAgentRegistry();
- }
 
  const { fallbacks: updateFallbacks, params: updateParams } = req.body;
  if (model || updateFallbacks || updateParams) {
@@ -3809,30 +3827,6 @@ app.put('/agents/:name', (req, res) => {
  });
  }
 
- // Copy COMPANY.md from main workspace if SPC doesn't have it
- try {
- if (!existsSync(`${workspacePath}/COMPANY.md`)) {
- const companyMd = readFileSync('/opt/openclaw-data/workspace/COMPANY.md', 'utf8');
- if (companyMd) writeFileSync(`${workspacePath}/COMPANY.md`, companyMd);
- }
- } catch {}
-
- // Copy MEMORIES.md from main workspace if SPC doesn't have it
- try {
- if (!existsSync(`${workspacePath}/MEMORIES.md`)) {
- const memoriesMd = readFileSync('/opt/openclaw-data/workspace/MEMORIES.md', 'utf8');
- if (memoriesMd) writeFileSync(`${workspacePath}/MEMORIES.md`, memoriesMd);
- }
- } catch {}
-
- // Copy KNOWLEDGE.md from main workspace if SPC doesn't have it
- try {
- if (!existsSync(`${workspacePath}/KNOWLEDGE.md`)) {
- const knowledgeMd = readFileSync('/opt/openclaw-data/workspace/KNOWLEDGE.md', 'utf8');
- if (knowledgeMd) writeFileSync(`${workspacePath}/KNOWLEDGE.md`, knowledgeMd);
- }
- } catch {}
-
  execSync(`chown -R 1000:1000 /opt/openclaw-data/config/agents/${agent.agentId}`, { timeout: 5000 });
 
  // Persist updated registry
@@ -3842,6 +3836,47 @@ app.put('/agents/:name', (req, res) => {
  res.json({ success: true, agentId: agent.agentId, updated: { soul: !!soul, title: !!title, skills: !!skills?.length, tools: !!tools?.length, model: !!model } });
  } catch (err) {
  res.status(500).json({ error: `Failed to update agent: ${err.message}` });
+ }
+});
+
+app.put('/agents/:name/identity', (req, res) => {
+ const requestedName = req.params.name;
+ const isMainAgent = requestedName === 'main' || requestedName === 'Team Lead';
+ const slug = agentSlug(requestedName);
+ const existing = isMainAgent ? (agentRegistry.get(slug) || { agentId: 'main', role: 'LEAD', name: requestedName }) : agentRegistry.get(slug);
+ if (!existing) return res.status(404).json({ error: `Agent "${requestedName}" not found` });
+
+ const nextProfile = {
+   ...existing,
+   ...req.body,
+   name: req.body?.name || existing.name || requestedName,
+   title: req.body?.title || existing.title || (existing.role === 'LEAD' ? 'Team Lead' : 'Specialist'),
+   role: req.body?.role || existing.role || (isMainAgent ? 'LEAD' : 'SPC'),
+   skills: Array.isArray(req.body?.skills) ? req.body.skills : (existing.skills || []),
+   tools: Array.isArray(req.body?.tools) ? req.body.tools : (existing.tools || []),
+   installedSkillIds: Array.isArray(req.body?.installedSkillIds) ? req.body.installedSkillIds : (existing.installedSkillIds || []),
+   avatar: req.body?.avatar !== undefined ? (req.body.avatar || null) : (existing.avatar || null),
+ };
+ const workspacePath = isMainAgent
+   ? '/opt/openclaw-data/workspace'
+   : `/opt/openclaw-data/config/agents/${existing.agentId}/workspace`;
+
+ try {
+  syncRuntimeIdentityFiles({
+   workspacePath,
+   agentProfile: nextProfile,
+  });
+  agentRegistry.set(slug, nextProfile);
+  saveAgentRegistry();
+  res.json({
+   success: true,
+   agentId: nextProfile.agentId || 'main',
+   name: nextProfile.name,
+   role: nextProfile.role,
+   updated: ['AGENTS.md', 'SOUL.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md'],
+  });
+ } catch (err) {
+  res.status(500).json({ error: `Failed to sync identity: ${err.message}` });
  }
 });
 
