@@ -2558,6 +2558,7 @@ async function handleIncomingTask(req, res) {
  const nonStreamLanePrompt = buildExecutionLanePromptBlock({
  executionLane: context?.executionLane,
  browserTask: context?.browserTask === true,
+ projectRef: context?.projectRef || null,
  });
  if (nonStreamLanePrompt) {
  nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${nonStreamLanePrompt}` : nonStreamLanePrompt;
@@ -2702,6 +2703,7 @@ async function handleIncomingTaskStream(req, res) {
  const executionLanePrompt = buildExecutionLanePromptBlock({
  executionLane: context?.executionLane,
  browserTask: isBrowserTask,
+ projectRef: context?.projectRef || null,
  });
  if (executionLanePrompt) {
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${executionLanePrompt}` : executionLanePrompt;
