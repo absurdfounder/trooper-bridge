@@ -46,6 +46,12 @@ import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
 import { buildExecutionLanePromptBlock, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
+import {
+  formatProviderLogLabel,
+  readConfiguredDefaultModelId,
+  resolveProviderRuntimeContext,
+  stripGatewayErrorPrefix,
+} from './lib/provider-runtime.mjs';
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
@@ -1185,7 +1191,8 @@ class OpenClawGateway {
 
  const textChunks = [];
  let lastToolTextSnapshot = ''; // text snapshot at last tool boundary
- if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: opts.model || null, time: Date.now() });
+ const effectiveRequestedModel = opts.model || readConfiguredDefaultModelId() || null;
+ if (onEvent) onEvent('model_start', { eventType: 'model_start', confidence: 'native', model: effectiveRequestedModel, time: Date.now() });
  const toolLog = [];
  let lifecycleDepth = 0; // track nested lifecycle start/end for sub-agent detection
  let emittedMainRunStart = false;
@@ -1511,10 +1518,14 @@ function extractPatchFilePaths(patchText = '') {
  }
  // Gateway auth/provider error — forward immediately and terminate
  if (stream === 'lifecycle' && data?.phase === 'error') {
- const errMsg = data.error || 'Gateway error';
- const errorModel = data.model || opts.model || null;
- const errorProvider = data.provider || (typeof errorModel === 'string' && errorModel.includes('/') ? errorModel.split('/')[0] : null);
- console.error(`[OpenClaw] Gateway lifecycle error: ${errMsg}`);
+ const errMsg = stripGatewayErrorPrefix(data.error || 'Gateway error') || 'Gateway error';
+ const { provider: errorProvider, model: errorModel } = resolveProviderRuntimeContext({
+ provider: data.provider || null,
+ model: data.model || null,
+ fallbackModel: effectiveRequestedModel,
+ error: errMsg,
+ });
+ console.error(`[OpenClaw] Gateway lifecycle error ${formatProviderLogLabel({ provider: errorProvider, model: errorModel })}: ${errMsg}`);
  if (onEvent) onEvent('error', { message: errMsg, provider: errorProvider, model: errorModel });
  // Reject the pending request so the SSE stream terminates immediately
  // Try by runId first, then scan all pending requests
@@ -2868,7 +2879,7 @@ if (endSession) {
  } else if (completedMatch) {
    sendSSE('outcome', { type: 'completed', detail: (completedMatch[1] || '').trim() });
  }
- sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: model || null, time: Date.now() });
+ sendSSE('model_done', { eventType: 'model_done', confidence: 'native', model: model || readConfiguredDefaultModelId() || null, time: Date.now() });
  recordRun();
  captureLog('info', `Run completed: ${agentName || 'default'} (${(responseText || '').length} chars)`, { requestId: id, agent: agentName, model });
 
@@ -2957,7 +2968,14 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
 
  console.error(`[${id}] SSE agent failed: ${err.message}`);
  captureLog('error', `SSE agent failed: ${err.message}`, { requestId: id, agent: agentName, stack: err.stack });
- sendSSE('error', { message: err.message, requestId: id });
+ const errMessage = stripGatewayErrorPrefix(err.message) || 'Bridge error';
+ const { provider: errorProvider, model: errorModel } = resolveProviderRuntimeContext({
+  provider: err.provider || null,
+  model: err.model || null,
+  fallbackModel: model || null,
+  error: errMessage,
+ });
+ sendSSE('error', { message: errMessage, requestId: id, provider: errorProvider, model: errorModel });
  } finally {
  if (screenshotPollerInterval) {
  clearInterval(screenshotPollerInterval);
