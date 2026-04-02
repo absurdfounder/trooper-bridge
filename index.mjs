@@ -1512,8 +1512,10 @@ function extractPatchFilePaths(patchText = '') {
  // Gateway auth/provider error — forward immediately and terminate
  if (stream === 'lifecycle' && data?.phase === 'error') {
  const errMsg = data.error || 'Gateway error';
+ const errorModel = data.model || opts.model || null;
+ const errorProvider = data.provider || (typeof errorModel === 'string' && errorModel.includes('/') ? errorModel.split('/')[0] : null);
  console.error(`[OpenClaw] Gateway lifecycle error: ${errMsg}`);
- if (onEvent) onEvent('error', { message: errMsg });
+ if (onEvent) onEvent('error', { message: errMsg, provider: errorProvider, model: errorModel });
  // Reject the pending request so the SSE stream terminates immediately
  // Try by runId first, then scan all pending requests
  let pendingEntry = null;
@@ -1527,7 +1529,10 @@ function extractPatchFilePaths(patchText = '') {
   pendingEntry = { id: lastKey, ...lastP };
  }
  if (pendingEntry?.reject) {
-  pendingEntry.reject(new Error(`Gateway error: ${errMsg}`));
+  const gatewayError = new Error(`Gateway error: ${errMsg}`);
+  gatewayError.provider = errorProvider;
+  gatewayError.model = errorModel;
+  pendingEntry.reject(gatewayError);
   this._pendingRequests.delete(pendingEntry.id);
  }
  }
