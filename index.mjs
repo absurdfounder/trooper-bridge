@@ -2695,7 +2695,30 @@ async function handleIncomingTaskStream(req, res) {
  const requestStartedAt = Date.now();
  sendSSE('start', { requestId: id, agentId, agentName: agentName || 'default' });
 
- let screenshotPollerInterval = null;
+let screenshotPollerInterval = null;
+let browserSessionActive = false;
+let browserSessionId = null;
+
+const emitViewportScreenshotFrame = ({
+ action = 'Visible browser viewport',
+ label = 'Visible browser viewport',
+} = {}) => {
+ const viewportFrame = captureViewportFrame(':99');
+ if (!viewportFrame) return false;
+ try {
+  sendSSE('screenshot_frame', buildScreenshotFramePayload({
+   base64: viewportFrame.base64,
+   timestamp: Date.now(),
+   action,
+   label,
+   captureKind: 'viewport',
+   geometry: viewportFrame.geometry,
+  }));
+  return true;
+ } catch {
+  return false;
+ }
+};
 
  const isBrowserTask = context?.browserTask === true;
  let resolvedSystemPrompt = registered?.soul
@@ -2754,39 +2777,33 @@ async function handleIncomingTaskStream(req, res) {
    domain = navUrl ? new URL(navUrl.startsWith('http') ? navUrl : `https://${navUrl}`).hostname : '';
   } catch {}
 
-  // Start screen recording for browser sessions
+ // Start screen recording for browser sessions
   startBrowserRecording();
+  browserSessionActive = true;
 
   // Priority: skill-reported live view > VNC > screenshot polling
   const skillSession = getSkillBrowserSession();
   if (skillSession?.liveViewUrl) {
+   browserSessionId = skillSession.sessionId || browserSessionId || null;
    sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: skillSession.liveViewUrl, sessionId: skillSession.sessionId, domain, provider: skillSession.provider }));
    console.log(`[browser-session] Sent skill-reported live view URL to client: ${skillSession.liveViewUrl}`);
+   emitViewportScreenshotFrame();
   } else if (getVNCLiveViewUrl() && isVNCAvailable()) {
    sendSSE('browser_session', buildBrowserSessionPayload({ liveViewUrl: getVNCLiveViewUrl(), domain, provider: 'vnc' }));
    console.log('[VNC] Sent live view URL to client');
+   emitViewportScreenshotFrame();
   } else {
    // Emit browser_session event so frontend knows a browser session started (screenshot polling mode)
    sendSSE('browser_session', buildBrowserSessionPayload({ domain, provider: 'screenshot' }));
-   console.log('[screenshot] Browser session started — polling screenshots from container');
-   // Fallback: poll screenshots from container every 1.5s
-   // Search both the media root and common subdirs where screenshots may be saved
+   console.log('[screenshot] Browser session started — polling the live viewport');
+   emitViewportScreenshotFrame();
+   // Fallback: capture the real 1920x1080 browser viewport every 1.5s.
    screenshotPollerInterval = setInterval(() => {
     if (res.writableEnded) {
      if (screenshotPollerInterval) clearInterval(screenshotPollerInterval);
      return;
     }
-    try {
-     const out = execSync(
-      `docker exec openclaw-openclaw-gateway-1 bash -c 'find /home/node/.openclaw/media/ /tmp/ -maxdepth 2 -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.webp" 2>/dev/null | head -20 | xargs -r ls -t 2>/dev/null | head -1 | xargs -r base64 -w0'`,
-      { timeout: 5000, maxBuffer: 2 * 1024 * 1024 }
-     ).toString().trim();
-     if (out && out.length > 100) {
-      sendSSE('screenshot_frame', buildScreenshotFramePayload({ base64: out, timestamp: Date.now() }));
-     }
-    } catch (e) {
-     /* ignore */
-    }
+    emitViewportScreenshotFrame();
    }, 1500);
   }
  }
@@ -2815,31 +2832,14 @@ const recordingUrl = recordingPath ? `/files${recordingPath}` : null;
 const desktopRecordingUrl = desktopRecordingPath ? `/files${desktopRecordingPath}` : null;
 
 const endSession = getSkillBrowserSession();
-const shouldCaptureViewportFrame = Boolean(
- endSession?.liveViewUrl || (isBrowserTask && getVNCLiveViewUrl() && isVNCAvailable())
-);
-if (shouldCaptureViewportFrame) {
- const viewportFrame = captureViewportFrame(':99');
- if (viewportFrame) {
-  try {
-   sendSSE('screenshot_frame', buildScreenshotFramePayload({
-    base64: viewportFrame.base64,
-    timestamp: Date.now(),
-    action: 'Visible browser viewport',
-    label: 'Visible browser viewport',
-    captureKind: 'viewport',
-    geometry: viewportFrame.geometry,
-   }));
-  } catch {}
- }
-}
+if (browserSessionActive) emitViewportScreenshotFrame();
 
 // Signal browser session end
 if (endSession) {
  try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: endSession.sessionId, recordingUrl })); } catch {}
  clearSkillBrowserSession();
-} else if (isBrowserTask) {
- try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ recordingUrl })); } catch {}
+} else if (browserSessionActive || isBrowserTask) {
+ try { sendSSE('browser_session_end', buildBrowserSessionEndPayload({ sessionId: browserSessionId, recordingUrl })); } catch {}
  }
 
  // Send final done event with complete result + tool log
