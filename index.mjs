@@ -44,7 +44,6 @@ import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, add
 import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
-import { registerAppRoutes } from './lib/app-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
 import { buildExecutionLanePromptBlock, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
 import {
@@ -6894,8 +6893,6 @@ registerApiRoutes(app, {
   setCompanyDocs: (docs) => { cachedCompanyDocs = docs; },
 });
 
-// ── App routes (app = database table + routines) ─────────────────────
-registerAppRoutes(app);
 
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
