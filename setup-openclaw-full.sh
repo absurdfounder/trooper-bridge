@@ -2547,6 +2547,17 @@ fi
 touch /tmp/openclaw-setup-complete
 touch /opt/openclaw-bridge/.setup-complete
 
+# ── Security: scrub sensitive data from cloud-init and environment ──
+# Cloud-init user data may contain CF_API_TOKEN and other secrets.
+# Remove it so VPS operators can't read it after setup.
+echo "Scrubbing sensitive cloud-init data..."
+rm -f /var/lib/cloud/instance/user-data.txt 2>/dev/null || true
+rm -f /var/lib/cloud/instance/scripts/runcmd 2>/dev/null || true
+rm -f /var/lib/cloud/instance/scripts/part-001 2>/dev/null || true
+# Clear the CF token from this process's environment (it's only needed during setup)
+unset CF_API_TOKEN 2>/dev/null || true
+echo "Sensitive data scrubbed"
+
 # ── Deploy-complete callback ──
 # Notify CrabsHQ central API that setup is finished so it can run post-install
 # finalization (DNS, workspace push, API keys) without polling for 30 minutes.
