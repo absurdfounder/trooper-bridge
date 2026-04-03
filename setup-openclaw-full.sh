@@ -2499,8 +2499,9 @@ if command -v ufw &> /dev/null; then
   ufw allow 22/tcp >/dev/null 2>&1      # SSH
   ufw allow 80/tcp >/dev/null 2>&1      # HTTP (Caddy redirect)
   ufw allow 443/tcp >/dev/null 2>&1     # HTTPS (Caddy)
+  ufw allow ${BRIDGE_PORT}/tcp >/dev/null 2>&1  # Bridge API (has its own auth via BRIDGE_AUTH_TOKEN)
   ufw --force enable >/dev/null 2>&1
-  echo "Firewall: enabled (22, 80, 443 open; all others blocked)"
+  echo "Firewall: enabled (22, 80, 443, ${BRIDGE_PORT} open; VNC/gateway/desktop blocked)"
 else
   apt-get install -y -qq ufw >/dev/null 2>&1
   ufw --force reset >/dev/null 2>&1
@@ -2509,6 +2510,7 @@ else
   ufw allow 22/tcp >/dev/null 2>&1
   ufw allow 80/tcp >/dev/null 2>&1
   ufw allow 443/tcp >/dev/null 2>&1
+  ufw allow ${BRIDGE_PORT}/tcp >/dev/null 2>&1
   ufw --force enable >/dev/null 2>&1
   echo "Firewall: installed and enabled"
 fi
