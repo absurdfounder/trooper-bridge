@@ -10,29 +10,40 @@ set -e
 trap 'EXIT_CODE=$?; FAIL_LINE=$LINENO; dlog "Setup failed at line ${FAIL_LINE} (exit ${EXIT_CODE}). Disk: $(df -h /var/lib/docker 2>/dev/null | tail -1 | awk "{print \$4}") free. Docker: $(docker ps -q 2>/dev/null | wc -l) containers." "failed"; exit ${EXIT_CODE}' ERR
 
 # Use env vars if set, otherwise fall back to template placeholders (for cloud-init mode).
+# Avoid bash ${VAR:-{{PLACEHOLDER}}} because the trailing braces leak into the value.
+_resolve_input() {
+  local current_value="$1"
+  local template_value="$2"
+  if [ -n "$current_value" ]; then
+    printf '%s' "$current_value"
+  else
+    printf '%s' "$template_value"
+  fi
+}
+
 # Template placeholders like {{GATEWAY_TOKEN}} are replaced by provision.js via sed.
-GATEWAY_TOKEN="${GATEWAY_TOKEN:-{{GATEWAY_TOKEN}}}"
-OPENAI_API_KEY="${OPENAI_API_KEY:-{{OPENAI_API_KEY}}}"
-ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-{{ANTHROPIC_API_KEY}}}"
-GEMINI_API_KEY="${GEMINI_API_KEY:-{{GEMINI_API_KEY}}}"
-OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-{{OPENROUTER_API_KEY}}}"
-BRAVE_API_KEY="${BRAVE_API_KEY:-{{BRAVE_API_KEY}}}"
-BRIDGE_PORT="${BRIDGE_PORT:-{{BRIDGE_PORT}}}"
-ORG_ID="${ORG_ID:-{{ORG_ID}}}"
-SSH_PUBKEY="${SSH_PUBKEY:-{{SSH_PUBKEY}}}"
-OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-{{OPENCLAW_DOCKER_IMAGE}}}"
-BRIDGE_AUTH_TOKEN="${BRIDGE_AUTH_TOKEN:-{{BRIDGE_AUTH_TOKEN}}}"
+GATEWAY_TOKEN="$(_resolve_input "${GATEWAY_TOKEN:-}" "{{GATEWAY_TOKEN}}")"
+OPENAI_API_KEY="$(_resolve_input "${OPENAI_API_KEY:-}" "{{OPENAI_API_KEY}}")"
+ANTHROPIC_API_KEY="$(_resolve_input "${ANTHROPIC_API_KEY:-}" "{{ANTHROPIC_API_KEY}}")"
+GEMINI_API_KEY="$(_resolve_input "${GEMINI_API_KEY:-}" "{{GEMINI_API_KEY}}")"
+OPENROUTER_API_KEY="$(_resolve_input "${OPENROUTER_API_KEY:-}" "{{OPENROUTER_API_KEY}}")"
+BRAVE_API_KEY="$(_resolve_input "${BRAVE_API_KEY:-}" "{{BRAVE_API_KEY}}")"
+BRIDGE_PORT="$(_resolve_input "${BRIDGE_PORT:-}" "{{BRIDGE_PORT}}")"
+ORG_ID="$(_resolve_input "${ORG_ID:-}" "{{ORG_ID}}")"
+SSH_PUBKEY="$(_resolve_input "${SSH_PUBKEY:-}" "{{SSH_PUBKEY}}")"
+OPENCLAW_DOCKER_IMAGE="$(_resolve_input "${OPENCLAW_DOCKER_IMAGE:-}" "{{OPENCLAW_DOCKER_IMAGE}}")"
+BRIDGE_AUTH_TOKEN="$(_resolve_input "${BRIDGE_AUTH_TOKEN:-}" "{{BRIDGE_AUTH_TOKEN}}")"
 GATEWAY_PORT=18789
 MEDIA_PORT=18791
-API_URL="${API_URL:-{{API_URL}}}"
-COMPOSIO_API_KEY="${COMPOSIO_API_KEY:-{{COMPOSIO_API_KEY}}}"
-CF_API_TOKEN="${CF_API_TOKEN:-{{CF_API_TOKEN}}}"
-PRIMARY_PROVIDER="${PRIMARY_PROVIDER:-{{PRIMARY_PROVIDER}}}"
-PRIMARY_MODEL="${PRIMARY_MODEL:-{{PRIMARY_MODEL}}}"
-BROWSERBASE_API_KEY="${BROWSERBASE_API_KEY:-{{BROWSERBASE_API_KEY}}}"
-BROWSERBASE_PROJECT_ID="${BROWSERBASE_PROJECT_ID:-{{BROWSERBASE_PROJECT_ID}}}"
-RUNTIME_AUTH_SECRET="${RUNTIME_AUTH_SECRET:-{{RUNTIME_AUTH_SECRET}}}"
-CRABHQ_RUNTIME_TARBALL_URL="${CRABHQ_RUNTIME_TARBALL_URL:-{{CRABHQ_RUNTIME_TARBALL_URL}}}"
+API_URL="$(_resolve_input "${API_URL:-}" "{{API_URL}}")"
+COMPOSIO_API_KEY="$(_resolve_input "${COMPOSIO_API_KEY:-}" "{{COMPOSIO_API_KEY}}")"
+CF_API_TOKEN="$(_resolve_input "${CF_API_TOKEN:-}" "{{CF_API_TOKEN}}")"
+PRIMARY_PROVIDER="$(_resolve_input "${PRIMARY_PROVIDER:-}" "{{PRIMARY_PROVIDER}}")"
+PRIMARY_MODEL="$(_resolve_input "${PRIMARY_MODEL:-}" "{{PRIMARY_MODEL}}")"
+BROWSERBASE_API_KEY="$(_resolve_input "${BROWSERBASE_API_KEY:-}" "{{BROWSERBASE_API_KEY}}")"
+BROWSERBASE_PROJECT_ID="$(_resolve_input "${BROWSERBASE_PROJECT_ID:-}" "{{BROWSERBASE_PROJECT_ID}}")"
+RUNTIME_AUTH_SECRET="$(_resolve_input "${RUNTIME_AUTH_SECRET:-}" "{{RUNTIME_AUTH_SECRET}}")"
+CRABHQ_RUNTIME_TARBALL_URL="$(_resolve_input "${CRABHQ_RUNTIME_TARBALL_URL:-}" "{{CRABHQ_RUNTIME_TARBALL_URL}}")"
 CRABHQ_RUNTIME_PORT=3101
 CRABHQ_RUNTIME_DATA_DIR=/var/lib/crabhq-org-runtime
 
