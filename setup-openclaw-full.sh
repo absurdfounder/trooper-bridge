@@ -2006,7 +2006,7 @@ http.createServer(async (req, res) => {
  res.writeHead(500);
  res.end(JSON.stringify({ error: String(err) }));
  }
-}).listen(PORT, '0.0.0.0', () => console.log(`[desktop-api] :${PORT}`));
+}).listen(PORT, '127.0.0.1', () => console.log(`[desktop-api] :${PORT} (localhost only)`));
 JSEOF
 echo "[setup] Desktop control API written"
 
@@ -2485,6 +2485,63 @@ run_cmd systemctl start crabhq-desktop
 run_cmd systemctl start crabhq-desktop-api
 run_cmd systemctl start crabhq-playwright
 run_cmd systemctl restart caddy 2>/dev/null || true
+
+# ── Security hardening ──
+dlog "Configuring firewall and permissions..."
+
+# Firewall: only allow SSH (22), HTTP (80), HTTPS (443) from the internet.
+# All other ports (3002 bridge, 5999 VNC, 6080 noVNC, 18789 gateway, 4567 desktop API)
+# are blocked from external access — only accessible via localhost or Caddy reverse proxy.
+if command -v ufw &> /dev/null; then
+  ufw --force reset >/dev/null 2>&1
+  ufw default deny incoming >/dev/null 2>&1
+  ufw default allow outgoing >/dev/null 2>&1
+  ufw allow 22/tcp >/dev/null 2>&1      # SSH
+  ufw allow 80/tcp >/dev/null 2>&1      # HTTP (Caddy redirect)
+  ufw allow 443/tcp >/dev/null 2>&1     # HTTPS (Caddy)
+  ufw --force enable >/dev/null 2>&1
+  echo "Firewall: enabled (22, 80, 443 open; all others blocked)"
+else
+  apt-get install -y -qq ufw >/dev/null 2>&1
+  ufw --force reset >/dev/null 2>&1
+  ufw default deny incoming >/dev/null 2>&1
+  ufw default allow outgoing >/dev/null 2>&1
+  ufw allow 22/tcp >/dev/null 2>&1
+  ufw allow 80/tcp >/dev/null 2>&1
+  ufw allow 443/tcp >/dev/null 2>&1
+  ufw --force enable >/dev/null 2>&1
+  echo "Firewall: installed and enabled"
+fi
+
+# Fix file permissions: secrets should be owner-only readable
+chmod 600 /opt/openclaw/.env 2>/dev/null || true
+chmod 600 /opt/openclaw-data/config/openclaw.json 2>/dev/null || true
+chmod 600 /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true
+chmod 600 /opt/openclaw-data/config/auth-profiles.json 2>/dev/null || true
+# Devices and cron dirs: owner-only (not world-writable)
+chmod 700 /opt/openclaw-data/config/devices 2>/dev/null || true
+chmod 600 /opt/openclaw-data/config/devices/*.json 2>/dev/null || true
+chmod 700 /opt/openclaw-data/config/cron 2>/dev/null || true
+chmod 600 /opt/openclaw-data/config/cron/*.json 2>/dev/null || true
+chmod 700 /opt/openclaw-data/config/cron/runs 2>/dev/null || true
+echo "File permissions: hardened"
+
+# Configure unattended-upgrades for automatic security updates
+cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UUCFG'
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+UUCFG
+cat > /etc/apt/apt.conf.d/20auto-upgrades << 'AUOCFG'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+AUOCFG
+echo "Unattended security upgrades: configured"
+
+dlog "Security hardening complete"
 
 # Brief settle time, then verify
 sleep 3

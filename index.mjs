@@ -7111,6 +7111,7 @@ registerApiRoutes(app, {
   setCompanyDocs: (docs) => { cachedCompanyDocs = docs; },
 });
 
+
 // ── Start Server ─────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
  console.log(`OpenClaw Bridge v2.1 on :${PORT} (HTTP + WS) | DirectBridge: enabled | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
