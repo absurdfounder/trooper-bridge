@@ -527,9 +527,17 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '5mb' }));
 
-// Auth middleware — exempt health/deploy-logs (needed during provisioning)
+// Auth middleware — exempt only health/deploy-logs (needed during provisioning before auth is configured)
 app.use((req, res, next) => {
- if (req.path === '/health' || req.path === '/system-stats' || req.path === '/deploy-logs' || req.path === '/deploy-logs-raw' || req.path === '/files' || req.path === '/llm/vision' || req.path.startsWith('/api/') || req.path.startsWith('/files/') || req.path.startsWith('/desktop-api/') || req.path.startsWith('/debug/') || req.path.startsWith('/admin/')) return next();
+ if (req.path === '/health' || req.path === '/healthz' || req.path === '/readyz' || req.path === '/system-stats' || req.path === '/deploy-logs' || req.path === '/deploy-logs-raw') return next();
+ // /api/* routes have their own Firebase auth middleware (applied below)
+ if (req.path.startsWith('/api/')) return next();
+ // Files needed during provisioning for workspace push
+ if (req.path === '/files' || req.path.startsWith('/files/') || req.path === '/llm/vision') return next();
+ // Desktop API is localhost-only (bound to 127.0.0.1), safe to skip here
+ if (req.path.startsWith('/desktop-api/')) return next();
+ // Everything else (including /admin/*, /debug/*, /gateway/*, /agents/*, /config/*,
+ // /webhook/*, /cron/*, /skills/*, /recording/*) requires bridge auth token
  if (!BRIDGE_AUTH_TOKEN) return next();
  const token = req.headers.authorization?.replace('Bearer ', '');
  if (token !== BRIDGE_AUTH_TOKEN) return res.status(401).json({ error: 'Unauthorized' });
