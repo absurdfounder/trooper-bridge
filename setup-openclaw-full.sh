@@ -1847,6 +1847,71 @@ echo "Desktop stopped"
 DSTOP
 chmod +x /usr/local/bin/crabhq-desktop-stop
 
+# ── Self-hosted management scripts ──
+cat > /usr/local/bin/crabhq-update << 'CUPDATE'
+#!/bin/bash
+set -e
+echo "Updating CrabsHQ services..."
+cd /opt/openclaw
+echo "Pulling latest Docker images..."
+docker compose pull
+echo "Restarting Docker containers..."
+docker compose down
+docker compose up -d
+echo "Restarting bridge..."
+systemctl restart openclaw-bridge 2>/dev/null || true
+echo "Restarting Caddy..."
+systemctl restart caddy 2>/dev/null || true
+# Wait for bridge health
+for i in $(seq 1 30); do
+  if curl -sf http://127.0.0.1:${BRIDGE_PORT:-3002}/health | grep -q ok 2>/dev/null; then
+    echo "Bridge healthy after ${i}s"
+    break
+  fi
+  sleep 1
+done
+echo "Update complete."
+CUPDATE
+chmod +x /usr/local/bin/crabhq-update
+
+cat > /usr/local/bin/crabhq-restart << 'CRESTART'
+#!/bin/bash
+set -e
+echo "Restarting CrabsHQ services..."
+systemctl restart openclaw-docker 2>/dev/null || (cd /opt/openclaw && docker compose down && docker compose up -d)
+systemctl restart openclaw-bridge 2>/dev/null || true
+systemctl restart crabhq-org-runtime 2>/dev/null || true
+systemctl restart caddy 2>/dev/null || true
+echo "Restart complete. Checking health..."
+sleep 3
+if curl -sf http://127.0.0.1:${BRIDGE_PORT:-3002}/health | grep -q ok 2>/dev/null; then
+  echo "Bridge: HEALTHY"
+else
+  echo "Bridge: NOT READY (may need a few more seconds)"
+fi
+CRESTART
+chmod +x /usr/local/bin/crabhq-restart
+
+cat > /usr/local/bin/crabhq-status << 'CSTATUS'
+#!/bin/bash
+echo "=== CrabsHQ Service Status ==="
+echo ""
+for svc in openclaw-docker openclaw-bridge crabhq-org-runtime caddy openclaw-vnc openclaw-poller; do
+  STATUS=$(systemctl is-active "$svc" 2>/dev/null || echo "not-found")
+  printf "  %-25s %s\n" "$svc" "$STATUS"
+done
+echo ""
+echo "=== Docker Containers ==="
+docker ps --format "  {{.Names}}\t{{.Status}}" 2>/dev/null || echo "  (docker not available)"
+echo ""
+echo "=== Bridge Health ==="
+curl -sf http://127.0.0.1:${BRIDGE_PORT:-3002}/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "  Bridge not responding"
+echo ""
+echo "=== Disk Usage ==="
+df -h / | tail -1 | awk '{print "  Used: "$3" / "$2"  ("$5" full)  Available: "$4}'
+CSTATUS
+chmod +x /usr/local/bin/crabhq-status
+
 # Desktop control API — Node.js HTTP server on port 4567
 mkdir -p /opt/crabhq-desktop-api
 cat > /opt/crabhq-desktop-api/server.mjs << 'JSEOF'
@@ -2451,5 +2516,28 @@ fi
 # /tmp marker is ephemeral; /opt marker persists across reboots
 touch /tmp/openclaw-setup-complete
 touch /opt/openclaw-bridge/.setup-complete
+
+# ── Deploy-complete callback ──
+# Notify CrabsHQ central API that setup is finished so it can run post-install
+# finalization (DNS, workspace push, API keys) without polling for 30 minutes.
+if [ -n "${API_URL:-}" ] && [ -n "${ORG_ID:-}" ] && [ -n "${GATEWAY_TOKEN:-}" ]; then
+  _my_ip=$(curl -sf --max-time 5 ifconfig.me 2>/dev/null || echo "")
+  dlog "Sending deploy-complete callback to ${API_URL}..."
+  for _cb_attempt in 1 2 3 4 5; do
+    _cb_status=$(curl -sf -X POST "${API_URL}/api/deploy-complete/${ORG_ID}" \
+      -H "Content-Type: application/json" \
+      -d "{\"ip\":\"${_my_ip}\",\"bridgePort\":${BRIDGE_PORT},\"status\":\"ready\",\"token\":\"${GATEWAY_TOKEN}\"}" \
+      --max-time 10 \
+      -o /dev/null -w "%{http_code}" 2>/dev/null || echo "000")
+    if [ "$_cb_status" = "200" ]; then
+      dlog "Deploy-complete callback sent successfully"
+      break
+    fi
+    dlog "Deploy-complete callback failed (HTTP ${_cb_status}, attempt ${_cb_attempt}/5), retrying in 5s..."
+    sleep 5
+  done
+else
+  echo "Skipping deploy-complete callback (API_URL, ORG_ID, or GATEWAY_TOKEN not set)"
+fi
 
 echo done

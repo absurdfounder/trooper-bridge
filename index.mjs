@@ -3256,6 +3256,172 @@ app.get('/admin/stats', (req, res) => {
  res.json(getStats());
 });
 
+// ── Admin: Service Management ────────────────────────────────────────────
+
+// Helper: verify bridge auth token for admin endpoints
+function requireBridgeAuth(req, res) {
+ if (!BRIDGE_AUTH_TOKEN) return true; // no token configured = dev mode
+ const token = req.headers.authorization?.replace('Bearer ', '');
+ if (token === BRIDGE_AUTH_TOKEN) return true;
+ res.status(401).json({ error: 'Unauthorized — bridge auth token required' });
+ return false;
+}
+
+// POST /admin/restart-services — restart Docker containers without data loss
+app.post('/admin/restart-services', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const results = [];
+
+   // Restart Docker containers (openclaw gateway)
+   try {
+     execSync('cd /opt/openclaw && docker compose down 2>&1', { timeout: 30000 });
+     results.push({ service: 'openclaw-gateway', action: 'stopped' });
+   } catch (e) {
+     results.push({ service: 'openclaw-gateway', action: 'stop-failed', error: e.message });
+   }
+
+   try {
+     execSync('cd /opt/openclaw && docker compose up -d 2>&1', { timeout: 60000 });
+     results.push({ service: 'openclaw-gateway', action: 'started' });
+   } catch (e) {
+     results.push({ service: 'openclaw-gateway', action: 'start-failed', error: e.message });
+   }
+
+   // Restart bridge service (if under systemd)
+   try {
+     execSync('systemctl restart openclaw-bridge 2>/dev/null', { timeout: 10000 });
+     results.push({ service: 'openclaw-bridge', action: 'restarted' });
+   } catch {
+     results.push({ service: 'openclaw-bridge', action: 'not-under-systemd' });
+   }
+
+   // Restart Caddy
+   try {
+     execSync('systemctl restart caddy 2>/dev/null', { timeout: 10000 });
+     results.push({ service: 'caddy', action: 'restarted' });
+   } catch {
+     results.push({ service: 'caddy', action: 'restart-skipped' });
+   }
+
+   res.json({ ok: true, results });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// POST /admin/backup — create a local backup tarball of all user data
+app.post('/admin/backup', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const backupDir = '/opt/openclaw-backup';
+   const timestamp = Date.now();
+   const backupFile = `${backupDir}/backup-${timestamp}.tar.gz`;
+
+   // Ensure backup directory exists
+   execSync(`mkdir -p ${backupDir}`, { timeout: 5000 });
+
+   // Build list of paths to back up (only include existing ones)
+   const paths = [
+     '/opt/openclaw-data/bridge.db',
+     '/opt/openclaw-bridge/bridge.db',
+     '/opt/openclaw-data/workspace',
+     '/opt/openclaw-data/config',
+     '/opt/openclaw-bridge/data',
+   ].filter(p => existsSync(p));
+
+   if (paths.length === 0) {
+     return res.status(400).json({ error: 'No data paths found to back up' });
+   }
+
+   execSync(`tar -czf ${backupFile} ${paths.join(' ')} 2>/dev/null`, { timeout: 120000 });
+
+   const stats = statSync(backupFile);
+   console.log(`[admin] Backup created: ${backupFile} (${(stats.size / 1024 / 1024).toFixed(2)} MB)`);
+
+   // Clean up old backups (keep last 5)
+   try {
+     const files = readdirSync(backupDir)
+       .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+       .sort()
+       .reverse();
+     for (const f of files.slice(5)) {
+       execSync(`rm -f ${backupDir}/${f}`, { timeout: 5000 });
+     }
+   } catch {}
+
+   res.json({
+     ok: true,
+     path: backupFile,
+     size: stats.size,
+     sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+     timestamp,
+   });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// POST /admin/restore — restore from a local backup tarball
+app.post('/admin/restore', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const backupDir = '/opt/openclaw-backup';
+   let backupFile = req.body?.path;
+
+   // If no specific path, use latest backup
+   if (!backupFile) {
+     const files = readdirSync(backupDir)
+       .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+       .sort()
+       .reverse();
+     if (files.length === 0) {
+       return res.status(404).json({ error: 'No backups found' });
+     }
+     backupFile = `${backupDir}/${files[0]}`;
+   }
+
+   if (!existsSync(backupFile)) {
+     return res.status(404).json({ error: `Backup file not found: ${backupFile}` });
+   }
+
+   console.log(`[admin] Restoring from: ${backupFile}`);
+
+   // Extract backup (overwrites existing files)
+   execSync(`tar -xzf ${backupFile} -C / 2>/dev/null`, { timeout: 120000 });
+
+   console.log(`[admin] Restore complete from: ${backupFile}`);
+   res.json({ ok: true, restored: backupFile });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// GET /admin/backups — list available local backups
+app.get('/admin/backups', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const backupDir = '/opt/openclaw-backup';
+   if (!existsSync(backupDir)) return res.json({ backups: [] });
+   const files = readdirSync(backupDir)
+     .filter(f => f.startsWith('backup-') && f.endsWith('.tar.gz'))
+     .map(f => {
+       const stats = statSync(`${backupDir}/${f}`);
+       return {
+         name: f,
+         path: `${backupDir}/${f}`,
+         size: stats.size,
+         sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+         createdAt: stats.mtime.toISOString(),
+       };
+     })
+     .sort((a, b) => b.name.localeCompare(a.name));
+   res.json({ backups: files });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
 // GET /admin/raw-logs/bridge — raw bridge process stdout/stderr (journald or pm2)
 app.get('/admin/raw-logs/bridge', (req, res) => {
  const lines = parseInt(req.query.lines) || 200;
