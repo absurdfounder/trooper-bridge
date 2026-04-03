@@ -303,7 +303,54 @@ export function migrate(sqlite) {
       updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
     );
 
+    -- ── apps ──────────────────────────────────────────────────────────
+    -- An app = a database table + routines (cron jobs) that operate on it.
+    CREATE TABLE IF NOT EXISTS apps (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      description TEXT,
+      icon TEXT DEFAULT 'database',
+      table_name TEXT,
+      project_id TEXT,
+      status TEXT DEFAULT 'active',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    -- ── app_routines ─────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS app_routines (
+      id TEXT PRIMARY KEY,
+      app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      cron_job_id TEXT,
+      name TEXT NOT NULL,
+      description TEXT,
+      instruction TEXT NOT NULL,
+      schedule TEXT,
+      target_table TEXT,
+      target_fields TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      agent_name TEXT,
+      last_run_at INTEGER,
+      last_run_status TEXT,
+      last_run_error TEXT,
+      run_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch('now') * 1000)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_app_routines_app_id ON app_routines(app_id);
+
+    -- Add app_id column to data_objects if not present (links table to app)
   `);
+
+  // Additive migration: add app_id to data_objects (existing installs)
+  try {
+    sqlite.exec(`ALTER TABLE data_objects ADD COLUMN app_id TEXT`);
+  } catch {
+    // Column already exists — fine
+  }
 
   console.log('[DB] Migrations complete.');
 }
