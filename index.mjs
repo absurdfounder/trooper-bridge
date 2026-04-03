@@ -3530,6 +3530,12 @@ app.post('/admin/backup', async (req, res) => {
      '/opt/openclaw-data/workspace',
      '/opt/openclaw-data/config',
      '/opt/openclaw-bridge/data',
+     '/opt/openclaw-bridge/device-identity.json',
+     '/opt/openclaw-bridge/paired.json',
+     '/home/node/.openclaw/workspace',
+     '/home/node/.openclaw/cron',
+     '/home/node/.openclaw/devices',
+     '/home/node/.openclaw/memory',
    ].filter(p => existsSync(p));
 
    if (paths.length === 0) {
