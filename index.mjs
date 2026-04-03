@@ -2963,7 +2963,8 @@ const emitViewportScreenshotFrame = ({
  // ── Project folder enforcement ──
  // Server passes a deterministic projectFolder (title-slug + id-hash).
  // Pre-create the folder and inject as a system-level constraint the agent can't ignore.
- const projectFolder = context?.projectFolder;
+ // Worktree: code tasks get an isolated subdirectory (sent as context.isolatedWorkspace)
+ const projectFolder = context?.projectFolder || context?.isolatedWorkspace || null;
  if (projectFolder) {
  const wsBase = '/home/node/.openclaw/workspace';
  try { execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${projectFolder}' && chown node:node '${wsBase}/${projectFolder}'"`, { timeout: 5000 }); } catch {}
