@@ -1244,6 +1244,83 @@ class OpenClawGateway {
   }
  }
 
+ async fetchSessionSnapshot(sessionKey) {
+  if (!sessionKey) return null;
+  if (!this.connected) {
+   const ok = await this.connect();
+   if (!ok) return null;
+  }
+  const id = randomUUID();
+  const toNumber = (value) => {
+   const next = Number(value);
+   return Number.isFinite(next) && next >= 0 ? next : null;
+  };
+  try {
+   const result = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+     this._pendingRequests.delete(id);
+     reject(new Error('Session snapshot timeout'));
+    }, 10000);
+    this._pendingRequests.set(id, {
+     resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
+     reject: (err) => { clearTimeout(timeout); reject(err); },
+    });
+    this.ws.send(JSON.stringify({
+     type: 'req',
+     id,
+     method: 'sessions.list',
+     params: {
+      limit: 50,
+      search: sessionKey,
+      includeDerivedTitles: true,
+     },
+    }));
+   });
+   const rows = Array.isArray(result?.sessions)
+    ? result.sessions
+    : Array.isArray(result?.rows)
+      ? result.rows
+      : Array.isArray(result)
+        ? result
+        : [];
+   const row = rows.find((entry) => entry?.key === sessionKey) || null;
+   if (!row) return null;
+   const totalTokens = toNumber(row.totalTokens);
+   const contextTokens = toNumber(row.contextTokens);
+   const percentUsed = toNumber(row.percentUsed) ?? (
+    totalTokens !== null && contextTokens
+     ? Math.min(999, Math.round((totalTokens / contextTokens) * 1000) / 10)
+     : null
+   );
+   const remainingTokens = toNumber(row.remainingTokens) ?? (
+    totalTokens !== null && contextTokens
+     ? Math.max(0, contextTokens - totalTokens)
+     : null
+   );
+   return {
+    key: row.key || sessionKey,
+    sessionId: row.sessionId || null,
+    displayName: row.displayName || row.label || null,
+    updatedAt: row.updatedAt || null,
+    status: row.status || null,
+    totalTokens,
+    totalTokensFresh: row.totalTokensFresh !== false,
+    contextTokens,
+    remainingTokens,
+    percentUsed,
+    modelProvider: row.modelProvider || null,
+    model: row.model || null,
+    responseUsage: row.responseUsage || null,
+    compactionCount: toNumber(row.compactionCount),
+   };
+  } catch (err) {
+   console.error('[OpenClaw] fetchSessionSnapshot error:', err.message);
+   return null;
+  } finally {
+   this._pendingRequests.delete(id);
+  }
+ }
+
  async resolveExecApproval(approvalId, decision) {
   if (!approvalId) throw new Error('approvalId is required');
   if (!decision) throw new Error('decision is required');
@@ -6370,6 +6447,17 @@ app.get('/exec-approvals', async (_req, res) => {
     .filter((entry) => !entry?.expiresAtMs || entry.expiresAtMs > now)
     .sort((left, right) => Number(left?.createdAtMs || 0) - Number(right?.createdAtMs || 0));
   res.json({ approvals, pendingCount: approvals.length });
+});
+
+app.get('/api/session-status', async (req, res) => {
+  try {
+    const sessionKey = String(req.query.sessionKey || '').trim();
+    if (!sessionKey) return res.status(400).json({ error: 'sessionKey is required' });
+    const session = await gateway.fetchSessionSnapshot(sessionKey);
+    res.json({ ok: true, session });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/exec-approvals/:approvalId/resolve', async (req, res) => {
