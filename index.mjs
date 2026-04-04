@@ -3466,6 +3466,93 @@ app.get('/admin/backups', (req, res) => {
  }
 });
 
+// ── Device Management ────────────────────────────────────────────────────
+
+const PAIRED_JSON_PATH_ADMIN = '/opt/openclaw-data/config/devices/paired.json';
+const DEVICES_DIR_ADMIN = '/opt/openclaw-data/config/devices';
+
+// GET /admin/devices — list all paired devices
+app.get('/admin/devices', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   let paired = {};
+   try { paired = JSON.parse(readFileSync(PAIRED_JSON_PATH_ADMIN, 'utf8')); } catch {}
+
+   const devices = Object.values(paired).map(d => ({
+     deviceId: d.deviceId,
+     displayName: d.displayName || 'Unknown',
+     platform: d.platform || 'unknown',
+     role: d.role || 'unknown',
+     roles: d.roles || [],
+     clientMode: d.clientMode || 'unknown',
+     approved: d.approved !== false,
+     approvedAt: d.approvedAt || d.ts || null,
+   }));
+
+   res.json({ devices, total: devices.length });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// DELETE /admin/devices/:deviceId — remove a device from paired.json
+app.delete('/admin/devices/:deviceId', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const { deviceId } = req.params;
+   let paired = {};
+   try { paired = JSON.parse(readFileSync(PAIRED_JSON_PATH_ADMIN, 'utf8')); } catch {}
+
+   if (!paired[deviceId]) {
+     return res.status(404).json({ error: `Device ${deviceId} not found` });
+   }
+
+   const removed = paired[deviceId];
+   delete paired[deviceId];
+
+   mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
+
+   // Also remove device-specific config files if they exist
+   try {
+     const deviceConfigPath = `${DEVICES_DIR_ADMIN}/${deviceId}.json`;
+     if (existsSync(deviceConfigPath)) {
+       execSync(`rm -f ${deviceConfigPath}`, { timeout: 5000 });
+     }
+   } catch {}
+
+   console.log(`[admin] Device removed: ${deviceId} (${removed.displayName || 'unknown'})`);
+   res.json({ ok: true, removed: { deviceId, displayName: removed.displayName } });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
+// DELETE /admin/devices — remove ALL devices (nuclear reset, keeps bridge device)
+app.delete('/admin/devices', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   let paired = {};
+   try { paired = JSON.parse(readFileSync(PAIRED_JSON_PATH_ADMIN, 'utf8')); } catch {}
+
+   // Keep the bridge's own device — removing it would break the bridge
+   const bridgeDeviceId = deviceIdentity?.deviceId;
+   const kept = {};
+   if (bridgeDeviceId && paired[bridgeDeviceId]) {
+     kept[bridgeDeviceId] = paired[bridgeDeviceId];
+   }
+
+   const removedCount = Object.keys(paired).length - Object.keys(kept).length;
+   mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(kept, null, 2), { mode: 0o600 });
+
+   console.log(`[admin] Removed ${removedCount} devices (kept bridge device)`);
+   res.json({ ok: true, removed: removedCount, kept: Object.keys(kept).length });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
 // ── GDPR / Privacy: Data Export & Deletion ───────────────────────────────
 
 // GET /admin/data-export — export ALL user data as a JSON bundle (GDPR Article 20)
