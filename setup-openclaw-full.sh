@@ -1090,17 +1090,20 @@ find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || tr
 
 # Fix jiti cache permissions — files in /tmp/jiti get created as root during startup
 # because the gateway bootstraps plugins before su fully takes effect.
-# Solution: make dir world-writable (1777 = sticky + rwx for all), so both root and
-# node can create/read files. Also nuke any stale files from previous runs.
-rm -rf /tmp/jiti 2>/dev/null || true
+# Nuclear cleanup: kill any leftover node processes, nuke the dir, recreate world-writable.
+pkill -9 -u 1000 node 2>/dev/null || true
+rm -rf /tmp/jiti /tmp/node-* 2>/dev/null || true
 mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
+# Also set JITI_CACHE_DIR to a node-owned location as fallback
+export JITI_CACHE_DIR="/home/node/.cache/jiti"
+mkdir -p "$JITI_CACHE_DIR" && chown 1000:1000 "$JITI_CACHE_DIR" && chmod 755 "$JITI_CACHE_DIR"
 
 # Fix devices dir permissions so bridge (host process) can write paired.json
 chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
 chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Drop back to node user for the gateway process
-exec su -s /bin/bash node -c "DISPLAY=:99 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/home/node/.cache/jiti node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh
 
