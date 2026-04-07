@@ -5843,6 +5843,9 @@ app.get('/config/api-keys', (req, res) => {
  const composioKey = getEnvVal('COMPOSIO_API_KEY');
  const openrouterKey = getEnvVal('OPENROUTER_API_KEY');
  const mistralKey = getEnvVal('MISTRAL_API_KEY');
+ const qwenKey = getEnvVal('QWEN_API_KEY');
+ const deepseekKey = getEnvVal('DEEPSEEK_API_KEY');
+ const xaiKey = getEnvVal('XAI_API_KEY');
  const perplexityKey = getEnvVal('PERPLEXITY_API_KEY');
  const exaKey = getEnvVal('EXA_API_KEY');
  const tavilyKey = getEnvVal('TAVILY_API_KEY');
@@ -5858,6 +5861,9 @@ app.get('/config/api-keys', (req, res) => {
  composio: { present: !!composioKey, masked: mask(composioKey) },
  openrouter: { present: !!openrouterKey, masked: mask(openrouterKey) },
  mistral: { present: !!mistralKey, masked: mask(mistralKey) },
+ qwen: { present: !!qwenKey, masked: mask(qwenKey) },
+ deepseek: { present: !!deepseekKey, masked: mask(deepseekKey) },
+ xai: { present: !!xaiKey, masked: mask(xaiKey) },
  perplexity: { present: !!perplexityKey, masked: mask(perplexityKey) },
  exa: { present: !!exaKey, masked: mask(exaKey) },
  tavily: { present: !!tavilyKey, masked: mask(tavilyKey) },
@@ -5874,8 +5880,8 @@ app.post('/config/api-keys', async (req, res) => {
  if (keysUpdateInProgress) return res.status(409).json({ error: 'Key update already in progress' });
  keysUpdateInProgress = true;
  try {
- const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel, openaiCodexAuthProfile } = req.body;
- const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel].some(k => k !== undefined);
+ const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, qwenKey, deepseekKey, xaiKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel, openaiCodexAuthProfile } = req.body;
+ const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, qwenKey, deepseekKey, xaiKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
@@ -5903,6 +5909,9 @@ app.post('/config/api-keys', async (req, res) => {
  setEnvVar('COMPOSIO_API_KEY', composioKey);
  setEnvVar('OPENROUTER_API_KEY', openrouterKey);
  setEnvVar('MISTRAL_API_KEY', mistralKey);
+ setEnvVar('QWEN_API_KEY', qwenKey);
+ setEnvVar('DEEPSEEK_API_KEY', deepseekKey);
+ setEnvVar('XAI_API_KEY', xaiKey);
  setEnvVar('PERPLEXITY_API_KEY', perplexityKey);
  setEnvVar('EXA_API_KEY', exaKey);
  setEnvVar('TAVILY_API_KEY', tavilyKey);
