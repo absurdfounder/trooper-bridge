@@ -5922,6 +5922,33 @@ app.post('/config/api-keys', async (req, res) => {
 
  writeFileSync('/opt/openclaw/.env', envContent);
 
+ // Track backup keys — store each new non-empty key in the backup list
+ const BACKUP_KEY_PROVIDERS = {
+  anthropic: anthropicKey, openai: openaiKey, gemini: geminiKey,
+  openrouter: openrouterKey, mistral: mistralKey, qwen: qwenKey,
+  deepseek: deepseekKey, xai: xaiKey, perplexity: perplexityKey,
+ };
+ for (const [prov, keyVal] of Object.entries(BACKUP_KEY_PROVIDERS)) {
+  if (keyVal) {
+   const backups = readConfigKey(`backupKeys:${prov}`) || [];
+   if (!backups.includes(keyVal)) {
+    backups.push(keyVal);
+    writeConfigKey(`backupKeys:${prov}`, backups);
+   }
+  }
+ }
+
+ // Save provider settings if included in payload
+ const { modelRouting: inModelRouting, providerModels: inProviderModels, modelRoutingFallbacks: inFallbacks, selectedModel, provider: settingsProvider } = req.body;
+ if (inModelRouting !== undefined) writeConfigKey('modelRouting', inModelRouting);
+ if (inProviderModels !== undefined) writeConfigKey('providerModels', inProviderModels);
+ if (inFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', inFallbacks);
+ if (settingsProvider && selectedModel) {
+  const pm = readConfigKey('providerModels') || {};
+  pm[settingsProvider] = selectedModel;
+  writeConfigKey('providerModels', pm);
+ }
+
  if (braveKey !== undefined) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
@@ -6234,6 +6261,350 @@ function normalizeModelId(model) {
  console.error('API key update failed:', err.message);
  if (!res.headersSent) res.status(500).json({ error: err.message });
  } finally { keysUpdateInProgress = false; }
+});
+
+// ── Provider Settings (SQLite-backed) ───────────────────────────────
+// Stores model routing, provider models, fallbacks, and pending flag
+// so Crabs-HQ never needs to keep keys or routing in Firestore.
+
+/** Read a config key from SQLite, return parsed JSON or null. */
+function readConfigKey(key) {
+ const row = db.select().from(configTable).where(eq(configTable.key, key)).get();
+ if (!row || !row.value) return null;
+ try { return JSON.parse(row.value); } catch { return row.value; }
+}
+
+/** Write a config key to SQLite (upsert). */
+function writeConfigKey(key, value) {
+ const serialized = JSON.stringify(value);
+ const existing = db.select().from(configTable).where(eq(configTable.key, key)).get();
+ if (existing) {
+  db.update(configTable).set({ value: serialized, updated_at: Date.now() }).where(eq(configTable.key, key)).run();
+ } else {
+  db.insert(configTable).values({ key, value: serialized, updated_at: Date.now() }).run();
+ }
+}
+
+app.get('/config/provider-settings', (req, res) => {
+ try {
+  // Key presence from .env
+  let envContent = '';
+  try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+  const getEnvVal = (name) => {
+   const match = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
+   return match ? match[1].trim() : '';
+  };
+  const mask = (key) => {
+   if (!key || key.length < 8) return key ? '****' : '';
+   return key.substring(0, 4) + '****' + key.substring(key.length - 4);
+  };
+
+  const ENV_KEY_MAP = {
+   anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY',
+   gemini: 'GEMINI_API_KEY', openrouter: 'OPENROUTER_API_KEY',
+   mistral: 'MISTRAL_API_KEY', qwen: 'QWEN_API_KEY',
+   deepseek: 'DEEPSEEK_API_KEY', xai: 'XAI_API_KEY',
+   perplexity: 'PERPLEXITY_API_KEY', exa: 'EXA_API_KEY',
+   tavily: 'TAVILY_API_KEY', serpapi: 'SERPAPI_API_KEY',
+   searchapi: 'SEARCHAPI_API_KEY', browserbase: 'BROWSERBASE_API_KEY',
+   browserbaseProjectId: 'BROWSERBASE_PROJECT_ID',
+   brave: 'BRAVE_API_KEY', composio: 'COMPOSIO_API_KEY',
+  };
+
+  const providers = {};
+  for (const [provider, envName] of Object.entries(ENV_KEY_MAP)) {
+   const val = getEnvVal(envName);
+   // Also check GOOGLE_API_KEY for gemini
+   const actualVal = provider === 'gemini' ? (val || getEnvVal('GOOGLE_API_KEY')) : val;
+   providers[provider] = { present: !!actualVal, masked: mask(actualVal) };
+  }
+
+  // OpenAI Codex auth profile
+  let openaiCodexAuthProfile = null;
+  try {
+   const profiles = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
+   const codexProfile = profiles?.profiles?.['openai-codex'];
+   if (codexProfile?.access) {
+    openaiCodexAuthProfile = { hasAccess: true, email: codexProfile.email || null, expires: codexProfile.expires || null };
+   }
+  } catch {}
+
+  // Settings from SQLite
+  const modelRouting = readConfigKey('modelRouting') || {};
+  const providerModels = readConfigKey('providerModels') || {};
+  const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
+  const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
+  const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
+
+  res.json({
+   providers,
+   openaiCodexAuthProfile,
+   modelRouting,
+   providerModels,
+   modelRoutingFallbacks,
+   pendingBridgeApply,
+   defaultModel,
+  });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+// Internal endpoint: returns unmasked keys for server-side AI calls.
+// Only accessible with bridge auth token — never exposed to frontend.
+app.get('/config/provider-keys-internal', (req, res) => {
+ try {
+  let envContent = '';
+  try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+  const getEnvVal = (name) => {
+   const match = envContent.match(new RegExp(`^${name}=(.*)$`, 'm'));
+   return match ? match[1].trim() : '';
+  };
+
+  const keys = {
+   anthropic: getEnvVal('ANTHROPIC_API_KEY') || null,
+   openai: getEnvVal('OPENAI_API_KEY') || null,
+   gemini: getEnvVal('GEMINI_API_KEY') || getEnvVal('GOOGLE_API_KEY') || null,
+   openrouter: getEnvVal('OPENROUTER_API_KEY') || null,
+   mistral: getEnvVal('MISTRAL_API_KEY') || null,
+   qwen: getEnvVal('QWEN_API_KEY') || null,
+   deepseek: getEnvVal('DEEPSEEK_API_KEY') || null,
+   xai: getEnvVal('XAI_API_KEY') || null,
+   perplexity: getEnvVal('PERPLEXITY_API_KEY') || null,
+  };
+
+  // OpenAI Codex auth profile
+  let openaiCodex = null;
+  try {
+   const profiles = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
+   const codexProfile = profiles?.profiles?.['openai-codex'];
+   if (codexProfile?.access) openaiCodex = codexProfile;
+  } catch {}
+
+  const modelRouting = readConfigKey('modelRouting') || {};
+  const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
+
+  res.json({ keys, openaiCodex, defaultModel, modelRouting });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+app.put('/config/provider-settings', (req, res) => {
+ try {
+  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel } = req.body;
+  if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
+  if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
+  if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
+  if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
+  if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
+  res.json({ ok: true });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+app.delete('/config/api-keys/:provider', async (req, res) => {
+ const { provider } = req.params;
+ try {
+  const ENV_KEY_MAP = {
+   anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY',
+   gemini: 'GEMINI_API_KEY', openrouter: 'OPENROUTER_API_KEY',
+   mistral: 'MISTRAL_API_KEY', qwen: 'QWEN_API_KEY',
+   deepseek: 'DEEPSEEK_API_KEY', xai: 'XAI_API_KEY',
+   perplexity: 'PERPLEXITY_API_KEY', exa: 'EXA_API_KEY',
+   tavily: 'TAVILY_API_KEY', serpapi: 'SERPAPI_API_KEY',
+   searchapi: 'SEARCHAPI_API_KEY', browserbase: 'BROWSERBASE_API_KEY',
+   browserbaseProjectId: 'BROWSERBASE_PROJECT_ID',
+   brave: 'BRAVE_API_KEY', composio: 'COMPOSIO_API_KEY',
+  };
+  const envName = ENV_KEY_MAP[provider];
+  if (!envName) return res.status(400).json({ error: `Unknown provider: ${provider}` });
+
+  // Remove from .env
+  try {
+   let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+   envContent = envContent.replace(new RegExp(`^${envName}=.*\\n?`, 'm'), '');
+   writeFileSync('/opt/openclaw/.env', envContent);
+  } catch {}
+
+  // Remove from auth-profiles.json
+  const AUTH_PROFILE_MAP = { anthropic: 'anthropic', openai: 'openai', openrouter: 'openrouter', gemini: 'google', mistral: 'mistral' };
+  const profileName = AUTH_PROFILE_MAP[provider];
+  if (profileName) {
+   try {
+    const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
+    const profiles = JSON.parse(readFileSync(authPath, 'utf8'));
+    if (profiles?.profiles?.[profileName]) {
+     delete profiles.profiles[profileName];
+     writeFileSync(authPath, JSON.stringify(profiles, null, 2));
+    }
+   } catch {}
+  }
+  // Also remove openai-codex if removing openai
+  if (provider === 'openai') {
+   try {
+    const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
+    const profiles = JSON.parse(readFileSync(authPath, 'utf8'));
+    if (profiles?.profiles?.['openai-codex']) {
+     delete profiles.profiles['openai-codex'];
+     writeFileSync(authPath, JSON.stringify(profiles, null, 2));
+    }
+   } catch {}
+  }
+
+  // Remove from providerModels
+  const providerModels = readConfigKey('providerModels') || {};
+  if (providerModels[provider]) {
+   delete providerModels[provider];
+   writeConfigKey('providerModels', providerModels);
+  }
+
+  // Clean model routing if it referenced this provider
+  const modelRouting = readConfigKey('modelRouting') || {};
+  let routingChanged = false;
+  for (const [slot, model] of Object.entries(modelRouting)) {
+   if (typeof model === 'string' && model.startsWith(`${provider}/`)) {
+    delete modelRouting[slot];
+    routingChanged = true;
+   }
+  }
+  if (routingChanged) writeConfigKey('modelRouting', modelRouting);
+
+  // Clean fallbacks
+  const fallbacks = readConfigKey('modelRoutingFallbacks') || {};
+  let fallbacksChanged = false;
+  for (const [slot, arr] of Object.entries(fallbacks)) {
+   if (Array.isArray(arr)) {
+    const filtered = arr.filter(m => !m.startsWith(`${provider}/`));
+    if (filtered.length !== arr.length) {
+     fallbacks[slot] = filtered;
+     fallbacksChanged = true;
+    }
+   }
+  }
+  if (fallbacksChanged) writeConfigKey('modelRoutingFallbacks', fallbacks);
+
+  // Mark pending
+  writeConfigKey('pendingBridgeApply', true);
+
+  res.json({ ok: true, pendingBridgeApply: true });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+// ── Backup Key Management (SQLite-backed) ───────────────────────────
+// Stores historical keys so users can switch without re-entering them
+
+app.get('/config/provider-keys/:provider', (req, res) => {
+ try {
+  const backupKeys = readConfigKey(`backupKeys:${req.params.provider}`) || [];
+  // Read current active key from .env
+  const ENV_KEY_MAP = {
+   anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY',
+   gemini: 'GEMINI_API_KEY', openrouter: 'OPENROUTER_API_KEY',
+   mistral: 'MISTRAL_API_KEY', qwen: 'QWEN_API_KEY',
+   deepseek: 'DEEPSEEK_API_KEY', xai: 'XAI_API_KEY',
+   perplexity: 'PERPLEXITY_API_KEY',
+  };
+  const envName = ENV_KEY_MAP[req.params.provider];
+  let activeKey = '';
+  if (envName) {
+   try {
+    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+    const match = envContent.match(new RegExp(`^${envName}=(.*)$`, 'm'));
+    if (match) activeKey = match[1].trim();
+   } catch {}
+  }
+  const mask = (k) => {
+   if (!k || k.length < 8) return k ? '****' : '';
+   return k.substring(0, 4) + '****' + k.substring(k.length - 4);
+  };
+  res.json({
+   keys: backupKeys.map((k, i) => ({ index: i, masked: mask(k), active: k === activeKey })),
+   activeKeyMasked: mask(activeKey),
+  });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+app.post('/config/provider-keys/:provider/switch', (req, res) => {
+ try {
+  const { index } = req.body;
+  const backupKeys = readConfigKey(`backupKeys:${req.params.provider}`) || [];
+  if (index < 0 || index >= backupKeys.length) return res.status(400).json({ error: 'Invalid key index' });
+  const newKey = backupKeys[index];
+  const ENV_KEY_MAP = {
+   anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY',
+   gemini: 'GEMINI_API_KEY', openrouter: 'OPENROUTER_API_KEY',
+   mistral: 'MISTRAL_API_KEY', qwen: 'QWEN_API_KEY',
+   deepseek: 'DEEPSEEK_API_KEY', xai: 'XAI_API_KEY',
+   perplexity: 'PERPLEXITY_API_KEY',
+  };
+  const envName = ENV_KEY_MAP[req.params.provider];
+  if (!envName) return res.status(400).json({ error: 'Unknown provider' });
+
+  // Update .env
+  let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+  if (envContent.match(new RegExp(`^${envName}=`, 'm'))) {
+   envContent = envContent.replace(new RegExp(`^${envName}=.*$`, 'm'), `${envName}=${newKey}`);
+  } else {
+   envContent += `\n${envName}=${newKey}\n`;
+  }
+  writeFileSync('/opt/openclaw/.env', envContent);
+
+  writeConfigKey('pendingBridgeApply', true);
+  res.json({ ok: true, pendingBridgeApply: true });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
+});
+
+app.delete('/config/provider-keys/:provider/:index', (req, res) => {
+ try {
+  const idx = parseInt(req.params.index, 10);
+  const backupKeys = readConfigKey(`backupKeys:${req.params.provider}`) || [];
+  if (idx < 0 || idx >= backupKeys.length) return res.status(400).json({ error: 'Invalid key index' });
+
+  // Check if deleting the active key
+  const ENV_KEY_MAP = {
+   anthropic: 'ANTHROPIC_API_KEY', openai: 'OPENAI_API_KEY',
+   gemini: 'GEMINI_API_KEY', openrouter: 'OPENROUTER_API_KEY',
+   mistral: 'MISTRAL_API_KEY', qwen: 'QWEN_API_KEY',
+   deepseek: 'DEEPSEEK_API_KEY', xai: 'XAI_API_KEY',
+   perplexity: 'PERPLEXITY_API_KEY',
+  };
+  const envName = ENV_KEY_MAP[req.params.provider];
+  let activeKey = '';
+  if (envName) {
+   try {
+    const envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+    const match = envContent.match(new RegExp(`^${envName}=(.*)$`, 'm'));
+    if (match) activeKey = match[1].trim();
+   } catch {}
+  }
+
+  const removedKey = backupKeys[idx];
+  backupKeys.splice(idx, 1);
+  writeConfigKey(`backupKeys:${req.params.provider}`, backupKeys);
+
+  // If we removed the active key, switch to the next available one
+  if (removedKey === activeKey && envName) {
+   const newActive = backupKeys.length > 0 ? backupKeys[0] : '';
+   let envContent = readFileSync('/opt/openclaw/.env', 'utf8');
+   if (envContent.match(new RegExp(`^${envName}=`, 'm'))) {
+    envContent = envContent.replace(new RegExp(`^${envName}=.*$`, 'm'), `${envName}=${newActive}`);
+   }
+   writeFileSync('/opt/openclaw/.env', envContent);
+   writeConfigKey('pendingBridgeApply', true);
+  }
+
+  res.json({ ok: true });
+ } catch (err) {
+  res.status(500).json({ error: err.message });
+ }
 });
 
 // ── User Context — update USER.md and TOOLS.md with location/timezone/name ──
