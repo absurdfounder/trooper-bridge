@@ -7046,8 +7046,9 @@ app.get('/debug/agent-context', (req, res) => {
       prompt: {
         extraSystemPrompt,
         notes: [
-          'Identity is expected to come from the native OpenClaw workspace files and existing session history.',
+          'Identity is expected to come from the native OpenClaw workspace files and the live session thread.',
           'CrabsHQ now passes only thin session/lane guidance here, not duplicated soul/company/memory/task summaries.',
+          'Ordinary chat should not inspect session history or ask to resume prior work unless the user explicitly asks.',
           'Missing native SPC agents now raise an explicit error instead of silently falling back to main.',
         ],
       },
