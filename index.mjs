@@ -4618,19 +4618,20 @@ app.get('/agents/:name/workspace', (req, res) => {
 
  try {
  const files = {};
- const fileNames = ['AGENTS.md', 'SOUL.md', 'TOOLS.md', 'IDENTITY.md', 'USER.md', 'HEARTBEAT.md', 'BOOTSTRAP.md', 'MEMORY.md', 'COMPANY.md'];
- for (const f of fileNames) {
- try { files[f] = readFileSync(`${workspacePath}/${f}`, 'utf8'); } catch { files[f] = null; }
+ const walkWorkspaceMarkdown = (dirPath, prefix = '') => {
+ for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+ if (entry.name.startsWith('.')) continue;
+ const fullPath = path.join(dirPath, entry.name);
+ const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+ if (entry.isDirectory()) {
+ walkWorkspaceMarkdown(fullPath, relPath);
+ continue;
  }
- // Read memory/ directory
- try {
- const memDir = `${workspacePath}/memory`;
- const memFiles = readdirSync(memDir).filter(f => f.endsWith('.md'));
- files._memory = {};
- for (const mf of memFiles) {
- try { files._memory[mf] = readFileSync(`${memDir}/${mf}`, 'utf8'); } catch {}
+ if (!/\.(md|markdown|txt)$/i.test(entry.name)) continue;
+ try { files[relPath] = readFileSync(fullPath, 'utf8'); } catch { files[relPath] = null; }
  }
- } catch { files._memory = {}; }
+ };
+ walkWorkspaceMarkdown(workspacePath);
  res.json({ agent: name, workspace: workspacePath, files });
  } catch (err) {
  res.status(500).json({ error: err.message });
