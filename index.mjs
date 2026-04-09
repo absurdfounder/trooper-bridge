@@ -2705,13 +2705,14 @@ function ensureAgentWorkspacePath(agentId = 'main') {
 function resolveMissionControlSessionKey({ sessionKey, agentName, context } = {}) {
  if (sessionKey) return sessionKey;
  const taskId = context?.taskId || null;
+ const channel = context?.channel || 'general';
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
  const isSPC = registered?.role === 'SPC';
- const gatewayAgentId = taskId ? 'main' : (isSPC ? (registered?.agentId || 'main') : 'main');
+ const gatewayAgentId = isSPC ? (registered?.agentId || 'main') : 'main';
  return taskId
    ? `agent:${gatewayAgentId}:hook:crabhq:${slug}:task:${taskId}`
-   : `agent:${gatewayAgentId}:hook:crabhq:${slug}:chat`;
+   : `agent:${gatewayAgentId}:hook:crabhq:${slug}:channel:${channel}`;
 }
 
 // Helper: write file inside OpenClaw container
@@ -2789,16 +2790,16 @@ async function handleIncomingTask(req, res) {
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
  const isTaskWork = !!(context?.taskId);
- // CrabsHQ owns delegation. For task work, always route through main and preserve persona via prompt.
+ const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
- const agentId = isTaskWork ? 'main' : (isSPC ? (registered?.agentId || 'main') : 'main');
+ const agentId = isSPC ? (registered?.agentId || 'main') : 'main';
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  // Task-scoped sessions: each task gets isolated context on the gateway
- // Chat messages share a single chat session per agent
+ // Chat messages persist per channel
  const _taskId = context?.taskId;
  const sessionKey = _taskId
    ? `agent:${agentId}:hook:crabhq:${slug}:task:${_taskId}`
-   : `agent:${agentId}:hook:crabhq:${slug}:chat`;
+   : `agent:${agentId}:hook:crabhq:${slug}:channel:${channel}`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
@@ -2843,13 +2844,15 @@ async function handleIncomingTask(req, res) {
  try {
  result = await gateway.runAgent(fullTask, runOpts);
  } catch (err) {
- if (agentId === 'spc' && /unknown agent id\s+"?spc"?/i.test(err.message || '')) {
+ if (isSPC && /unknown agent id/i.test(err.message || '')) {
  console.warn(`[${id}] SPC agent missing in gateway config; retrying ${agentName || 'SPC'} via main agent fallback`);
  result = await gateway.runAgent(fullTask, {
  ...runOpts,
  agentId: 'main',
- sessionKey: `agent:main:hook:crabhq:${slug}:task`,
- extraSystemPrompt: nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n[SPC FALLBACK]\nThe gateway does not currently expose the unified spc agent. Respond as the specialist persona requested above, not as the team lead.` : '[SPC FALLBACK]\nRespond as the requested specialist persona, not as the team lead.',
+ sessionKey: _taskId
+   ? `agent:main:hook:crabhq:${slug}:task:${_taskId}`
+   : `agent:main:hook:crabhq:${slug}:channel:${channel}`,
+ extraSystemPrompt: nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n[SPC FALLBACK]\nThe gateway does not currently expose the native SPC agent. Respond as the specialist persona requested above, not as the team lead.` : '[SPC FALLBACK]\nRespond as the requested specialist persona, not as the team lead.',
  });
  } else {
  throw err;
@@ -2888,16 +2891,16 @@ async function handleIncomingTaskStream(req, res) {
  const slug = agentSlug(agentName);
  const registered = agentRegistry.get(slug);
  const isTaskWork = !!(context?.taskId);
- // CrabsHQ owns delegation. For task work, always route through main and preserve persona via prompt.
+ const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
- const agentId = isTaskWork ? 'main' : (isSPC ? (registered?.agentId || 'main') : 'main');
+ const agentId = isSPC ? (registered?.agentId || 'main') : 'main';
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  // Task-scoped sessions: each task gets isolated context on the gateway
- // Chat messages share a single chat session per agent
+ // Chat messages persist per channel
  const _taskId = context?.taskId;
  const sessionKey = _taskId
    ? `agent:${agentId}:hook:crabhq:${slug}:task:${_taskId}`
-   : `agent:${agentId}:hook:crabhq:${slug}:chat`;
+   : `agent:${agentId}:hook:crabhq:${slug}:channel:${channel}`;
  const fullTask = buildTaskMessage(req.body);
 
  // Persist any skill credentials to the container environment
