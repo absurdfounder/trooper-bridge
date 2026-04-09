@@ -39,13 +39,13 @@ import WebSocket from 'ws';
 import { createServer } from 'http';
 import { initFirebaseAuth, firebaseRestAuth } from './lib/firebase-auth.mjs';
 import { BridgeWSServer } from './lib/ws-server.mjs';
-import { handleChatMessage, getRecentMessages } from './lib/chat-handler.mjs';
+import { handleChatMessage } from './lib/chat-handler.mjs';
 import { createTask, getTask, listTasks, updateTask, deleteTask, addComment, addSubtask, toggleSubtask, deleteSubtask, executeTaskWork, checkoutTask, releaseTask, createProject, listProjects, updateProject, createGoal, listGoals } from './lib/task-handler.mjs';
 import { messages as messagesTable, agents as agentsTable, humans as humansTable, contexts as contextsTable, conversations as conversationsTable, activities as activitiesTable, notifications as notificationsTable, skills as skillsTable, rules as rulesTable, playbooks as playbooksTable, policies as policiesTable, config as configTable } from './db/schema.mjs';
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
-import { buildExecutionLanePromptBlock, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
+import { buildExecutionLanePromptBlock, buildRuntimeSystemPrompt, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
 import {
   formatProviderLogLabel,
   readConfiguredDefaultModelId,
@@ -2746,6 +2746,39 @@ function buildTaskMessage(body) {
  return taskParts.join('\n');
 }
 
+function resolveNativeGatewayAgentId(registered, slug) {
+ const normalizedSlug = String(slug || '').trim().toLowerCase();
+ if (registered?.role === 'SPC') {
+  if (registered?.agentId) return registered.agentId;
+  return normalizedSlug.startsWith('spc-') ? normalizedSlug : `spc-${normalizedSlug}`;
+ }
+ return 'main';
+}
+
+function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt = undefined) {
+ if (explicitSystemPrompt) {
+  let prompt = explicitSystemPrompt;
+  const laneBlock = buildExecutionLanePromptBlock({
+   executionLane: context?.executionLane,
+   browserTask: context?.browserTask === true,
+   projectRef: context?.projectRef || null,
+   deviceRef: context?.deviceRef || null,
+  });
+  if (laneBlock) prompt = `${prompt}\n\n${laneBlock}`;
+  return prompt;
+ }
+
+ return buildRuntimeSystemPrompt(registered || {}, {
+  channel: context?.channel || 'general',
+  taskId: context?.taskId || null,
+  taskTitle: context?.taskTitle || '',
+  executionLane: context?.executionLane || '',
+  browserTask: context?.browserTask === true,
+  projectRef: context?.projectRef || null,
+  deviceRef: context?.deviceRef || null,
+ });
+}
+
 // Persist skill credentials to the container .env file so they're available to the gateway process
 function ensureSkillCredentials(skillCredentials) {
  if (!skillCredentials || typeof skillCredentials !== 'object') return;
@@ -2792,7 +2825,7 @@ async function handleIncomingTask(req, res) {
  const isTaskWork = !!(context?.taskId);
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
- const agentId = isSPC ? (registered?.agentId || 'main') : 'main';
+ const agentId = resolveNativeGatewayAgentId(registered, slug);
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  // Task-scoped sessions: each task gets isolated context on the gateway
  // Chat messages persist per channel
@@ -2815,17 +2848,8 @@ async function handleIncomingTask(req, res) {
  try {
  const isTaskWork = !!(context?.taskId);
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})${isTaskWork ? ' [TASK]' : ''}...`);
- // Build system prompt with project folder enforcement
- let nonStreamSystemPrompt = registered?.soul ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}` : (systemPrompt || undefined);
- const nonStreamLanePrompt = buildExecutionLanePromptBlock({
- executionLane: context?.executionLane,
- browserTask: context?.browserTask === true,
- projectRef: context?.projectRef || null,
- deviceRef: context?.deviceRef || null,
- });
- if (nonStreamLanePrompt) {
- nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${nonStreamLanePrompt}` : nonStreamLanePrompt;
- }
+ // Build a thin runtime prompt with project folder enforcement
+ let nonStreamSystemPrompt = buildCrabsHqSystemPrompt(registered, context, systemPrompt || undefined);
  const nonStreamProjectFolder = context?.projectFolder;
  if (nonStreamProjectFolder) {
  const wsBase = '/home/node/.openclaw/workspace';
@@ -2845,18 +2869,9 @@ async function handleIncomingTask(req, res) {
  result = await gateway.runAgent(fullTask, runOpts);
  } catch (err) {
  if (isSPC && /unknown agent id/i.test(err.message || '')) {
- console.warn(`[${id}] SPC agent missing in gateway config; retrying ${agentName || 'SPC'} via main agent fallback`);
- result = await gateway.runAgent(fullTask, {
- ...runOpts,
- agentId: 'main',
- sessionKey: _taskId
-   ? `agent:main:hook:crabhq:${slug}:task:${_taskId}`
-   : `agent:main:hook:crabhq:${slug}:channel:${channel}`,
- extraSystemPrompt: nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n[SPC FALLBACK]\nThe gateway does not currently expose the native SPC agent. Respond as the specialist persona requested above, not as the team lead.` : '[SPC FALLBACK]\nRespond as the requested specialist persona, not as the team lead.',
- });
- } else {
- throw err;
+  throw new Error(`Native SPC agent "${agentId}" is missing in gateway config for ${agentName || 'SPC'}. Reconcile or reprovision the runtime instead of falling back to main.`);
  }
+ throw err;
  }
 
  if (result) {
@@ -2893,7 +2908,7 @@ async function handleIncomingTaskStream(req, res) {
  const isTaskWork = !!(context?.taskId);
  const channel = context?.channel || 'general';
  const isSPC = registered?.role === 'SPC';
- const agentId = isSPC ? (registered?.agentId || 'main') : 'main';
+ const agentId = resolveNativeGatewayAgentId(registered, slug);
  // Session key MUST be in canonical format: agent:{agentId}:{rest}
  // Task-scoped sessions: each task gets isolated context on the gateway
  // Chat messages persist per channel
@@ -2985,18 +3000,7 @@ const emitViewportScreenshotFrame = ({
 };
 
  const isBrowserTask = context?.browserTask === true;
- let resolvedSystemPrompt = registered?.soul
-   ? `You are ${registered.name || "Agent"}, a ${registered.title || "Specialist"}. ${registered.soul}`
-   : (systemPrompt || undefined);
- const executionLanePrompt = buildExecutionLanePromptBlock({
- executionLane: context?.executionLane,
- browserTask: isBrowserTask,
- projectRef: context?.projectRef || null,
- deviceRef: context?.deviceRef || null,
- });
- if (executionLanePrompt) {
- resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${executionLanePrompt}` : executionLanePrompt;
- }
+ let resolvedSystemPrompt = buildCrabsHqSystemPrompt(registered, context, systemPrompt || undefined);
 
  // ── Project folder enforcement ──
  // Server passes a deterministic projectFolder (title-slug + id-hash).
@@ -3218,13 +3222,16 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
  console.error(`[${id}] SSE agent failed: ${err.message}`);
  captureLog('error', `SSE agent failed: ${err.message}`, { requestId: id, agent: agentName, stack: err.stack });
  const errMessage = stripGatewayErrorPrefix(err.message) || 'Bridge error';
+ const normalizedError = (isSPC && /unknown agent id/i.test(errMessage || ''))
+  ? `Native SPC agent "${agentId}" is missing in gateway config for ${agentName || 'SPC'}. Reconcile or reprovision the runtime instead of falling back to main.`
+  : errMessage;
  const { provider: errorProvider, model: errorModel } = resolveProviderRuntimeContext({
   provider: err.provider || null,
   model: err.model || null,
   fallbackModel: model || null,
-  error: errMessage,
+  error: normalizedError,
  });
- sendSSE('error', { message: errMessage, requestId: id, provider: errorProvider, model: errorModel });
+ sendSSE('error', { message: normalizedError, requestId: id, provider: errorProvider, model: errorModel });
  } finally {
  if (screenshotPollerInterval) {
  clearInterval(screenshotPollerInterval);
@@ -6976,6 +6983,77 @@ app.get('/api/session-status', async (req, res) => {
     if (!sessionKey) return res.status(400).json({ error: 'sessionKey is required' });
     const session = await gateway.fetchSessionSnapshot(sessionKey);
     res.json({ ok: true, session });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/debug/agent-context', (req, res) => {
+  try {
+    const agentName = String(req.query.agentName || req.query.agent || '').trim();
+    if (!agentName) return res.status(400).json({ error: 'agentName is required' });
+
+    const slug = agentSlug(agentName);
+    const registered = agentRegistry.get(slug) || null;
+    const channel = String(req.query.channel || 'general').trim() || 'general';
+    const taskId = String(req.query.taskId || '').trim();
+    const taskTitle = String(req.query.taskTitle || '').trim();
+    const executionLane = String(req.query.executionLane || '').trim();
+    const browserTask = String(req.query.browserTask || '').trim() === 'true';
+    const agentId = resolveNativeGatewayAgentId(registered, slug);
+    const sessionKey = taskId
+      ? `agent:${agentId}:hook:crabhq:${slug}:task:${taskId}`
+      : `agent:${agentId}:hook:crabhq:${slug}:channel:${channel}`;
+    const extraSystemPrompt = buildCrabsHqSystemPrompt(
+      registered || { name: agentName, title: '', role: '' },
+      { channel, taskId: taskId || null, taskTitle, executionLane, browserTask },
+      undefined,
+    );
+
+    const config = readOpenClawConfig();
+    const configEntry = Array.isArray(config?.agents?.list)
+      ? (config.agents.list.find((entry) => entry?.id === agentId) || null)
+      : null;
+    const workspacePath = getAgentWorkspacePath(agentId);
+    const files = [];
+    const walkWorkspaceMarkdown = (dirPath, prefix = '') => {
+      for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+        if (entry.name.startsWith('.')) continue;
+        const fullPath = path.join(dirPath, entry.name);
+        const relPath = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          walkWorkspaceMarkdown(fullPath, relPath);
+          continue;
+        }
+        if (!/\.(md|markdown|txt)$/i.test(entry.name)) continue;
+        files.push(relPath);
+      }
+    };
+    if (existsSync(workspacePath)) walkWorkspaceMarkdown(workspacePath);
+
+    res.json({
+      ok: true,
+      agentName,
+      slug,
+      registered,
+      resolved: {
+        agentId,
+        isSpc: registered?.role === 'SPC',
+        sessionKey,
+        gatewayConfigPresent: !!configEntry,
+        workspacePath,
+      },
+      prompt: {
+        extraSystemPrompt,
+        notes: [
+          'Identity is expected to come from the native OpenClaw workspace files and existing session history.',
+          'CrabsHQ now passes only thin session/lane guidance here, not duplicated soul/company/memory/task summaries.',
+          'Missing native SPC agents now raise an explicit error instead of silently falling back to main.',
+        ],
+      },
+      workspaceFiles: files,
+      gatewayConfigEntry: configEntry,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
