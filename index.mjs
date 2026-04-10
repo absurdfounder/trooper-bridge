@@ -2497,9 +2497,44 @@ try {
 // ── Startup migration: fix mistyped auth profiles ────────────────────────
 // OAuth tokens (sk-ant-oat-*) must be stored with type "token" and field "token",
 // not type "api_key"/"key" with field "key". Fix any that were created incorrectly.
+const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
+const AUTH_PROFILES_ROOT_PATH = '/opt/openclaw-data/config/auth-profiles.json';
+
+function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
+ const serialized = JSON.stringify(authDoc, null, 2);
+ for (const target of [AUTH_PROFILES_PATH, AUTH_PROFILES_ROOT_PATH]) {
+  try {
+   mkdirSync(dirname(target), { recursive: true });
+   if (backup) {
+    try {
+     const existing = readFileSync(target, 'utf8');
+     writeFileSync(target + '.bak', existing);
+    } catch {}
+   }
+   writeFileSync(target, serialized);
+   try { execSync(`chown 1000:1000 ${target} 2>/dev/null; chmod 664 ${target} 2>/dev/null`, { timeout: 3000 }); } catch {}
+  } catch (err) {
+   console.warn(`[bridge] Failed to mirror auth profiles to ${target}: ${err.message}`);
+  }
+ }
+ try {
+  const agentsDir = '/opt/openclaw-data/config/agents';
+  const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
+  for (const d of dirs) {
+   const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
+   try {
+    mkdirSync(dirname(sub), { recursive: true });
+    writeFileSync(sub, serialized);
+    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 664 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
+   } catch (err) {
+    console.warn(`[bridge] Failed to mirror auth profiles to ${sub}: ${err.message}`);
+   }
+  }
+ } catch {}
+}
+
 try {
- const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
- const auth = JSON.parse(readFileSync(authPath, 'utf8'));
+ const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
  let authChanged = false;
  if (auth.profiles) {
   for (const [id, profile] of Object.entries(auth.profiles)) {
@@ -2512,18 +2547,7 @@ try {
   }
  }
  if (authChanged) {
-  writeFileSync(authPath, JSON.stringify(auth, null, 2));
-  try { execSync(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`, { timeout: 3000 }); } catch {}
-  // Propagate to sub-agent dirs
-  try {
-   const agentsDir = '/opt/openclaw-data/config/agents';
-   const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
-   const updated = readFileSync(authPath, 'utf8');
-   for (const d of dirs) {
-    const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
-    if (existsSync(sub)) { writeFileSync(sub, updated); }
-   }
-  } catch {}
+  writeMirroredAuthProfiles(auth);
  }
 } catch (e) { /* auth profiles not available yet */ }
 
@@ -2534,8 +2558,7 @@ try {
 // exists but NO "openai-codex:*" profile exists, and the key looks like an
 // OAuth-derived token (JWT or has access/refresh fields).
 try {
- const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
- const auth = JSON.parse(readFileSync(authPath, 'utf8'));
+ const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
  let authChanged = false;
  if (auth.profiles) {
   const openaiProfile = auth.profiles['openai:default'];
@@ -2598,17 +2621,7 @@ try {
   }
  }
  if (authChanged) {
-  writeFileSync(authPath, JSON.stringify(auth, null, 2));
-  try { execSync(`chown 1000:1000 ${authPath} && chmod 600 ${authPath}`, { timeout: 3000 }); } catch {}
-  try {
-   const agentsDir = '/opt/openclaw-data/config/agents';
-   const dirs = readdirSync(agentsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'main');
-   const updated = readFileSync(authPath, 'utf8');
-   for (const d of dirs) {
-    const sub = `${agentsDir}/${d.name}/agent/auth-profiles.json`;
-    if (existsSync(sub)) { writeFileSync(sub, updated); }
-   }
-  } catch {}
+  writeMirroredAuthProfiles(auth);
  }
 } catch (e) { /* auth profiles not available yet */ }
 
@@ -6186,10 +6199,9 @@ function normalizeModelId(model) {
 
  if (keysToUpdate.length > 0 || openaiCodexAuthProfile?.access) {
  try {
- const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
  let auth;
  try {
- auth = JSON.parse(readFileSync(authPath, 'utf8'));
+ auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
  } catch {
  auth = { version: 1, profiles: {}, lastGood: {} };
  }
@@ -6228,31 +6240,15 @@ function normalizeModelId(model) {
  console.log(`[bridge] Included Codex OAuth profile: ${codexId}`);
  }
 
- writeFileSync(authPath, JSON.stringify(auth, null, 2));
- await run(`chown 1000:1000 ${authPath} 2>/dev/null; chmod 664 ${authPath}`).catch(() => {});
+ writeMirroredAuthProfiles(auth);
  const updatedProviders = [
   ...keysToUpdate.map(e => e.provider),
   ...(openaiCodexAuthProfile?.access ? ['openai-codex'] : []),
  ];
  console.log(`[bridge] Updated auth-profiles.json for: ${updatedProviders.join(', ')}`);
-
- // Propagate updated auth-profiles to any existing sub-agent directories
- try {
- const agentsDir = '/opt/openclaw-data/config/agents';
- const agentDirs = readdirSync(agentsDir, { withFileTypes: true })
- .filter(d => d.isDirectory() && d.name !== 'main');
- const updatedAuth = readFileSync(authPath, 'utf8');
- for (const dir of agentDirs) {
- const subAuthPath = `${agentsDir}/${dir.name}/agent/auth-profiles.json`;
- if (existsSync(subAuthPath)) {
- writeFileSync(subAuthPath, updatedAuth);
- await run(`chown 1000:1000 ${subAuthPath} 2>/dev/null; chmod 664 ${subAuthPath}`).catch(() => {});
+} catch (e) { console.error('Failed to update auth-profiles.json:', e.message); _syncWarnings.push(`Auth profiles update failed: ${e.message}`); }
  }
- }
- } catch (e) { console.error('Failed to propagate auth to sub-agents:', e.message); }
- } catch (e) { console.error('Failed to update auth-profiles.json:', e.message); _syncWarnings.push(`Auth profiles update failed: ${e.message}`); }
- }
- }
+}
 
  // Ensure openclaw.json has models.providers entries for providers with keys
  {
@@ -6574,8 +6570,7 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
 
   // Remove from auth-profiles.json
   try {
-   const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
-   const authDoc = JSON.parse(readFileSync(authPath, 'utf8'));
+   const authDoc = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
    const authProviders = [];
    if (provider === 'gemini') authProviders.push('google');
    if (['anthropic', 'openai', 'openrouter', 'mistral'].includes(provider)) authProviders.push(provider);
@@ -6584,7 +6579,7 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
    for (const authProvider of authProviders) {
     authChanged = deleteAuthProfilesForProvider(authDoc, authProvider) || authChanged;
    }
-   if (authChanged) writeFileSync(authPath, JSON.stringify(authDoc, null, 2));
+   if (authChanged) writeMirroredAuthProfiles(authDoc);
   } catch {}
 
   // Remove from providerModels
@@ -7636,8 +7631,6 @@ app.put('/config/openclaw', (req, res) => {
 });
 
 // ── Auth Profiles (read/write OpenClaw auth-profiles.json) ───────────
-const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
-
 app.get('/config/auth-profiles', (req, res) => {
  try {
  const data = readFileSync(AUTH_PROFILES_PATH, 'utf8');
@@ -7652,25 +7645,7 @@ app.put('/config/auth-profiles', (req, res) => {
  try {
  const data = req.body;
  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
- // Backup existing
- try { 
- const existing = readFileSync(AUTH_PROFILES_PATH, 'utf8');
- writeFileSync(AUTH_PROFILES_PATH + '.bak', existing);
- } catch {}
- writeFileSync(AUTH_PROFILES_PATH, JSON.stringify(data, null, 2));
- // Fix permissions
- try { execSync(`chown 1000:1000 ${AUTH_PROFILES_PATH}`, { timeout: 3000 }); } catch {}
- // Also copy to all SPC agents
- try {
- const agentsDir = '/opt/openclaw-data/config/agents';
- const dirs = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
- for (const dir of dirs) {
- const dest = `${agentsDir}/${dir}/agent/auth-profiles.json`;
- try { mkdirSync(`${agentsDir}/${dir}/agent`, { recursive: true }); } catch {}
- writeFileSync(dest, JSON.stringify(data, null, 2));
- try { execSync(`chown -R 1000:1000 ${agentsDir}/${dir}/agent`, { timeout: 3000 }); } catch {}
- }
- } catch {}
+ writeMirroredAuthProfiles(data, { backup: true });
  // Restart OpenClaw gateway to pick up changes
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
  res.json({ success: true });
