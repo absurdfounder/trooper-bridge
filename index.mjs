@@ -2645,13 +2645,25 @@ function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedF
     companyName: readCompanyNameFromDocs(),
   });
 
+  // Crabs-HQ is the source of truth for the main/Team Lead workspace — it pushes
+  // rich AGENTS.md/SOUL.md/TOOLS.md/etc. via PUT /agents/main/workspace during
+  // finalizeProvision. The bridge must only seed defaults for files that don't
+  // exist yet; otherwise every downstream POST /agents or PUT /identity call for
+  // a LEAD agent would clobber the rich content with the simpler template
+  // versions from buildWorkspaceIdentityFiles().
+  const isMainWorkspace = workspacePath === '/opt/openclaw-data/workspace';
+
   for (const [fileName, content] of Object.entries(files)) {
     writeWorkspaceTextFile(workspacePath, fileName, content, {
-      preserveIfExists: preserveSharedFiles && fileName === 'MEMORY.md',
+      // Always preserve MEMORY.md (it accumulates runtime state).
+      // For the main workspace, preserve every identity file too so Crabs-HQ's
+      // rich content is never overwritten — the bridge only writes these files
+      // as first-boot defaults when nothing is there yet.
+      preserveIfExists: isMainWorkspace || (preserveSharedFiles && fileName === 'MEMORY.md'),
     });
   }
 
-  if (workspacePath !== '/opt/openclaw-data/workspace') {
+  if (!isMainWorkspace) {
     for (const sharedFile of ['COMPANY.md', 'MEMORIES.md', 'KNOWLEDGE.md']) {
       try {
         const sharedContent = readFileSync(`/opt/openclaw-data/workspace/${sharedFile}`, 'utf8');
@@ -4543,31 +4555,8 @@ app.put('/agents/:name/identity', (req, res) => {
  const requestedName = req.params.name;
  const isMainAgent = requestedName === 'main' || requestedName === 'Team Lead';
  const slug = agentSlug(requestedName);
- let existing = isMainAgent ? (agentRegistry.get(slug) || { agentId: 'main', role: 'LEAD', name: requestedName }) : agentRegistry.get(slug);
-
- // Heal missing SPC registry entries: if the caller provides enough info to
- // construct a profile, create the registry entry on the fly instead of 404'ing.
- // This lets provision/reconcile flows repair agents whose registry state was
- // lost (bridge restart, partial restore, etc.) without forcing a separate
- // POST /agents round-trip.
- if (!existing) {
-  if (!req.body?.name && !requestedName) {
-   return res.status(404).json({ error: `Agent "${requestedName}" not found` });
-  }
-  const agentId = `spc-${slug}`;
-  existing = {
-   agentId,
-   name: req.body?.name || requestedName,
-   role: req.body?.role || 'SPC',
-   title: req.body?.title || 'Specialist',
-   soul: req.body?.soul || '',
-   skills: Array.isArray(req.body?.skills) ? req.body.skills : [],
-   tools: Array.isArray(req.body?.tools) ? req.body.tools : [],
-   installedSkillIds: Array.isArray(req.body?.installedSkillIds) ? req.body.installedSkillIds : [],
-   avatar: req.body?.avatar || null,
-  };
-  console.log(`🩹 Healing missing registry entry for "${requestedName}" via identity endpoint`);
- }
+ const existing = isMainAgent ? (agentRegistry.get(slug) || { agentId: 'main', role: 'LEAD', name: requestedName }) : agentRegistry.get(slug);
+ if (!existing) return res.status(404).json({ error: `Agent "${requestedName}" not found` });
 
  const nextProfile = {
    ...existing,
