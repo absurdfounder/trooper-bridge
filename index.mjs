@@ -5939,7 +5939,7 @@ app.post('/config/api-keys', async (req, res) => {
  keysUpdateInProgress = true;
  try {
  const { anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, qwenKey, deepseekKey, xaiKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel, openaiCodexAuthProfile } = req.body;
- const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, qwenKey, deepseekKey, xaiKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel].some(k => k !== undefined);
+ const hasAnyKey = [anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, qwenKey, deepseekKey, xaiKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey, browserbaseProjectId, defaultModel, defaultFallbacks, imageModel, pdfModel, openaiCodexAuthProfile].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
  return res.status(400).json({ error: 'No keys provided' });
@@ -6343,6 +6343,41 @@ function writeConfigKey(key, value) {
  }
 }
 
+function listAuthProfilesForProvider(authDoc, provider) {
+ const profiles = authDoc?.profiles && typeof authDoc.profiles === 'object' ? authDoc.profiles : {};
+ return Object.entries(profiles).filter(([id, profile]) =>
+  id === provider || id.startsWith(`${provider}:`) || profile?.provider === provider,
+ );
+}
+
+function getPreferredAuthProfile(authDoc, provider) {
+ const profiles = authDoc?.profiles && typeof authDoc.profiles === 'object' ? authDoc.profiles : {};
+ const lastGoodId = authDoc?.lastGood?.[provider];
+ if (lastGoodId && profiles[lastGoodId]) return { id: lastGoodId, profile: profiles[lastGoodId] };
+ const matches = listAuthProfilesForProvider(authDoc, provider);
+ if (matches.length === 0) return null;
+ const preferred = provider === 'openai-codex'
+  ? matches.find(([, profile]) => profile?.type === 'oauth' && profile?.access)
+  : matches[0];
+ const [id, profile] = preferred || matches[0];
+ return { id, profile };
+}
+
+function deleteAuthProfilesForProvider(authDoc, provider) {
+ if (!authDoc?.profiles || typeof authDoc.profiles !== 'object') return false;
+ let changed = false;
+ for (const [id] of listAuthProfilesForProvider(authDoc, provider)) {
+  delete authDoc.profiles[id];
+  if (authDoc?.usageStats?.[id]) delete authDoc.usageStats[id];
+  changed = true;
+ }
+ if (authDoc?.lastGood?.[provider]) {
+  delete authDoc.lastGood[provider];
+  changed = true;
+ }
+ return changed;
+}
+
 app.get('/config/provider-settings', (req, res) => {
  try {
   // Key presence from .env
@@ -6380,8 +6415,8 @@ app.get('/config/provider-settings', (req, res) => {
   // OpenAI Codex auth profile
   let openaiCodexAuthProfile = null;
   try {
-   const profiles = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
-   const codexProfile = profiles?.profiles?.['openai-codex'];
+   const authDoc = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
+   const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
    if (codexProfile?.access) {
     openaiCodexAuthProfile = { hasAccess: true, email: codexProfile.email || null, expires: codexProfile.expires || null };
    }
@@ -6434,8 +6469,8 @@ app.get('/config/provider-keys-internal', (req, res) => {
   // OpenAI Codex auth profile
   let openaiCodex = null;
   try {
-   const profiles = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
-   const codexProfile = profiles?.profiles?.['openai-codex'];
+   const authDoc = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
+   const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
    if (codexProfile?.access) openaiCodex = codexProfile;
   } catch {}
 
@@ -6487,42 +6522,37 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
   } catch {}
 
   // Remove from auth-profiles.json
-  const AUTH_PROFILE_MAP = { anthropic: 'anthropic', openai: 'openai', openrouter: 'openrouter', gemini: 'google', mistral: 'mistral' };
-  const profileName = AUTH_PROFILE_MAP[provider];
-  if (profileName) {
-   try {
-    const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
-    const profiles = JSON.parse(readFileSync(authPath, 'utf8'));
-    if (profiles?.profiles?.[profileName]) {
-     delete profiles.profiles[profileName];
-     writeFileSync(authPath, JSON.stringify(profiles, null, 2));
-    }
-   } catch {}
-  }
-  // Also remove openai-codex if removing openai
-  if (provider === 'openai') {
-   try {
-    const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
-    const profiles = JSON.parse(readFileSync(authPath, 'utf8'));
-    if (profiles?.profiles?.['openai-codex']) {
-     delete profiles.profiles['openai-codex'];
-     writeFileSync(authPath, JSON.stringify(profiles, null, 2));
-    }
-   } catch {}
-  }
+  try {
+   const authPath = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
+   const authDoc = JSON.parse(readFileSync(authPath, 'utf8'));
+   const authProviders = [];
+   if (provider === 'gemini') authProviders.push('google');
+   if (['anthropic', 'openai', 'openrouter', 'mistral'].includes(provider)) authProviders.push(provider);
+   if (provider === 'openai') authProviders.push('openai-codex');
+   let authChanged = false;
+   for (const authProvider of authProviders) {
+    authChanged = deleteAuthProfilesForProvider(authDoc, authProvider) || authChanged;
+   }
+   if (authChanged) writeFileSync(authPath, JSON.stringify(authDoc, null, 2));
+  } catch {}
 
   // Remove from providerModels
   const providerModels = readConfigKey('providerModels') || {};
-  if (providerModels[provider]) {
-   delete providerModels[provider];
-   writeConfigKey('providerModels', providerModels);
+  let providerModelsChanged = false;
+  const providerModelKeys = provider === 'openai' ? ['openai', 'openai-codex'] : [provider];
+  for (const providerKey of providerModelKeys) {
+   if (providerModels[providerKey]) {
+    delete providerModels[providerKey];
+    providerModelsChanged = true;
+   }
   }
+  if (providerModelsChanged) writeConfigKey('providerModels', providerModels);
 
   // Clean model routing if it referenced this provider
   const modelRouting = readConfigKey('modelRouting') || {};
   let routingChanged = false;
   for (const [slot, model] of Object.entries(modelRouting)) {
-   if (typeof model === 'string' && model.startsWith(`${provider}/`)) {
+   if (typeof model === 'string' && (model.startsWith(`${provider}/`) || (provider === 'openai' && model.startsWith('openai-codex/')))) {
     delete modelRouting[slot];
     routingChanged = true;
    }
@@ -6534,7 +6564,7 @@ app.delete('/config/api-keys/:provider', async (req, res) => {
   let fallbacksChanged = false;
   for (const [slot, arr] of Object.entries(fallbacks)) {
    if (Array.isArray(arr)) {
-    const filtered = arr.filter(m => !m.startsWith(`${provider}/`));
+    const filtered = arr.filter(m => !m.startsWith(`${provider}/`) && !(provider === 'openai' && m.startsWith('openai-codex/')));
     if (filtered.length !== arr.length) {
      fallbacks[slot] = filtered;
      fallbacksChanged = true;
