@@ -2391,6 +2391,24 @@ try {
     changed = true;
     console.log(`[bridge] Migrated: agent "${agent.id}" sandbox.mode → off (was "${oldMode}")`);
    }
+   if (agent.model && typeof agent.model === 'object') {
+    if (isGatewayInheritedModel(agent.model.primary)) {
+     delete agent.model.primary;
+     changed = true;
+     console.log(`[bridge] Migrated: removed inherited model override from agent "${agent.id}"`);
+    }
+    if (Array.isArray(agent.model.fallbacks)) {
+     const filtered = agent.model.fallbacks.filter((candidate) => !isGatewayInheritedModel(candidate));
+     if (filtered.length !== agent.model.fallbacks.length) {
+      agent.model.fallbacks = filtered;
+      changed = true;
+      console.log(`[bridge] Migrated: removed inherited model fallback from agent "${agent.id}"`);
+     }
+    }
+    if (!agent.model.primary && (!Array.isArray(agent.model.fallbacks) || agent.model.fallbacks.length === 0)) {
+     delete agent.model;
+    }
+   }
   }
  }
  // Startup migration: exec host should be "gateway" when sandbox is off
@@ -2590,32 +2608,73 @@ try {
    authChanged = true;
    console.log('[bridge] Removed invalid openai-codex:default profile (api_key type not supported, requires OAuth)');
   }
-  // If openai:default exists as api_key but no openai-codex OAuth profile,
-  // rewrite openai-codex/ model references to openai/ in openclaw.json since
-  // the openai-codex provider requires OAuth tokens (not API keys).
+  // If no openai-codex OAuth profile is available, do not leave the gateway
+  // configured to boot into openai-codex/* models. Pick a working provider from
+  // the auth profile store instead. This prevents fresh installs from entering
+  // a repeated "No API key found for provider openai-codex" failure loop.
   const hasValidCodexProfile = Object.entries(auth.profiles).some(([k, v]) => k.startsWith('openai-codex:') && v.type === 'oauth');
-  if (openaiProfile && !hasValidCodexProfile && openaiProfile.type === 'api_key' && openaiProfile.key) {
+  if (!hasValidCodexProfile) {
    try {
+    const chooseFallbackModel = () => {
+     if (auth.profiles['anthropic:default']) return 'anthropic/claude-sonnet-4-5';
+     if (auth.profiles['openai:default']?.type === 'api_key' && auth.profiles['openai:default']?.key) return 'openai/gpt-5.2';
+     if (auth.profiles['google:default']) return 'google/gemini-2.5-pro';
+     if (auth.profiles['openrouter:default']) return 'openrouter/openai/gpt-5-mini';
+     return null;
+    };
+    const fallbackModel = chooseFallbackModel();
+    if (!fallbackModel) throw new Error('no usable fallback auth profile found');
     const configPath = '/opt/openclaw-data/config/openclaw.json';
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
     let configChanged = false;
-    const rewrite = (v) => typeof v === 'string' && v.startsWith('openai-codex/') ? 'openai/' + v.slice('openai-codex/'.length) : v;
-    if (config.agents?.defaults?.model?.primary?.startsWith('openai-codex/')) {
-     config.agents.defaults.model.primary = rewrite(config.agents.defaults.model.primary);
+    const rewrite = (v) => {
+     if (typeof v === 'string' && v.startsWith('openai-codex/')) return fallbackModel;
+     if (isGatewayInheritedModel(v)) return undefined;
+     return v;
+    };
+    if (config.agents?.defaults?.model?.primary?.startsWith?.('openai-codex/')) {
+     config.agents.defaults.model.primary = fallbackModel;
      configChanged = true;
     }
     if (Array.isArray(config.agents?.defaults?.model?.fallbacks)) {
-     config.agents.defaults.model.fallbacks = config.agents.defaults.model.fallbacks.map(rewrite);
-     if (config.agents.defaults.model.fallbacks.some((f, i) => f !== config.agents.defaults.model.fallbacks[i])) configChanged = true;
+     const before = config.agents.defaults.model.fallbacks.join('\u0000');
+     config.agents.defaults.model.fallbacks = config.agents.defaults.model.fallbacks
+      .map(rewrite)
+      .filter((v, i, arr) => v && v !== config.agents.defaults.model.primary && arr.indexOf(v) === i);
+     if (config.agents.defaults.model.fallbacks.join('\u0000') !== before) configChanged = true;
     }
     if (config.agents?.defaults?.subagents?.model?.startsWith?.('openai-codex/')) {
-     config.agents.defaults.subagents.model = rewrite(config.agents.defaults.subagents.model);
+     config.agents.defaults.subagents.model = fallbackModel;
      configChanged = true;
+    }
+    if (Array.isArray(config.agents?.list)) {
+     for (const agent of config.agents.list) {
+      if (!agent.model || typeof agent.model !== 'object') continue;
+      if (agent.model.primary?.startsWith?.('openai-codex/')) {
+       agent.model.primary = fallbackModel;
+       configChanged = true;
+      }
+      if (isGatewayInheritedModel(agent.model.primary)) {
+       delete agent.model.primary;
+       configChanged = true;
+      }
+      if (Array.isArray(agent.model.fallbacks)) {
+       const before = agent.model.fallbacks.join('\u0000');
+       agent.model.fallbacks = agent.model.fallbacks
+        .map(rewrite)
+        .filter((v, i, arr) => v && v !== agent.model.primary && arr.indexOf(v) === i);
+       if (agent.model.fallbacks.join('\u0000') !== before) configChanged = true;
+      }
+      if (!agent.model.primary && (!Array.isArray(agent.model.fallbacks) || agent.model.fallbacks.length === 0)) {
+       delete agent.model;
+       configChanged = true;
+      }
+     }
     }
     if (configChanged) {
      writeFileSync(configPath, JSON.stringify(config, null, 2));
      try { execSync(`chown 1000:1000 ${configPath} && chmod 600 ${configPath}`, { timeout: 3000 }); } catch {}
-     console.log('[bridge] Rewrote openai-codex/ model references to openai/ (no Codex OAuth available, only API key)');
+     console.log(`[bridge] Rewrote openai-codex model references to ${fallbackModel} (no Codex OAuth profile available)`);
     }
    } catch (e) { console.warn('[bridge] Failed to rewrite openai-codex model references:', e.message); }
   }
@@ -6169,6 +6228,15 @@ function normalizeModelId(model) {
  return provider ? `${provider}/${bare}` : bare;
 }
 
+const hasStoredCodexOAuthProfile = () => {
+ try {
+  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  return Object.values(auth.profiles || {}).some((profile) => profile?.provider === 'openai-codex' && profile?.type === 'oauth' && profile?.access);
+ } catch {
+  return false;
+ }
+};
+
  const _syncWarnings = [];
 
  // Update default/native models in openclaw.json
@@ -6184,8 +6252,14 @@ function normalizeModelId(model) {
  }
  if (defaultModel !== undefined) {
    const normalizedModel = defaultModel ? normalizeModelId(defaultModel) : null;
-   config.agents.defaults.model.primary = normalizedModel || undefined;
-   console.log(`[bridge] Updating default model to: ${normalizedModel}`);
+   if (normalizedModel?.startsWith?.('openai-codex/') && !openaiCodexAuthProfile?.access && !hasStoredCodexOAuthProfile()) {
+     const msg = `Skipped default model update to ${normalizedModel}: Codex OAuth profile is missing`;
+     console.warn(`[bridge] ${msg}`);
+     _syncWarnings.push(msg);
+   } else {
+     config.agents.defaults.model.primary = normalizedModel || undefined;
+     console.log(`[bridge] Updating default model to: ${normalizedModel}`);
+   }
  }
  if (defaultFallbacks !== undefined) {
    const normalizedFallbacks = Array.isArray(defaultFallbacks)

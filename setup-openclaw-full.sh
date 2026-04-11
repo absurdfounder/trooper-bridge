@@ -686,7 +686,29 @@ resolve_primary_model() {
  fi
 }
 
+has_codex_auth_profile() {
+ [ -n "${OPENAI_CODEX_AUTH_PROFILE_B64:-}" ] && [ "${OPENAI_CODEX_AUTH_PROFILE_B64}" != "__UNSET_OPENAI_CODEX_AUTH_PROFILE_B64__" ]
+}
+
+resolve_non_codex_model() {
+ if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ]; then
+ echo "anthropic/claude-sonnet-4-5"
+ elif [ -n "${OPENAI_API_KEY:-}" ] && [ "${OPENAI_API_KEY}" != "__UNSET_OPENAI_API_KEY__" ]; then
+ echo "openai/gpt-5.2"
+ elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
+ echo "google/gemini-2.5-pro"
+ elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
+ echo "openrouter/openai/gpt-5-mini"
+ else
+ echo "openrouter/openai/gpt-5-mini"
+ fi
+}
+
 RESOLVED_MODEL=$(resolve_primary_model)
+if echo "$RESOLVED_MODEL" | grep -q '^openai-codex/' && ! has_codex_auth_profile; then
+ dlog "Codex model was requested but no Codex OAuth profile was supplied; falling back to an available API-key provider." "model-routing"
+ RESOLVED_MODEL=$(resolve_non_codex_model)
+fi
 RESOLVED_PROVIDER=$(echo "$RESOLVED_MODEL" | cut -d'/' -f1)
 RESOLVED_MODEL_ID=$(echo "$RESOLVED_MODEL" | cut -d'/' -f2-)
 dlog "Model routing: ${RESOLVED_MODEL} (provider: ${RESOLVED_PROVIDER})"
