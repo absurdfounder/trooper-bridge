@@ -1236,7 +1236,41 @@ dlog "Auth profiles configured for: $(echo "$AUTH_LASTGOOD" | grep -o '"[a-z0-9-
 # ── OpenClaw Workspace Bootstrap ──────────────────────────────────────
 # Workspace files are pushed AFTER deploy via the bridge API (provision.js)
 # This keeps the setup script small and workspace always in sync.
-mkdir -p /opt/openclaw-data/workspace/memory
+mkdir -p /opt/openclaw-data/workspace/memory /opt/openclaw-data/workspace/skills
+
+cat > /opt/openclaw-data/workspace/MEMORY.md << 'MEMORYMD'
+# Memory
+
+## Active Context
+No active context has been synced yet.
+
+## Preferences
+No preferences have been captured yet.
+
+## Decisions Log
+No decisions have been captured yet.
+
+## Lessons Learned
+No lessons have been captured yet.
+MEMORYMD
+
+cat > /opt/openclaw-data/workspace/MEMORIES.md << 'MEMORIESMD'
+# Structured Memories
+
+_No structured memories have been synced yet. This file is generated from CrabsHQ memory._
+MEMORIESMD
+
+cat > /opt/openclaw-data/workspace/KNOWLEDGE.md << 'KNOWLEDGEMD'
+# Team Knowledge
+
+_No durable knowledge entries have been synced yet. This file is generated from CrabsHQ knowledge._
+KNOWLEDGEMD
+
+cat > /opt/openclaw-data/workspace/skills/README.md << 'SKILLSREADME'
+# Skills
+
+_No workspace skills installed yet._
+SKILLSREADME
 
 # BOOT.md — runs on gateway startup via boot-md hook
 cat > /opt/openclaw-data/workspace/BOOT.md << 'BOOTMD'

@@ -45,7 +45,7 @@ import { messages as messagesTable, agents as agentsTable, humans as humansTable
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
-import { buildExecutionLanePromptBlock, buildRuntimeSystemPrompt, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
+import { EMPTY_KNOWLEDGE_MD, EMPTY_MEMORIES_MD, buildExecutionLanePromptBlock, buildRuntimeSystemPrompt, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
 import {
   formatProviderLogLabel,
   readConfiguredDefaultModelId,
@@ -2551,6 +2551,41 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  } catch {}
 }
 
+function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/workspace') {
+ try {
+  mkdirSync(`${workspacePath}/memory`, { recursive: true });
+  mkdirSync(`${workspacePath}/skills`, { recursive: true });
+  const placeholders = {
+   'MEMORIES.md': EMPTY_MEMORIES_MD,
+   'KNOWLEDGE.md': EMPTY_KNOWLEDGE_MD,
+  };
+  for (const [fileName, content] of Object.entries(placeholders)) {
+   const target = `${workspacePath}/${fileName}`;
+   if (!existsSync(target)) writeFileSync(target, content);
+  }
+  const skillsReadme = `${workspacePath}/skills/README.md`;
+  if (!existsSync(skillsReadme)) {
+   writeFileSync(skillsReadme, '# Skills\n\n_No workspace skills installed yet._\n');
+  }
+  try { execSync(`chown -R 1000:1000 ${workspacePath}/memory ${workspacePath}/skills ${workspacePath}/MEMORIES.md ${workspacePath}/KNOWLEDGE.md 2>/dev/null`, { timeout: 3000 }); } catch {}
+ } catch (err) {
+  console.warn(`[workspace] Failed to ensure bootstrap files for ${workspacePath}: ${err.message}`);
+ }
+}
+
+function ensureAllAgentWorkspaceBootstrapFiles() {
+ ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
+ try {
+  const agentsDir = '/opt/openclaw-data/config/agents';
+  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
+  for (const agent of agents) {
+   ensureWorkspaceBootstrapFiles(`${agentsDir}/${agent}/workspace`);
+  }
+ } catch {}
+}
+
+ensureAllAgentWorkspaceBootstrapFiles();
+
 try {
  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
  let authChanged = false;
@@ -2764,7 +2799,7 @@ function writeWorkspaceTextFile(workspacePath, fileName, content, { preserveIfEx
 }
 
 function syncRuntimeIdentityFiles({ workspacePath, agentProfile, preserveSharedFiles = true }) {
-  execSync(`mkdir -p ${workspacePath}/memory`, { timeout: 5000 });
+  ensureWorkspaceBootstrapFiles(workspacePath);
 
   const normalizedProfile = normalizeAgentProfile(agentProfile);
   const teamProfiles = [
@@ -2826,7 +2861,7 @@ function getLegacyAgentWorkspacePath(agentId = 'main') {
 
 function ensureAgentWorkspacePath(agentId = 'main') {
   const workspacePath = getAgentWorkspacePath(agentId);
-  mkdirSync(`${workspacePath}/memory`, { recursive: true });
+  ensureWorkspaceBootstrapFiles(workspacePath);
 
   if (agentId !== 'main') {
     const legacyPath = getLegacyAgentWorkspacePath(agentId);
@@ -4812,7 +4847,7 @@ app.put('/agents/:name/workspace', (req, res) => {
  workspacePath = ensureAgentWorkspacePath(agentId);
  }
  try {
- execSync('mkdir -p ' + workspacePath + '/memory', { timeout: 5000 });
+ ensureWorkspaceBootstrapFiles(workspacePath);
  const { files, overwrite = false } = req.body;
  if (!files || typeof files !== 'object') return res.status(400).json({ error: 'files object required' });
  const PROTECTED_FILES = new Set(['AGENTS.md', 'SOUL.md', 'BOOTSTRAP.md', 'IDENTITY.md', 'USER.md', 'TOOLS.md']);
@@ -4849,6 +4884,7 @@ app.post('/agents/company-context', (req, res) => {
  cachedCompanyDocs = content;
  // Write to LEAD workspace
  const workspacePath = '/opt/openclaw-data/workspace';
+ ensureWorkspaceBootstrapFiles(workspacePath);
  writeFileSync(`${workspacePath}/COMPANY.md`, content);
  execSync(`chown 1000:1000 ${workspacePath}/COMPANY.md`, { timeout: 5000 });
  // Write to all SPC workspaces
@@ -4857,7 +4893,7 @@ app.post('/agents/company-context', (req, res) => {
  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
  for (const agent of agents) {
  const spcWs = `${agentsDir}/${agent}/workspace`;
- mkdirSync(spcWs, { recursive: true });
+ ensureWorkspaceBootstrapFiles(spcWs);
  writeFileSync(`${spcWs}/COMPANY.md`, content);
  execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
  }
@@ -4895,6 +4931,7 @@ app.post('/agents/sync-memories', (req, res) => {
    .replace('_Auto-synced structured knowledge. Agents: reference this for context._', '_Auto-synced from MEMORIES.md. Do not edit manually; this file is generated from structured memory._');
 
  // Write to LEAD workspace
+ ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
  writeFileSync('/opt/openclaw-data/workspace/MEMORIES.md', memoriesContent);
  writeFileSync('/opt/openclaw-data/workspace/MEMORY.md', memoryContent);
  execSync('chown 1000:1000 /opt/openclaw-data/workspace/MEMORIES.md /opt/openclaw-data/workspace/MEMORY.md', { timeout: 5000 });
@@ -4906,7 +4943,7 @@ app.post('/agents/sync-memories', (req, res) => {
  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
  for (const agent of agents) {
  const spcWs = `${agentsDir}/${agent}/workspace`;
- mkdirSync(spcWs, { recursive: true });
+ ensureWorkspaceBootstrapFiles(spcWs);
  writeFileSync(`${spcWs}/MEMORIES.md`, memoriesContent);
  writeFileSync(`${spcWs}/MEMORY.md`, memoryContent);
  execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
@@ -4956,6 +4993,7 @@ app.post('/agents/sync-knowledge', (req, res) => {
  }
 
  // Write to LEAD workspace
+ ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
  writeFileSync('/opt/openclaw-data/workspace/KNOWLEDGE.md', content);
  execSync('chown 1000:1000 /opt/openclaw-data/workspace/KNOWLEDGE.md', { timeout: 5000 });
 
@@ -4966,7 +5004,7 @@ app.post('/agents/sync-knowledge', (req, res) => {
  const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
  for (const agent of agents) {
  const spcWs = `${agentsDir}/${agent}/workspace`;
- mkdirSync(spcWs, { recursive: true });
+ ensureWorkspaceBootstrapFiles(spcWs);
  writeFileSync(`${spcWs}/KNOWLEDGE.md`, content);
  execSync(`chown -R 1000:1000 ${agentsDir}/${agent}`, { timeout: 5000 });
  spcCount++;
