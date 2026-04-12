@@ -2913,16 +2913,20 @@ function updateOpenClawConfig(callback) {
 
 // ── Shared: build task message from request body ─────────────────────
 function buildTaskMessage(body) {
- const { task, context, installedSkills } = body;
+ const { task, context } = body;
  const taskParts = [task];
  if (context?.taskId) taskParts.push(`\n[Task ID: ${context.taskId}]`);
  if (context?.taskTitle) taskParts.push(`[Task Title: ${context.taskTitle}]`);
  if (context?.checklist) taskParts.push(`[Checklist: ${JSON.stringify(context.checklist)}]`);
+ return taskParts.join('\n');
+}
+
+function buildInstalledSkillsPromptBlock(installedSkills) {
  if (installedSkills && Array.isArray(installedSkills) && installedSkills.length > 0) {
  const skillText = installedSkills.map(s => s.content || s).filter(Boolean).join('\n---\n');
- if (skillText) taskParts.push(`\n## Available Skills\n${skillText}`);
+ if (skillText) return `## Available Skills\n${skillText}`;
  }
- return taskParts.join('\n');
+ return '';
 }
 
 function resolveNativeGatewayAgentId(registered, slug) {
@@ -2955,6 +2959,7 @@ function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt
   browserTask: context?.browserTask === true,
   projectRef: context?.projectRef || null,
   deviceRef: context?.deviceRef || null,
+  senderName: context?.senderName || '',
  });
 }
 
@@ -3029,6 +3034,10 @@ async function handleIncomingTask(req, res) {
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})${isTaskWork ? ' [TASK]' : ''}...`);
  // Build a thin runtime prompt with project folder enforcement
  let nonStreamSystemPrompt = buildCrabsHqSystemPrompt(registered, context, systemPrompt || undefined);
+ const nonStreamSkillsPrompt = buildInstalledSkillsPromptBlock(installedSkills);
+ if (nonStreamSkillsPrompt) {
+ nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${nonStreamSkillsPrompt}` : nonStreamSkillsPrompt;
+ }
  const nonStreamProjectFolder = context?.projectFolder;
  if (nonStreamProjectFolder) {
  const wsBase = '/home/node/.openclaw/workspace';
@@ -3078,7 +3087,7 @@ async function handleIncomingTask(req, res) {
 // POST /webhook/mission-control/stream
 // Returns Server-Sent Events: tool_start, tool_result, text, thinking, done, error
 async function handleIncomingTaskStream(req, res) {
- const { requestId, task, agentName, context, systemPrompt, skillCredentials, thinking, model } = req.body;
+ const { requestId, task, agentName, context, systemPrompt, installedSkills, skillCredentials, thinking, model } = req.body;
  if (!task) return res.status(400).json({ error: 'Missing task' });
 
  const id = requestId || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -3180,6 +3189,10 @@ const emitViewportScreenshotFrame = ({
 
  const isBrowserTask = context?.browserTask === true;
  let resolvedSystemPrompt = buildCrabsHqSystemPrompt(registered, context, systemPrompt || undefined);
+ const streamSkillsPrompt = buildInstalledSkillsPromptBlock(installedSkills);
+ if (streamSkillsPrompt) {
+ resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${streamSkillsPrompt}` : streamSkillsPrompt;
+ }
 
  // ── Project folder enforcement ──
  // Server passes a deterministic projectFolder (title-slug + id-hash).
