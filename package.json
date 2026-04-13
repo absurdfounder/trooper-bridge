@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "test": "node --test lib/event-contracts.test.mjs"
+    "test": "node --test lib/event-contracts.test.mjs lib/app-flow-scenario.test.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.8.0",
