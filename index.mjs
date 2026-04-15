@@ -47,7 +47,10 @@ import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
 import { EMPTY_KNOWLEDGE_MD, EMPTY_MEMORIES_MD, buildExecutionLanePromptBlock, buildRuntimeSystemPrompt, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
 import {
+  buildOpenAiCodexProviderConfig,
+  ensureOpenAiCodexProviderTransport,
   formatProviderLogLabel,
+  normalizeProviderErrorMessage,
   readConfiguredDefaultModelId,
   resolveProviderRuntimeContext,
   stripGatewayErrorPrefix,
@@ -1727,13 +1730,14 @@ function extractPatchFilePaths(patchText = '') {
  }
  // Gateway auth/provider error — forward immediately and terminate
  if (stream === 'lifecycle' && data?.phase === 'error') {
- const errMsg = stripGatewayErrorPrefix(data.error || 'Gateway error') || 'Gateway error';
+ const rawErrMsg = stripGatewayErrorPrefix(data.error || 'Gateway error') || 'Gateway error';
  const { provider: errorProvider, model: errorModel } = resolveProviderRuntimeContext({
  provider: data.provider || null,
  model: data.model || null,
  fallbackModel: effectiveRequestedModel,
- error: errMsg,
+ error: rawErrMsg,
  });
+ const errMsg = normalizeProviderErrorMessage(rawErrMsg, { provider: errorProvider, model: errorModel }) || 'Gateway error';
  console.error(`[OpenClaw] Gateway lifecycle error ${formatProviderLogLabel({ provider: errorProvider, model: errorModel })}: ${errMsg}`);
  if (onEvent) onEvent('error', { message: errMsg, provider: errorProvider, model: errorModel });
  // Reject the pending request so the SSE stream terminates immediately
@@ -2585,6 +2589,14 @@ function ensureAllAgentWorkspaceBootstrapFiles() {
 }
 
 ensureAllAgentWorkspaceBootstrapFiles();
+
+try {
+ const { changed } = ensureOpenAiCodexProviderTransport();
+ if (changed) {
+  try { execSync('chown 1000:1000 /opt/openclaw-data/config/openclaw.json && chmod 600 /opt/openclaw-data/config/openclaw.json', { timeout: 3000 }); } catch {}
+  console.log('[bridge] Repaired models.providers.openai-codex transport (openai-codex-responses)');
+ }
+} catch (e) { /* config not available yet */ }
 
 try {
  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
@@ -3508,14 +3520,20 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
 
  console.error(`[${id}] SSE agent failed: ${err.message}`);
  captureLog('error', `SSE agent failed: ${err.message}`, { requestId: id, agent: agentName, stack: err.stack });
- const errMessage = stripGatewayErrorPrefix(err.message) || 'Bridge error';
+ const rawErrMessage = stripGatewayErrorPrefix(err.message) || 'Bridge error';
+ const rawRuntime = resolveProviderRuntimeContext({
+  provider: err.provider || null,
+  model: err.model || null,
+  fallbackModel: model || null,
+  error: rawErrMessage,
+ });
+ const errMessage = normalizeProviderErrorMessage(rawErrMessage, rawRuntime) || 'Bridge error';
  const normalizedError = (isSPC && /unknown agent id/i.test(errMessage || ''))
   ? `Native SPC agent "${agentId}" is missing in gateway config for ${agentName || 'SPC'}. Reconcile or reprovision the runtime instead of falling back to main.`
   : errMessage;
  const { provider: errorProvider, model: errorModel } = resolveProviderRuntimeContext({
-  provider: err.provider || null,
-  model: err.model || null,
-  fallbackModel: model || null,
+  provider: rawRuntime.provider,
+  model: rawRuntime.model,
   error: normalizedError,
  });
  sendSSE('error', { message: normalizedError, requestId: id, provider: errorProvider, model: errorModel });
@@ -6541,6 +6559,7 @@ const hasStoredCodexOAuthProfile = () => {
  { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
  ] }},
+ 'openai-codex': { key: (openaiCodexAuthProfile?.access || hasStoredCodexOAuthProfile()) ? 'oauth' : undefined, config: buildOpenAiCodexProviderConfig() },
  mistral: { key: mistralKey, config: {
  baseUrl: 'https://api.mistral.ai/v1', api: 'openai-completions',
  models: [
@@ -6557,10 +6576,13 @@ const hasStoredCodexOAuthProfile = () => {
  if (!config.models.providers) config.models.providers = {};
  let changed = false;
  for (const [providerName, entry] of newProviders) {
- if (!config.models.providers[providerName]) {
- config.models.providers[providerName] = entry.config;
+ const nextProviderConfig = providerName === 'openai-codex'
+  ? buildOpenAiCodexProviderConfig(config.models.providers[providerName] || {})
+  : entry.config;
+ if (JSON.stringify(config.models.providers[providerName] || null) !== JSON.stringify(nextProviderConfig)) {
+ config.models.providers[providerName] = nextProviderConfig;
  changed = true;
- console.log(`[bridge] Added models.providers.${providerName} to openclaw.json`);
+ console.log(`[bridge] Updated models.providers.${providerName} in openclaw.json`);
  }
  }
  if (changed) {

@@ -871,6 +871,16 @@ if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPE
  }'
 fi
 
+if has_codex_auth_profile; then
+ add_provider ' "openai-codex": {
+ "baseUrl": "https://chatgpt.com/backend-api",
+ "api": "openai-codex-responses",
+ "models": [
+ { "id": "gpt-5.4", "name": "gpt-5.4", "api": "openai-codex-responses" }
+ ]
+ }'
+fi
+
 # Fallback: if no providers configured, add anthropic as default
 if [ -z "$MODELS_PROVIDERS" ]; then
  MODELS_PROVIDERS=' "anthropic": {
