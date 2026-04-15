@@ -45,7 +45,18 @@ import { messages as messagesTable, agents as agentsTable, humans as humansTable
 import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
-import { EMPTY_KNOWLEDGE_MD, EMPTY_MEMORIES_MD, buildExecutionLanePromptBlock, buildRuntimeSystemPrompt, buildWorkspaceIdentityFiles, normalizeAgentProfile } from './lib/runtime-identity.mjs';
+import { ensureDefaultSkillPack } from './lib/default-skill-pack.mjs';
+import {
+  EMPTY_KNOWLEDGE_MD,
+  EMPTY_MEMORIES_MD,
+  buildExecutionLanePromptBlock,
+  buildInstalledSkillsPromptBlock as buildRuntimeInstalledSkillsPromptBlock,
+  buildRuntimeSystemPrompt,
+  buildWorkspaceIdentityFiles,
+  normalizeAgentProfile,
+  normalizeAgentValueList,
+  resolveSpecialistPromptMode,
+} from './lib/runtime-identity.mjs';
 import {
   buildOpenAiCodexProviderConfig,
   ensureOpenAiCodexProviderTransport,
@@ -60,109 +71,6 @@ const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'o
 
 // Build a human-readable summary for a completed tool call
 // Used for native tool_use/tool_result events from gateway
-// ── SPC AGENTS.md Template ──────────────────────────────────────────
-function buildSpcAgentsMd(name, title, skillsBlock, teamRoster) {
-  return `# ${name}
-**${title || 'Specialist Agent'}**
-${skillsBlock}
-
-## YOUR MISSION
-You are part of a **collaborative AI team** working for a human. The human assigns tasks through CrabsHQ. The Team Lead breaks tasks into steps and assigns each step to the specialist best suited for it. **Your goal is to deliver what the human wants — not just "do your step."**
-
-Think of it like a real team: the human is the client. The Team Lead is the project manager. You and your teammates are the specialists. The client cares about the end result — a working website, a polished report, a deployed app — not about which step each person did.
-
-## YOUR TEAM
-${teamRoster || 'Your teammates are listed in each task prompt. Refer to them by @Name.'}
-
-**Collaboration rules:**
-- You can see what your teammates produced in previous steps — READ their files before starting yours
-- If a teammate's work has issues, FIX them in your step. Don't file a complaint — fix it.
-- If you need something from a teammate that isn't available, do it yourself. Agents don't wait on each other.
-- The human assigned this task to the TEAM, not to you individually. The team succeeds or fails together.
-
-## HOW THE PIPELINE WORKS
-1. Team Lead breaks the task into 2-5 steps, assigns each to a specialist
-2. Steps run sequentially — each agent picks up where the previous left off
-3. All agents share ONE workspace at \`~/.openclaw/workspace/\`
-4. Previous agents write files → you READ those files → you EDIT/ADD to them → next agent does the same
-5. The final step produces the deliverable the human gets
-
-**What this means for you:**
-- Your output becomes the NEXT agent's input. Write REAL FILES, not descriptions.
-- Keep your text response SHORT (< 500 chars). The system shows it as a comment — long prose clutters the UI.
-- The REAL work is the files you create/edit with tools. Your text response is just a summary.
-- **Always mention which files you created or modified** — e.g. "Updated \`project/index.html\` — added responsive nav, fixed footer links"
-
-## #1 RULE: USE TOOLS, NOT WORDS
-**THE SYSTEM TRACKS TOOL USAGE. Steps with long text and zero tool calls are AUTOMATICALLY REJECTED.**
-
-| Task type | What to do | What NOT to do |
-|-----------|-----------|---------------|
-| Build website | \`Write\` index.html, style.css, app.js | Describe what the code would look like |
-| Edit existing code | \`Read\` → \`Edit\` specific lines | Rewrite the entire file from scratch |
-| Research topic | \`web_search\` → \`web_fetch\` → summarize | Write from memory with no sources |
-| Deploy something | \`exec\` deployment commands | Write a doc about how to deploy |
-| Fix a bug | \`Read\` file → find issue → \`Edit\` fix | Describe what might be wrong |
-
-**Tools available:** Read, Write, Edit, exec, web_search, web_fetch, browser, memory_search, sessions_spawn (sub-agents), sessions_yield (end turn early)
-
-**Fallback order when a tool fails:** web_search → browser → web_fetch → exec → training knowledge (label as "from training data, may be outdated")
-
-## WHEN YOU NEED HUMAN INPUT
-If you need info only the human can provide:
-1. **Do NOT make up placeholder values** or write "TBD" content
-2. **HALT immediately** with: \`<blocked reason="need user input">What you need, plainly</blocked>\`
-3. The system pauses the task and tags the human. When they reply, your step auto-resumes with their answer injected.
-
-**HALT for:** Missing credentials, API keys, brand guidelines, email addresses, hosting targets, approval needed
-**Do NOT halt for:** Placeholder images (use picsum/Unsplash), copy text (write real copy), technical decisions (pick sensible defaults)
-
-## WORKSPACE & FILES
-- **Shared workspace:** \`~/.openclaw/workspace/\` — ALL agents read/write here
-- **Project folders:** Create a folder per project: \`workspace/project-name/\`
-- **File extensions:** Use real ones: \`.html\`, \`.css\`, \`.js\`, \`.py\`, \`.json\`, \`.tsx\`
-- **Read before write:** ALWAYS \`Read\` existing files before modifying. Don't overwrite blindly.
-- **Edit > Rewrite:** Use \`Edit\` for surgical changes. Don't rewrite 500 lines to fix 3.
-- **Edit failures:** If \`Edit\` fails (old_string not found), IMMEDIATELY \`Read\` the file again to get the CURRENT content, find the actual text, and retry with the correct old_string. NEVER give up after one failed edit — read + retry is mandatory. If it still fails after re-reading, fall back to \`Write\` with the COMPLETE corrected file.
-- **Edit best practice:** When doing multiple edits to the same file, \`Read\` the file ONCE, then do ALL edits. After each successful edit, the file content changes — if you need another edit, use the text you KNOW is there (post-edit), not what you read before the first edit.
-- **CRITICAL: Never chain multiple Edits on the same file without re-reading between them if any edit could change the text a later edit targets.** The Edit tool is exact-match only — if your first edit moves text around, the second edit's old_string won't match.
-- **Report changes:** In your text response, list which files you created/modified and what changed.
-
-## OUTPUT FORMAT
-Wrap deliverables so the system can extract them:
-\`\`\`
-<delivery>Final polished content here</delivery>
-<file name="styles.css">actual CSS code</file>
-\`\`\`
-
-Your text response = brief summary of what you did + which files changed. 2-4 sentences max.
-
-## QUALITY STANDARDS
-- **Code:** Complete, runnable, no TODO/placeholder comments. If it's a website, it should render correctly.
-- **HTML/CSS:** Responsive, real content (not lorem ipsum unless specified), proper meta tags, clean structure.
-- **Research:** Cite real URLs. Distinguish facts from opinions. Use web_search, not memory.
-- **All work:** Must be immediately usable by the human without further editing.
-- **Git work:** If editing a repo, mention exact files changed. Use \`exec\` to run tests if applicable.
-
-## MICRO APPS — Custom Dashboards
-When a task involves creating a trackable dashboard or recurring data collection:
-1. Create \`~/.openclaw/workspace/apps/{slug}/manifest.json\` with: name, slug, description, icon (emoji), dataSchema (table|cards|kpi|timeline|memo|debate|table+cards), columns, schedule, reliability
-2. Run data collection and write \`apps/{slug}/data.json\` with: lastUpdated, lastRunStatus, rows/content/kpis/sections
-3. If recurring, set up a cron job and store cronJobId in manifest
-4. dataSchema guide: table/cards for lists, kpi for metrics, timeline for logs, memo for reports, debate for multi-model discussions
-
-## CONTEXT FILES
-- **COMPANY.md** — who you work for, their products, brand voice. Read this first.
-- **SECRETS.md** — API keys, credentials. Never output full keys.
-- **KNOWLEDGE.md** — cross-agent intelligence: decisions, facts, lessons learned from past work.
-- **memory_search** — check before starting. Don't redo work that's already been done.
-
-## RULES
-1. Fix errors immediately — don't ask, don't wait
-2. Never force push or rewrite git history
-3. If you can't complete your step, HALT with \`<blocked>\` — don't produce fake output
-4. The human's satisfaction is the only metric that matters`;
-}
 
 function detectDisplayGeometry(display = ':99') {
   let geometry = '1280x800';
@@ -2584,6 +2492,7 @@ function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/works
  try {
   mkdirSync(`${workspacePath}/memory`, { recursive: true });
   mkdirSync(`${workspacePath}/skills`, { recursive: true });
+  ensureDefaultSkillPack(`${workspacePath}/skills`);
   const placeholders = {
    'MEMORIES.md': EMPTY_MEMORIES_MD,
    'KNOWLEDGE.md': EMPTY_KNOWLEDGE_MD,
@@ -2602,8 +2511,19 @@ function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/works
  }
 }
 
+function ensureManagedDefaultSkillPack(skillsRoot = '/home/node/.openclaw/.agents/skills') {
+ try {
+  mkdirSync(skillsRoot, { recursive: true });
+  ensureDefaultSkillPack(skillsRoot);
+  try { execSync(`chown -R 1000:1000 ${skillsRoot} 2>/dev/null`, { timeout: 3000 }); } catch {}
+ } catch (err) {
+  console.warn(`[workspace] Failed to ensure default skill pack for ${skillsRoot}: ${err.message}`);
+ }
+}
+
 function ensureAllAgentWorkspaceBootstrapFiles() {
  ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
+ ensureManagedDefaultSkillPack('/home/node/.openclaw/.agents/skills');
  try {
   const agentsDir = '/opt/openclaw-data/config/agents';
   const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
@@ -2974,12 +2894,9 @@ function buildTaskMessage(body) {
  return taskParts.join('\n');
 }
 
-function buildInstalledSkillsPromptBlock(installedSkills) {
- if (installedSkills && Array.isArray(installedSkills) && installedSkills.length > 0) {
- const skillText = installedSkills.map(s => s.content || s).filter(Boolean).join('\n---\n');
- if (skillText) return `## Available Skills\n${skillText}`;
- }
- return '';
+function buildInstalledSkillsPromptBlock(installedSkills, agentProfile = {}, context = {}) {
+ const specialistMode = resolveSpecialistPromptMode(agentProfile, context);
+ return buildRuntimeInstalledSkillsPromptBlock(installedSkills, { specialistMode });
 }
 
 function resolveNativeGatewayAgentId(registered, slug) {
@@ -3049,11 +2966,58 @@ function buildRegisteredAgentProfile({ requestedName, slug, existing = {}, incom
   name: incoming?.name || existing?.name || requestedName,
   title: incoming?.title || existing?.title || (normalizedRole === 'LEAD' ? 'Team Lead' : 'Specialist'),
   role: normalizedRole,
-  skills: Array.isArray(incoming?.skills) ? incoming.skills : (existing.skills || []),
-  tools: Array.isArray(incoming?.tools) ? incoming.tools : (existing.tools || []),
-  installedSkillIds: Array.isArray(incoming?.installedSkillIds) ? incoming.installedSkillIds : (existing.installedSkillIds || []),
+  skills: normalizeAgentValueList(incoming?.skills ?? existing?.skills ?? []),
+  tools: normalizeAgentValueList(incoming?.tools ?? existing?.tools ?? []),
+  installedSkillIds: normalizeAgentValueList(incoming?.installedSkillIds ?? existing?.installedSkillIds ?? []),
   avatar: incoming?.avatar !== undefined ? (incoming.avatar || null) : (existing.avatar || null),
  };
+}
+
+function summarizeSuccessfulArtifactsFromToolLog(toolLog = []) {
+ const successfulEntries = (Array.isArray(toolLog) ? toolLog : []).filter((entry) => entry?.success !== false);
+ if (successfulEntries.length === 0) return null;
+
+ const filePaths = [];
+ const seen = new Set();
+ const pushPath = (candidate) => {
+  const value = String(candidate || '').trim().replace(/^\/home\/node\/\.openclaw\/workspace\//, '');
+  if (!value || seen.has(value)) return;
+  seen.add(value);
+  filePaths.push(value);
+ };
+
+ successfulEntries.forEach((entry) => {
+  const tool = String(entry?.tool || '').toLowerCase();
+  const params = entry?.params || {};
+  if (tool === 'write' || tool === 'edit') {
+   pushPath(params.file_path || params.path || params.filePath);
+  } else if (tool === 'apply_patch') {
+   extractPatchFilePaths(params.patch || entry?.summary || '').forEach(pushPath);
+  }
+ });
+
+ if (filePaths.length > 0) {
+  const preview = filePaths.slice(0, 3).join(', ');
+  const suffix = filePaths.length > 3 ? ` (+${filePaths.length - 3} more)` : '';
+  return {
+   kind: 'files',
+   filePaths,
+   summary: filePaths.length === 1
+    ? `Created or updated ${preview}.`
+    : `Created or updated ${filePaths.length} workspace files: ${preview}${suffix}.`,
+  };
+ }
+
+ const usedTools = normalizeAgentValueList(successfulEntries.map((entry) => entry?.tool)).slice(0, 4);
+ if (usedTools.length > 0) {
+  return {
+   kind: 'tools',
+   filePaths: [],
+   summary: `Completed the run using ${usedTools.join(', ')}.`,
+  };
+ }
+
+ return null;
 }
 
 function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt = undefined) {
@@ -3080,6 +3044,7 @@ function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt
   projectRef: context?.projectRef || null,
   deviceRef: context?.deviceRef || null,
   senderName: context?.senderName || '',
+  matchedSkillNames: context?.matchedSkillNames || [],
  });
 }
 
@@ -3297,6 +3262,16 @@ async function handleIncomingTaskStream(req, res) {
 let screenshotPollerInterval = null;
 let browserSessionActive = false;
 let browserSessionId = null;
+const effectiveAgentProfile = normalizeAgentProfile({
+ ...(registered || {}),
+ name: agentName || registered?.name || 'Agent',
+ title: context?.agentTitle || registered?.title || (context?.agentRole === 'LEAD' ? 'Team Lead' : 'Specialist'),
+ role: context?.agentRole || registered?.role || 'SPC',
+});
+const matchedSkillNames = Array.isArray(installedSkills)
+ ? installedSkills.map((skill) => skill?.name || skill?.slug || skill?.id).filter(Boolean)
+ : [];
+const specialistMode = resolveSpecialistPromptMode(effectiveAgentProfile, context);
 
 const emitViewportScreenshotFrame = ({
  action = 'Visible browser viewport',
@@ -3313,15 +3288,18 @@ const emitViewportScreenshotFrame = ({
    captureKind: 'viewport',
    geometry: viewportFrame.geometry,
   }));
-  return true;
+ return true;
  } catch {
   return false;
  }
 };
 
  const isBrowserTask = context?.browserTask === true;
- let resolvedSystemPrompt = buildCrabsHqSystemPrompt(registered, context, systemPrompt || undefined);
- const streamSkillsPrompt = buildInstalledSkillsPromptBlock(installedSkills);
+ let resolvedSystemPrompt = buildCrabsHqSystemPrompt(registered, {
+  ...context,
+  matchedSkillNames,
+ }, systemPrompt || undefined);
+ const streamSkillsPrompt = buildInstalledSkillsPromptBlock(installedSkills, effectiveAgentProfile, context);
  if (streamSkillsPrompt) {
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${streamSkillsPrompt}` : streamSkillsPrompt;
  }
@@ -3448,7 +3426,8 @@ if (endSession) {
  const toolOverhead = toolLog.length * 200;
 
  // Structured outcome hint for CrabsHQ orchestration
- const responseText = response || '';
+const responseText = response || '';
+ const artifactSummary = summarizeSuccessfulArtifactsFromToolLog(toolLog);
  const blockedMatch = typeof responseText === 'string' ? responseText.match(/<blocked\s+reason="([^"]*)">([\s\S]*?)<\/blocked>/i) : null;
  const completedMatch = typeof responseText === 'string' ? responseText.match(/<completed[^>]*>([\s\S]*?)<\/completed>/i) : null;
  if (blockedMatch) {
@@ -3467,6 +3446,10 @@ toolLog: toolLog.length > 0 ? toolLog : undefined,
 usage: { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true },
  runId: gatewayRunId || undefined,
  sessionKey: resolvedSessionKey || sessionKey,
+ specialistMode,
+ matchedSkills: matchedSkillNames.length > 0 ? matchedSkillNames : undefined,
+ structuredResultSummary: artifactSummary?.summary || undefined,
+ artifactPaths: artifactSummary?.filePaths?.length ? artifactSummary.filePaths : undefined,
 desktopRecordingUrl: desktopRecordingUrl || undefined,
 });
 
@@ -5893,6 +5876,10 @@ app.get('/skills/installed', (req, res) => {
        const lockEntry = lock.skills?.[dir] || null;
        const sourceRepo = lockEntry?.source || null;
        const slug = buildSkillsMarketplaceSlug(sourceRepo, dir);
+       const includeLocalContent =
+         skillsDir.includes('/opt/openclaw-data/workspace/skills') ||
+         skillsDir.includes('/.openclaw/skills') ||
+         skillsDir.includes('/.agents/skills');
         seen.add(dir);
         skills.push({
           slug,
@@ -5913,6 +5900,8 @@ app.get('/skills/installed', (req, res) => {
           pageUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
           sourceUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
           installCommand: sourceRepo ? `npx skills add https://github.com/${sourceRepo} --skill ${dir}` : null,
+          content: includeLocalContent ? skillMd : null,
+          files: includeLocalContent ? { 'SKILL.md': skillMd } : null,
         });
       } catch {}
      }
