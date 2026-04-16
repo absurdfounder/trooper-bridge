@@ -881,6 +881,17 @@ if has_codex_auth_profile; then
  }'
 fi
 
+# Optional: local llama.cpp provider (for self-hosted setups running llama-server on the VPS)
+if [ -n "${LOCAL_MODEL_PORT:-}" ]; then
+ add_provider ' "local-llamacpp": {
+ "baseUrl": "http://localhost:'"${LOCAL_MODEL_PORT}"'/v1",
+ "api": "openai-completions",
+ "models": [
+ { "id": "local-model", "name": "Local Model", "contextWindow": 262144 }
+ ]
+ }'
+fi
+
 # Fallback: if no providers configured, add anthropic as default
 if [ -z "$MODELS_PROVIDERS" ]; then
  MODELS_PROVIDERS=' "anthropic": {

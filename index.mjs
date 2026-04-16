@@ -6348,7 +6348,7 @@ app.post('/config/api-keys', async (req, res) => {
   browserbaseProjectId, minimaxKey, zaiKey, moonshotKey, kimiKey, groqKey, cerebrasKey, togetherKey,
   nvidiaKey, qianfanKey, stepfunKey, veniceKey, huggingfaceKey, aiGatewayKey, kilocodeKey,
   cloudflareAiGatewayKey, syntheticKey, volcanoEngineKey, byteplusKey, defaultModel, defaultFallbacks,
-  imageModel, pdfModel, openaiCodexAuthProfile,
+  imageModel, pdfModel, openaiCodexAuthProfile, localProvider, removeLocalProvider,
  } = body;
  const providerKeyPayloads = {
   anthropic: anthropicKey,
@@ -6394,6 +6394,8 @@ app.post('/config/api-keys', async (req, res) => {
   imageModel,
   pdfModel,
   openaiCodexAuthProfile,
+  localProvider,
+  removeLocalProvider,
  ].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
@@ -6589,6 +6591,24 @@ const hasStoredCodexOAuthProfile = () => {
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
+ }
+
+ // Update local-llamacpp provider in openclaw.json models.providers
+ if (localProvider || removeLocalProvider) {
+ try {
+ const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
+ if (!config.models) config.models = {};
+ if (!config.models.providers) config.models.providers = {};
+ if (localProvider && typeof localProvider === 'object') {
+   config.models.providers['local-llamacpp'] = localProvider;
+   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${JSON.stringify(localProvider.models?.map(m => m.id) || [])}`);
+ } else if (removeLocalProvider) {
+   delete config.models.providers['local-llamacpp'];
+   console.log('[bridge] Removed local-llamacpp provider from openclaw.json');
+ }
+ writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+ } catch (e) { console.error('Failed to update local provider in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
  }
 
  // Update auth-profiles.json for ALL providers
