@@ -3021,7 +3021,7 @@ function summarizeSuccessfulArtifactsFromToolLog(toolLog = []) {
 }
 
 function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt = undefined) {
- if (explicitSystemPrompt) {
+  if (explicitSystemPrompt) {
   let prompt = explicitSystemPrompt;
  const laneBlock = buildExecutionLanePromptBlock({
    executionLane: context?.executionLane,
@@ -3034,7 +3034,7 @@ function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt
   return prompt;
  }
 
- return buildRuntimeSystemPrompt(registered || {}, {
+  return buildRuntimeSystemPrompt(registered || {}, {
   channel: context?.channel || 'general',
   taskId: context?.taskId || null,
   taskTitle: context?.taskTitle || '',
@@ -3125,6 +3125,11 @@ async function handleIncomingTask(req, res) {
  console.log(`[${id}] Routing to OpenClaw agent:${agentId} via WebSocket for ${agentName || 'default'} (session: ${sessionKey})${isTaskWork ? ' [TASK]' : ''}...`);
  // Build a thin runtime prompt with project folder enforcement
  let nonStreamSystemPrompt = buildCrabsHqSystemPrompt(registered, context, systemPrompt || undefined);
+ if (context?.planMode === true) {
+  nonStreamSystemPrompt = nonStreamSystemPrompt
+   ? `${nonStreamSystemPrompt}\n\n${buildPlanModeRuntimeGuard()}`
+   : buildPlanModeRuntimeGuard();
+ }
  const nonStreamSkillsPrompt = buildInstalledSkillsPromptBlock(installedSkills);
  if (nonStreamSkillsPrompt) {
  nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${nonStreamSkillsPrompt}` : nonStreamSkillsPrompt;
@@ -3145,7 +3150,14 @@ async function handleIncomingTask(req, res) {
  };
  let result;
  try {
- result = await gateway.runAgent(fullTask, runOpts);
+  result = await gateway.runAgent(fullTask, runOpts);
+  if (context?.planMode === true && Array.isArray(result?.toolLog) && result.toolLog.length > 0) {
+   return res.status(409).json({
+    error: 'Plan mode blocked execution after attempted tool use. Return a plan and ask for approval before acting.',
+    toolLog: result.toolLog,
+    sessionKey,
+   });
+  }
  } catch (err) {
  if (isSPC && /unknown agent id/i.test(err.message || '')) {
   throw new Error(`Native SPC agent "${agentId}" is missing in gateway config for ${agentName || 'SPC'}. Reconcile or reprovision the runtime instead of falling back to main.`);
@@ -3303,6 +3315,11 @@ const emitViewportScreenshotFrame = ({
  if (streamSkillsPrompt) {
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${streamSkillsPrompt}` : streamSkillsPrompt;
  }
+ if (context?.planMode === true) {
+ resolvedSystemPrompt = resolvedSystemPrompt
+  ? `${resolvedSystemPrompt}\n\n${buildPlanModeRuntimeGuard()}`
+  : buildPlanModeRuntimeGuard();
+ }
 
  // ── Project folder enforcement ──
  // Server passes a deterministic projectFolder (title-slug + id-hash).
@@ -3323,10 +3340,29 @@ const emitViewportScreenshotFrame = ({
  const isTaskWork = !!(context?.taskId);
  const inactivityMs = isTaskWork ? 600000 : 180000;
 
- let response, toolLog, gatewayRunId, resolvedSessionKey;
- const streamingCallback = (event, data) => {
- // Forward each event to SSE as it arrives
- sendSSE(event, data);
+	 let response, toolLog, gatewayRunId, resolvedSessionKey;
+	 let abortedForPlanMode = false;
+	 const streamingCallback = (event, data) => {
+	 // Forward each event to SSE as it arrives
+	 if (context?.planMode === true && event === 'tool_start' && !abortedForPlanMode) {
+	  abortedForPlanMode = true;
+	  const blockedTool = String(data?.tool || 'tool');
+	  console.warn(`[plan-mode] Blocking tool execution during planning run: ${blockedTool}`);
+	  sendSSE('text', {
+	   text: `Plan mode requires approval before execution. I started to use ${blockedTool}, so the system blocked the run. Please return a plan and ask for approval instead.`,
+	   sessionKey,
+	  });
+	  queueMicrotask(() => {
+	   gateway.abortSession(sessionKey).catch((err) => {
+	    console.warn(`[plan-mode] Failed to abort session after tool attempt: ${err.message}`);
+	   });
+	  });
+	 }
+	 if (abortedForPlanMode && event !== 'error' && event !== 'done' && event !== 'text') {
+	  return;
+	 }
+	 // Forward each event to SSE as it arrives
+	 sendSSE(event, data);
 
  // Start desktop recording when exec/desktop tools are used
  const isDesktopTool = (t) => t && ['exec', 'bash', 'write', 'edit'].includes(String(t).toLowerCase());
@@ -5394,6 +5430,15 @@ function makeCollectionRoutes(app, db, tableDef, collectionName, knownFields) {
       res.status(500).json({ error: err.message });
     }
   });
+}
+
+function buildPlanModeRuntimeGuard() {
+ return `[HARD PLAN MODE RUNTIME RULE]
+- This run is in plan mode.
+- You must not execute tools, browse, edit files, write files, run commands, or make system changes.
+- Do not create a task or perform implementation work yet.
+- Produce a planning report only, then ask for approval or changes.
+- If you are tempted to use a tool, stop and return the plan instead.`;
 }
 
 makeCollectionRoutes(app, db, agentsTable, "agents", ["id","name","role","avatar","skills","personality","status","model","provider","reports_to","last_heartbeat","data","created_at","updated_at"]);
