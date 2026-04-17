@@ -4062,6 +4062,38 @@ app.get('/admin/devices', (req, res) => {
  }
 });
 
+// PATCH /admin/devices/:deviceId — update mutable paired-device metadata
+app.patch('/admin/devices/:deviceId', express.json(), (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+   const { deviceId } = req.params;
+   const displayName = String(req.body?.displayName || '').trim();
+   if (!displayName) {
+     return res.status(400).json({ error: 'displayName is required' });
+   }
+
+   let paired = {};
+   try { paired = JSON.parse(readFileSync(PAIRED_JSON_PATH_ADMIN, 'utf8')); } catch {}
+   if (!paired[deviceId]) {
+     return res.status(404).json({ error: `Device ${deviceId} not found` });
+   }
+
+   paired[deviceId] = {
+     ...paired[deviceId],
+     displayName,
+     updatedAt: Date.now(),
+   };
+   mkdirSync(DEVICES_DIR_ADMIN, { recursive: true });
+   writeFileSync(PAIRED_JSON_PATH_ADMIN, JSON.stringify(paired, null, 2), { mode: 0o600 });
+   try { execSync(`chown -R 1000:1000 ${DEVICES_DIR_ADMIN} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
+
+   console.log(`[admin] Device renamed: ${deviceId} → ${displayName}`);
+   res.json({ ok: true, device: { deviceId, displayName } });
+ } catch (err) {
+   res.status(500).json({ error: err.message });
+ }
+});
+
 // DELETE /admin/devices/:deviceId — remove a device from paired.json
 app.delete('/admin/devices/:deviceId', (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
