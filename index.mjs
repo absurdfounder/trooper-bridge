@@ -6739,14 +6739,20 @@ const hasStoredCodexOAuthProfile = () => {
 
  // Update auth-profiles.json for ALL providers
  {
- const providerKeyMap = [
- { key: anthropicKey, profileId: 'anthropic:default', provider: 'anthropic' },
- { key: openaiKey, profileId: 'openai:default', provider: 'openai' },
- { key: openrouterKey, profileId: 'openrouter:default', provider: 'openrouter' },
- { key: geminiKey, profileId: 'google:default', provider: 'google' },
- { key: mistralKey, profileId: 'mistral:default', provider: 'mistral' },
- ];
- const keysToUpdate = providerKeyMap.filter(entry => entry.key !== undefined);
+ // Payload-field name → gateway provider name. Only 'gemini' differs today; the rest
+ // round-trip 1:1 (e.g. 'zai' → 'zai:default', 'openrouter' → 'openrouter:default').
+ const AUTH_PROFILE_PROVIDER_REMAP = { gemini: 'google' };
+ // These payload fields are not LLM providers and don't belong in auth-profiles.
+ const AUTH_PROFILE_SKIP = new Set([
+ 'browserbaseProjectId', 'brave', 'composio', 'exa', 'tavily', 'serpapi', 'searchapi', 'browserbase',
+ ]);
+ const providerKeyMap = Object.entries(providerKeyPayloads)
+ .filter(([provider, key]) => typeof key === 'string' && !AUTH_PROFILE_SKIP.has(provider))
+ .map(([provider, key]) => {
+ const authProvider = AUTH_PROFILE_PROVIDER_REMAP[provider] || provider;
+ return { key, provider: authProvider, profileId: `${authProvider}:default` };
+ });
+ const keysToUpdate = providerKeyMap;
 
  if (keysToUpdate.length > 0 || openaiCodexAuthProfile?.access) {
  try {
