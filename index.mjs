@@ -2644,6 +2644,7 @@ function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/works
  try {
   mkdirSync(`${workspacePath}/memory`, { recursive: true });
   mkdirSync(`${workspacePath}/skills`, { recursive: true });
+  mkdirSync(`${workspacePath}/Channels`, { recursive: true });
   ensureDefaultSkillPack(`${workspacePath}/skills`);
   const placeholders = {
    'MEMORIES.md': EMPTY_MEMORIES_MD,
@@ -2657,7 +2658,7 @@ function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/works
   if (!existsSync(skillsReadme)) {
    writeFileSync(skillsReadme, '# Skills\n\n_No workspace skills installed yet._\n');
   }
-  try { execSync(`chown -R 1000:1000 ${workspacePath}/memory ${workspacePath}/skills ${workspacePath}/MEMORIES.md ${workspacePath}/KNOWLEDGE.md 2>/dev/null`, { timeout: 3000 }); } catch {}
+  try { execSync(`chown -R 1000:1000 ${workspacePath}/memory ${workspacePath}/skills ${workspacePath}/Channels ${workspacePath}/MEMORIES.md ${workspacePath}/KNOWLEDGE.md 2>/dev/null`, { timeout: 3000 }); } catch {}
  } catch (err) {
   console.warn(`[workspace] Failed to ensure bootstrap files for ${workspacePath}: ${err.message}`);
  }
@@ -3200,6 +3201,30 @@ function buildCrabsHqSystemPrompt(registered, context = {}, explicitSystemPrompt
  });
 }
 
+function resolveChannelWorkspaceFolder(context = {}) {
+ if (context?.projectFolder || context?.isolatedWorkspace || context?.taskId) return null;
+ const channelSlug = agentSlug(context?.channel || 'general') || 'general';
+ return `Channels/${channelSlug}`;
+}
+
+function buildChannelWorkspaceOrganizationRule(channelFolder) {
+ if (!channelFolder) return '';
+ return `[SYSTEM RULE — WORKSPACE ORGANIZATION]
+- New standalone files from this channel conversation should be saved under: ${channelFolder}/
+- Do not create new folders/files at workspace root unless the human explicitly asks for root-level setup.
+- If the human asks to edit an existing app, project, task folder, or named file, work in that existing location instead of copying it into ${channelFolder}/.
+- Keep task deliverables under Tasks/, team member workspace files under Team/, and system/runtime files under System/.`;
+}
+
+function ensureWorkspaceFolder(folderPath = '') {
+ const cleanFolder = String(folderPath || '').replace(/^\/+|\/+$/g, '');
+ if (!cleanFolder || cleanFolder.includes('..')) return;
+ const wsBase = WORKSPACE_CONTAINER_ROOT;
+ try {
+  execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${cleanFolder}' && chown node:node '${wsBase}/${cleanFolder}'"`, { timeout: 5000 });
+ } catch {}
+}
+
 // Persist skill credentials to the container .env file so they're available to the gateway process
 function ensureSkillCredentials(skillCredentials) {
  if (!skillCredentials || typeof skillCredentials !== 'object') return;
@@ -3301,9 +3326,15 @@ async function handleIncomingTask(req, res) {
  }
  const nonStreamProjectFolder = context?.projectFolder;
  if (nonStreamProjectFolder) {
- const wsBase = '/home/node/.openclaw/workspace';
+ const wsBase = WORKSPACE_CONTAINER_ROOT;
  try { execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${nonStreamProjectFolder}' && chown node:node '${wsBase}/${nonStreamProjectFolder}'"`, { timeout: 5000 }); } catch {}
  const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${nonStreamProjectFolder}/\nExamples: ${nonStreamProjectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
+ nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${folderRule}` : folderRule;
+ }
+ const nonStreamChannelFolder = resolveChannelWorkspaceFolder(context);
+ if (nonStreamChannelFolder) {
+ ensureWorkspaceFolder(nonStreamChannelFolder);
+ const folderRule = buildChannelWorkspaceOrganizationRule(nonStreamChannelFolder);
  nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${folderRule}` : folderRule;
  }
  const runOpts = {
@@ -3507,9 +3538,15 @@ const emitViewportScreenshotFrame = ({
  // Worktree: code tasks get an isolated subdirectory (sent as context.isolatedWorkspace)
  const projectFolder = context?.projectFolder || context?.isolatedWorkspace || null;
  if (projectFolder) {
- const wsBase = '/home/node/.openclaw/workspace';
+ const wsBase = WORKSPACE_CONTAINER_ROOT;
  try { execSync(`docker exec openclaw-openclaw-gateway-1 bash -c "mkdir -p '${wsBase}/${projectFolder}' && chown node:node '${wsBase}/${projectFolder}'"`, { timeout: 5000 }); } catch {}
  const folderRule = `[SYSTEM RULE — PROJECT FOLDER]\nAll files for this task MUST be saved inside: ${projectFolder}/\nExamples: ${projectFolder}/index.html ✅ | index.html ❌\nThis is enforced by the system. Do not save files outside this folder.`;
+ resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${folderRule}` : folderRule;
+ }
+ const channelFolder = resolveChannelWorkspaceFolder(context);
+ if (channelFolder) {
+ ensureWorkspaceFolder(channelFolder);
+ const folderRule = buildChannelWorkspaceOrganizationRule(channelFolder);
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${folderRule}` : folderRule;
  }
 
@@ -3777,53 +3814,397 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
 // ── HTTP Routes ──────────────────────────────────────────────────────
 
 // List directory contents (for CrabsHQ Files browser — screenshots, media, etc.)
-const ALLOWED_LIST_PATHS = ['/tmp', '/home/node/.openclaw/workspace', '/home/node/.openclaw/media', '/opt/openclaw-data/workspace'];
-app.get('/files', (req, res) => {
- let dirPath = (req.query.path || '/').replace(/\/$/, '') || '/';
- const isRoot = dirPath === '/' || dirPath === '';
- // Map root to workspace
- if (isRoot) dirPath = '/home/node/.openclaw/workspace';
- if (!ALLOWED_LIST_PATHS.some(d => dirPath === d || dirPath.startsWith(d + '/'))) {
- return res.status(403).json({ error: 'Path not allowed' });
+const WORKSPACE_CONTAINER_ROOT = '/home/node/.openclaw/workspace';
+const WORKSPACE_HOST_ROOT = '/opt/openclaw-data/workspace';
+const AGENTS_CONFIG_ROOT = '/opt/openclaw-data/config/agents';
+const MEDIA_CONTAINER_ROOT = '/home/node/.openclaw/media';
+const SYSTEM_WORKSPACE_FILES = new Set([
+ 'AGENTS.md',
+ 'BOOT.md',
+ 'BOOTSTRAP.md',
+ 'CAPABILITIES.md',
+ 'COMPANY.md',
+ 'HEARTBEAT.md',
+ 'IDENTITY.md',
+ 'KNOWLEDGE.md',
+ 'MEMORIES.md',
+ 'MEMORY.md',
+ 'SOUL.md',
+ 'TOOLS.md',
+ 'USER.md',
+]);
+const SYSTEM_WORKSPACE_DIRS = new Set(['memory', 'state']);
+const ROOT_VIRTUAL_DIRS = new Set(['System', 'Team', 'Channels']);
+const ALLOWED_LIST_PATHS = ['/tmp', WORKSPACE_CONTAINER_ROOT, MEDIA_CONTAINER_ROOT, WORKSPACE_HOST_ROOT, AGENTS_CONFIG_ROOT];
+
+function cleanWorkspacePath(value = '/') {
+ const raw = String(value || '/').trim() || '/';
+ const withoutFilesPrefix = raw.replace(/^\/files(?=\/|$)/, '') || '/';
+ return withoutFilesPrefix.replace(/\/+$/, '') || '/';
+}
+
+function isWorkspaceRootPath(value = '/') {
+ const p = cleanWorkspacePath(value);
+ return p === '/' || p === WORKSPACE_CONTAINER_ROOT || p === WORKSPACE_HOST_ROOT;
+}
+
+function escapeDockerPath(value = '') {
+ return String(value || '').replace(/"/g, '');
+}
+
+function stripWorkspaceRoot(value = '') {
+ const p = cleanWorkspacePath(value);
+ for (const root of [WORKSPACE_CONTAINER_ROOT, WORKSPACE_HOST_ROOT]) {
+  if (p === root) return '';
+  if (p.startsWith(root + '/')) return p.slice(root.length + 1);
  }
+ return p.replace(/^\/+/, '');
+}
+
+function workspaceUiPathFromReal(realPath = '') {
+ const rel = stripWorkspaceRoot(realPath);
+ return rel ? `/${rel}` : '/';
+}
+
+function getFileContentType(filePath = '') {
+ const ext = String(filePath || '').split('.').pop().toLowerCase();
+ const types = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  pdf: 'application/pdf',
+  json: 'application/json',
+  txt: 'text/plain',
+  md: 'text/markdown',
+  html: 'text/html',
+  mp4: 'video/mp4',
+  webm: 'video/webm',
+  mkv: 'video/x-matroska',
+ };
+ return types[ext] || 'application/octet-stream';
+}
+
+function hostEntryStat(fullPath) {
  try {
+  const stat = statSync(fullPath);
+  return {
+   type: stat.isDirectory() ? 'dir' : 'file',
+   size: stat.size || 0,
+   modified: stat.mtimeMs || null,
+  };
+ } catch {
+  return null;
+ }
+}
+
+function containerEntryStat(fullPath) {
+ try {
+  const statOut = execSync(
+   `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${escapeDockerPath(fullPath)}" 2>/dev/null`,
+   { encoding: 'utf8', timeout: 2000 }
+  );
+  const [fileType, fileSize, mtime] = statOut.trim().split('|');
+  return {
+   type: fileType === 'directory' ? 'dir' : 'file',
+   size: parseInt(fileSize) || 0,
+   modified: mtime ? parseInt(mtime) * 1000 : null,
+  };
+ } catch {
+  return null;
+ }
+}
+
+function listHostDir(dirPath, { virtualBase = null } = {}) {
+ const names = readdirSync(dirPath);
+ return names
+  .filter((name) => name && name !== '.' && name !== '..')
+  .map((name) => {
+   const fullPath = path.join(dirPath, name);
+   const stat = hostEntryStat(fullPath) || {};
+   const entryPath = virtualBase
+    ? `${virtualBase.replace(/\/$/, '')}/${name}`
+    : workspaceUiPathFromReal(fullPath);
+   return {
+    name,
+    type: stat.type || 'file',
+    path: entryPath,
+    size: stat.size || 0,
+    modified: stat.modified || null,
+   };
+  });
+}
+
+function listContainerDir(dirPath, { virtualBase = null } = {}) {
  const out = execSync(
- `docker exec openclaw-openclaw-gateway-1 ls -1 "${dirPath.replace(/"/g, '')}" 2>/dev/null || true`,
- { encoding: 'utf8', timeout: 5000 }
+  `docker exec openclaw-openclaw-gateway-1 ls -1 "${escapeDockerPath(dirPath)}" 2>/dev/null || true`,
+  { encoding: 'utf8', timeout: 5000 }
  );
  const names = out.trim() ? out.trim().split('\n') : [];
  const entries = [];
  for (const name of names) {
- if (!name || name === '.' || name === '..') continue;
- const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
- let type = 'file';
- let size = 0;
- let modified = null;
- try {
- const statOut = execSync(
- `docker exec openclaw-openclaw-gateway-1 stat -c "%F|%s|%Y" "${fullPath.replace(/"/g, '')}" 2>/dev/null`,
- { encoding: 'utf8', timeout: 2000 }
- );
- const [fileType, fileSize, mtime] = statOut.trim().split('|');
- if (fileType === 'directory') type = 'dir';
- size = parseInt(fileSize) || 0;
- if (mtime) modified = parseInt(mtime) * 1000; // convert seconds to ms
- } catch {}
- entries.push({ name, type, path: fullPath, size, modified });
+  if (!name || name === '.' || name === '..') continue;
+  const fullPath = dirPath.endsWith('/') ? dirPath + name : dirPath + '/' + name;
+  const stat = containerEntryStat(fullPath) || {};
+  const entryPath = virtualBase
+   ? `${virtualBase.replace(/\/$/, '')}/${name}`
+   : workspaceUiPathFromReal(fullPath);
+  entries.push({
+   name,
+   type: stat.type || 'file',
+   path: entryPath,
+   size: stat.size || 0,
+   modified: stat.modified || null,
+  });
  }
- // When listing workspace root, add screenshots dir if it has files
- if (isRoot) {
+ return entries;
+}
+
+function listBestWorkspaceDir(dirPath, options = {}) {
+ const hostPath = dirPath.startsWith(WORKSPACE_CONTAINER_ROOT)
+  ? `${WORKSPACE_HOST_ROOT}${dirPath.slice(WORKSPACE_CONTAINER_ROOT.length)}`
+  : dirPath;
+ if (hostPath.startsWith(WORKSPACE_HOST_ROOT) || hostPath.startsWith(AGENTS_CONFIG_ROOT)) {
   try {
-   const ssOut = execSync(
-    `docker exec openclaw-openclaw-gateway-1 find ${SCREENSHOT_DIR} -maxdepth 1 -type f -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' 2>/dev/null | head -1`,
-    { timeout: 3000 }
-   ).toString().trim();
-   if (ssOut) {
-    entries.unshift({ name: '📸 Screenshots', type: 'dir', path: SCREENSHOT_DIR, size: 0 });
-   }
+   if (existsSync(hostPath)) return listHostDir(hostPath, options);
   } catch {}
  }
- res.json({ files: entries });
+ return listContainerDir(dirPath, options);
+}
+
+function shouldHideWorkspaceRootEntry(entry) {
+ const name = String(entry?.name || '');
+ if (!name) return true;
+ if (ROOT_VIRTUAL_DIRS.has(name)) return true;
+ if (SYSTEM_WORKSPACE_FILES.has(name)) return true;
+ if (SYSTEM_WORKSPACE_DIRS.has(name)) return true;
+ if (entry?.type === 'dir' && /^spc-[a-z0-9-]+$/i.test(name)) return true;
+ return false;
+}
+
+function listTeamWorkspaceEntries() {
+ const seen = new Set();
+ const entries = [];
+ const addAgent = (agentId, displayName = '') => {
+  const id = String(agentId || '').trim();
+  if (!id || id === 'main' || seen.has(id)) return;
+  seen.add(id);
+  const workspacePath = getAgentWorkspacePath(id);
+  const legacyPath = getLegacyAgentWorkspacePath(id);
+  const stat = hostEntryStat(workspacePath) || hostEntryStat(legacyPath) || {};
+  entries.push({
+   name: String(displayName || id).trim() || id,
+   type: 'dir',
+   path: `/Team/${id}`,
+   size: 0,
+   modified: stat.modified || null,
+   agentId: id,
+  });
+ };
+
+ try {
+  for (const profile of agentRegistry.values()) {
+   addAgent(profile?.agentId, profile?.name || profile?.title || profile?.agentId);
+  }
+ } catch {}
+
+ try {
+  const dirs = readdirSync(AGENTS_CONFIG_ROOT, { withFileTypes: true });
+  for (const dir of dirs) {
+   if (dir.isDirectory() && dir.name.startsWith('spc-')) addAgent(dir.name);
+  }
+ } catch {}
+
+ try {
+  const dirs = readdirSync(WORKSPACE_HOST_ROOT, { withFileTypes: true });
+  for (const dir of dirs) {
+   if (dir.isDirectory() && dir.name.startsWith('spc-')) addAgent(dir.name);
+  }
+ } catch {}
+
+ return entries.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getTeamWorkspacePath(agentId = '') {
+ const safeAgentId = String(agentId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+ if (!safeAgentId) return null;
+ const workspacePath = getAgentWorkspacePath(safeAgentId);
+ if (existsSync(workspacePath)) return workspacePath;
+ const legacyPath = getLegacyAgentWorkspacePath(safeAgentId);
+ if (existsSync(legacyPath)) return legacyPath;
+ return workspacePath;
+}
+
+function listSystemWorkspaceEntries() {
+ const entries = [];
+ for (const dirName of SYSTEM_WORKSPACE_DIRS) {
+  const realPath = path.join(WORKSPACE_HOST_ROOT, dirName);
+  const stat = hostEntryStat(realPath);
+  if (stat?.type === 'dir') {
+   entries.push({ name: dirName, type: 'dir', path: `/System/${dirName}`, size: 0, modified: stat.modified || null });
+  }
+ }
+ for (const fileName of SYSTEM_WORKSPACE_FILES) {
+  const realPath = path.join(WORKSPACE_HOST_ROOT, fileName);
+  const stat = hostEntryStat(realPath);
+  if (stat?.type === 'file') {
+   entries.push({ name: fileName, type: 'file', path: `/System/${fileName}`, size: stat.size || 0, modified: stat.modified || null });
+  }
+ }
+ return entries.sort((a, b) => {
+  if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+  return a.name.localeCompare(b.name);
+ });
+}
+
+function getWorkspaceEntry(name) {
+ const hostPath = path.join(WORKSPACE_HOST_ROOT, name);
+ const stat = hostEntryStat(hostPath);
+ if (stat) {
+  return { name, type: stat.type, path: `/${name}`, size: stat.size || 0, modified: stat.modified || null };
+ }
+ return null;
+}
+
+function listVirtualWorkspaceRoot() {
+ const actualEntries = listBestWorkspaceDir(WORKSPACE_CONTAINER_ROOT)
+  .filter((entry) => !shouldHideWorkspaceRootEntry(entry));
+ const byName = new Map(actualEntries.map((entry) => [entry.name, entry]));
+ const entries = [];
+ const tasks = byName.get('Tasks') || getWorkspaceEntry('Tasks');
+ if (tasks) entries.push({ ...tasks, name: 'Tasks', path: '/Tasks' });
+ entries.push(byName.get('Channels') || { name: 'Channels', type: 'dir', path: '/Channels', size: 0, modified: null });
+ entries.push({ name: 'Team', type: 'dir', path: '/Team', size: 0, modified: null, childCount: listTeamWorkspaceEntries().length });
+ for (const entry of actualEntries) {
+  if (entry.name === 'Tasks' || entry.name === 'Channels') continue;
+  entries.push(entry);
+ }
+ entries.push({ name: 'System', type: 'dir', path: '/System', size: 0, modified: null, childCount: listSystemWorkspaceEntries().length });
+
+ try {
+  const ssOut = execSync(
+   `docker exec openclaw-openclaw-gateway-1 find ${SCREENSHOT_DIR} -maxdepth 1 \\( -name '*.png' -o -name '*.jpg' -o -name '*.jpeg' \\) 2>/dev/null | head -1`,
+   { timeout: 3000 }
+  ).toString().trim();
+  if (ssOut && !entries.some((entry) => entry.path === SCREENSHOT_DIR)) {
+   entries.unshift({ name: 'Screenshots', type: 'dir', path: SCREENSHOT_DIR, size: 0 });
+  }
+ } catch {}
+
+ const order = new Map(['Screenshots', 'Tasks', 'Channels', 'Team', 'apps', 'skills', 'System'].map((name, index) => [name, index]));
+ return entries.sort((a, b) => {
+  const ao = order.has(a.name) ? order.get(a.name) : 50;
+  const bo = order.has(b.name) ? order.get(b.name) : 50;
+  if (ao !== bo) return ao - bo;
+  if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+  return a.name.localeCompare(b.name);
+ });
+}
+
+function resolveWorkspacePathForFiles(rawPath = '/', { file = false } = {}) {
+ const p = cleanWorkspacePath(rawPath);
+ if (isWorkspaceRootPath(p)) return { kind: 'virtual-root', displayPath: '/' };
+
+ const workspaceRelFromPhysical = stripWorkspaceRoot(p);
+ const virtualPath = p.startsWith(WORKSPACE_CONTAINER_ROOT + '/') || p.startsWith(WORKSPACE_HOST_ROOT + '/')
+  ? `/${workspaceRelFromPhysical}`
+  : p;
+
+ if (virtualPath === '/System') return { kind: 'virtual-system', displayPath: '/System' };
+ if (virtualPath.startsWith('/System/')) {
+  const rel = virtualPath.slice('/System/'.length);
+  const [first, ...rest] = rel.split('/');
+  if (SYSTEM_WORKSPACE_DIRS.has(first)) {
+   return {
+    kind: 'host',
+    realPath: path.join(WORKSPACE_HOST_ROOT, first, ...rest),
+    displayPath: virtualPath,
+   };
+  }
+  if (SYSTEM_WORKSPACE_FILES.has(first) && rest.length === 0) {
+   return {
+    kind: 'host',
+    realPath: path.join(WORKSPACE_HOST_ROOT, first),
+    displayPath: virtualPath,
+   };
+  }
+  return { kind: file ? 'missing-file' : 'missing-dir', displayPath: virtualPath };
+ }
+
+ if (virtualPath === '/Team') return { kind: 'virtual-team', displayPath: '/Team' };
+ if (virtualPath.startsWith('/Team/')) {
+  const rel = virtualPath.slice('/Team/'.length);
+  const [agentId, ...rest] = rel.split('/');
+  const workspacePath = getTeamWorkspacePath(agentId);
+  if (!workspacePath) return { kind: file ? 'missing-file' : 'missing-dir', displayPath: virtualPath };
+  return {
+   kind: 'host',
+   realPath: path.join(workspacePath, ...rest),
+   displayPath: virtualPath,
+   virtualBase: `/Team/${agentId}${rest.length ? `/${rest.join('/')}` : ''}`,
+  };
+ }
+
+ if (virtualPath === '/Channels' || virtualPath.startsWith('/Channels/')) {
+  const rel = virtualPath.slice(1);
+  return {
+   kind: 'host',
+   realPath: path.join(WORKSPACE_HOST_ROOT, rel),
+   displayPath: virtualPath,
+   virtualBase: virtualPath,
+  };
+ }
+
+ if (p.startsWith('/tmp') || p.startsWith(MEDIA_CONTAINER_ROOT)) {
+  return { kind: 'container', realPath: p, displayPath: p };
+ }
+
+ if (p.startsWith(AGENTS_CONFIG_ROOT)) {
+  return { kind: 'host', realPath: p, displayPath: p };
+ }
+
+ if (p.startsWith(WORKSPACE_HOST_ROOT)) {
+  return { kind: 'host', realPath: p, displayPath: workspaceUiPathFromReal(p) };
+ }
+
+ if (p.startsWith(WORKSPACE_CONTAINER_ROOT)) {
+  return { kind: 'container', realPath: p, displayPath: workspaceUiPathFromReal(p) };
+ }
+
+ if (p.startsWith('/')) {
+  return {
+   kind: 'host',
+   realPath: path.join(WORKSPACE_HOST_ROOT, p.slice(1)),
+   displayPath: p,
+   virtualBase: p,
+  };
+ }
+
+ return {
+  kind: 'host',
+  realPath: path.join(WORKSPACE_HOST_ROOT, p),
+  displayPath: `/${p}`,
+  virtualBase: `/${p}`,
+ };
+}
+
+app.get('/files', (req, res) => {
+ try {
+ const resolved = resolveWorkspacePathForFiles(req.query.path || '/');
+ if (resolved.kind === 'virtual-root') return res.json({ files: listVirtualWorkspaceRoot(), source: 'vps' });
+ if (resolved.kind === 'virtual-system') return res.json({ files: listSystemWorkspaceEntries(), source: 'vps' });
+ if (resolved.kind === 'virtual-team') return res.json({ files: listTeamWorkspaceEntries(), source: 'vps' });
+ if (resolved.kind === 'missing-dir') return res.json({ files: [], source: 'vps', empty: true });
+ if (!ALLOWED_LIST_PATHS.some(d => resolved.realPath === d || resolved.realPath?.startsWith(d + '/'))) {
+ return res.status(403).json({ error: 'Path not allowed' });
+ }
+ const options = resolved.virtualBase ? { virtualBase: resolved.displayPath } : {};
+ const entries = resolved.kind === 'host'
+  ? listHostDir(resolved.realPath, options)
+  : listContainerDir(resolved.realPath, options);
+ res.json({ files: entries, source: 'vps' });
  } catch (e) {
  res.status(404).json({ error: 'Directory not found' });
  }
@@ -3831,17 +4212,20 @@ app.get('/files', (req, res) => {
 
 // Serve files from inside the OpenClaw container (screenshots, workspace files, etc.)
 app.get('/files/*', (req, res) => {
- const filePath = '/' + req.params[0]; // reconstruct absolute path
+ const requestedPath = '/' + req.params[0]; // reconstruct absolute path
+ const resolved = resolveWorkspacePathForFiles(requestedPath, { file: true });
+ if (resolved.kind === 'virtual-root' || resolved.kind === 'virtual-system' || resolved.kind === 'virtual-team' || resolved.kind === 'missing-file') {
+ return res.status(404).json({ error: 'File not found' });
+ }
  // Only allow specific directories for security
- if (!ALLOWED_LIST_PATHS.some(d => filePath === d || filePath.startsWith(d + '/'))) {
+ if (!ALLOWED_LIST_PATHS.some(d => resolved.realPath === d || resolved.realPath?.startsWith(d + '/'))) {
  return res.status(403).json({ error: 'Path not allowed' });
  }
  try {
- const data = execSync(`docker exec openclaw-openclaw-gateway-1 cat "${filePath.replace(/"/g, '')}"`, { maxBuffer: 50 * 1024 * 1024, timeout: 10000 });
- // Guess content type from extension
- const ext = filePath.split('.').pop().toLowerCase();
- const types = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf', json: 'application/json', txt: 'text/plain', md: 'text/markdown', html: 'text/html', mp4: 'video/mp4', webm: 'video/webm', mkv: 'video/x-matroska' };
- res.set('Content-Type', types[ext] || 'application/octet-stream');
+ const data = resolved.kind === 'host'
+  ? readFileSync(resolved.realPath)
+  : execSync(`docker exec openclaw-openclaw-gateway-1 cat "${escapeDockerPath(resolved.realPath)}"`, { maxBuffer: 50 * 1024 * 1024, timeout: 10000 });
+ res.set('Content-Type', getFileContentType(resolved.displayPath || resolved.realPath));
  res.set('Cache-Control', 'public, max-age=3600');
  res.send(data);
  } catch (e) {
