@@ -9,9 +9,4 @@ if ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
   sleep 1
 fi
 export DISPLAY=:99
-exec /usr/bin/google-chrome-stable \
-  --disable-blink-features=AutomationControlled \
-  --window-position=0,0 \
-  --window-size=1920,1080 \
-  --start-maximized \
-  "$@"
+exec /usr/bin/google-chrome-stable --disable-blink-features=AutomationControlled "$@"
