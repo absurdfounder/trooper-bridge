@@ -1744,27 +1744,81 @@ cat > /usr/share/novnc/vnc_embed.html << 'VNCEMBED'
             const m = document.location.href.concat(location.hash).match(new RegExp('.*[?&]' + name + '=([^&#]*)'));
             return m ? decodeURIComponent(m[1]) : def;
         }
-        statusEl.textContent = 'Connecting...';
         const host = readParam('host', location.hostname);
         const port = readParam('port', location.port);
         const path = readParam('path', 'websockify');
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
         const url = proto + '://' + host + (port ? ':' + port : '') + '/' + path;
-        const rfb = new RFB(document.getElementById('screen'), url, {
-            credentials: { password: readParam('password', '') }
-        });
-        rfb.addEventListener('connect', () => { statusEl.classList.add('connected'); });
-        rfb.addEventListener('disconnect', (e) => {
-            statusEl.classList.remove('connected');
-            statusEl.textContent = e.detail.clean ? 'Disconnected' : 'Connection lost';
-        });
-        rfb.addEventListener('credentialsrequired', () => { statusEl.textContent = 'Password required'; });
         const resizeMode = readParam('resize', '');
-        rfb.scaleViewport = resizeMode === 'scale' || readParam('scale', '') === 'true';
-        rfb.resizeSession = resizeMode === 'remote';
-        rfb.viewOnly = readParam('view_only', 'false') === 'true';
-        // Enable touch for mobile/tablet
-        rfb.touchButton = 1;
+        const shouldReconnect = readParam('reconnect', 'false') === 'true';
+        const reconnectDelay = Math.max(parseInt(readParam('reconnect_delay', '3000'), 10) || 3000, 500);
+        const scaleViewport = resizeMode === 'scale' || readParam('scale', '') === 'true';
+        const resizeSession = resizeMode === 'remote';
+        const viewOnly = readParam('view_only', 'false') === 'true';
+        let rfb = null;
+        let reconnectTimer = null;
+        let tornDown = false;
+
+        function queueReconnect() {
+            if (!shouldReconnect || tornDown || reconnectTimer) return;
+            statusEl.textContent = 'Reconnecting...';
+            reconnectTimer = window.setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, reconnectDelay);
+        }
+
+        function connect() {
+            if (tornDown) return;
+            statusEl.classList.remove('connected');
+            statusEl.textContent = 'Connecting...';
+
+            if (rfb) {
+                try { rfb.disconnect(); } catch {}
+                rfb = null;
+            }
+
+            rfb = new RFB(document.getElementById('screen'), url, {
+                credentials: { password: readParam('password', '') }
+            });
+            rfb.scaleViewport = scaleViewport;
+            rfb.resizeSession = resizeSession;
+            rfb.viewOnly = viewOnly;
+            rfb.touchButton = 1;
+
+            rfb.addEventListener('connect', () => {
+                statusEl.classList.add('connected');
+            });
+            rfb.addEventListener('disconnect', (e) => {
+                statusEl.classList.remove('connected');
+                if (tornDown) {
+                    statusEl.textContent = 'Disconnected';
+                    return;
+                }
+                statusEl.textContent = e.detail.clean ? 'Disconnected' : 'Connection lost';
+                queueReconnect();
+            });
+            rfb.addEventListener('credentialsrequired', () => {
+                statusEl.classList.remove('connected');
+                statusEl.textContent = 'Password required';
+            });
+            rfb.addEventListener('securityfailure', () => {
+                statusEl.classList.remove('connected');
+                statusEl.textContent = 'Security handshake failed';
+                queueReconnect();
+            });
+        }
+
+        window.addEventListener('beforeunload', () => {
+            tornDown = true;
+            if (reconnectTimer) window.clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+            if (rfb) {
+                try { rfb.disconnect(); } catch {}
+            }
+        });
+
+        connect();
     </script>
 </head>
 <body>
@@ -2066,6 +2120,7 @@ chmod +x /usr/local/bin/crabhq-status
 mkdir -p /opt/crabhq-desktop-api
 cat > /opt/crabhq-desktop-api/server.mjs << 'JSEOF'
 import http from 'http';
+import net from 'net';
 import { exec } from 'child_process';
 import { readFileSync } from 'fs';
 
@@ -2079,6 +2134,40 @@ const run = (cmd) => new Promise((res, rej) =>
 const running = (pat) => new Promise(res =>
  exec(`pgrep -f "${pat}"`, err => res(!err))
 );
+const sleep = (ms) => new Promise(res => setTimeout(res, ms));
+const portOpen = (port, host = '127.0.0.1', timeout = 800) => new Promise((resolve) => {
+ const socket = net.createConnection({ port, host });
+ let settled = false;
+ const finish = (ok) => {
+ if (settled) return;
+ settled = true;
+ socket.destroy();
+ resolve(ok);
+ };
+ socket.setTimeout(timeout);
+ socket.once('connect', () => finish(true));
+ socket.once('timeout', () => finish(false));
+ socket.once('error', () => finish(false));
+ socket.once('close', () => finish(false));
+});
+
+async function desktopReadiness() {
+ const [novnc, vnc, panel, novncPort, vncPort] = await Promise.all([
+ running('websockify.*6081'),
+ running('x11vnc.*5901'),
+ running('lxqt-panel'),
+ portOpen(6081),
+ portOpen(5901),
+ ]);
+ return {
+ novnc,
+ vnc,
+ panel,
+ novncPort,
+ vncPort,
+ active: novnc && vnc && novncPort && vncPort,
+ };
+}
 
 http.createServer(async (req, res) => {
  res.setHeader('Content-Type', 'application/json');
@@ -2087,17 +2176,21 @@ http.createServer(async (req, res) => {
  try {
  if (req.method === 'POST' && url.pathname === '/desktop/start') {
  await run('/usr/local/bin/crabhq-desktop-start');
- res.end(JSON.stringify({ ok: true }));
+ let readiness = await desktopReadiness();
+ if (!readiness.active) {
+ const deadline = Date.now() + 15000;
+ while (Date.now() < deadline && !readiness.active) {
+ await sleep(500);
+ readiness = await desktopReadiness();
+ }
+ }
+ res.end(JSON.stringify({ ok: true, ready: readiness.active, ...readiness }));
  } else if (req.method === 'POST' && url.pathname === '/desktop/stop') {
  await run('/usr/local/bin/crabhq-desktop-stop');
  res.end(JSON.stringify({ ok: true }));
  } else if (req.method === 'GET' && url.pathname === '/desktop/status') {
- const [novnc, vnc, panel] = await Promise.all([
- running('websockify.*6081'),
- running('x11vnc.*5901'),
- running('lxqt-panel'),
- ]);
- res.end(JSON.stringify({ active: novnc && vnc, novnc, vnc, panel }));
+ const readiness = await desktopReadiness();
+ res.end(JSON.stringify(readiness));
  } else if (req.method === 'GET' && url.pathname === '/browser/endpoint') {
  try {
  const token = readFileSync(TOKEN_FILE, 'utf8').trim();
