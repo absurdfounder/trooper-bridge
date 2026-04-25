@@ -6674,8 +6674,13 @@ function listHostSkillAliases() {
 
 function runContainerNodeJson(script, arg) {
  try {
+  const normalizedScript = String(script || '')
+   .split('\n')
+   .map((line) => line.trim())
+   .filter(Boolean)
+   .join(' ');
   const output = execSync(
-   `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(`node -e ${shellQuote(script)} ${shellQuote(arg)}`)}`,
+   `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(`node -e ${shellQuote(normalizedScript)} ${shellQuote(arg)}`)}`,
    { timeout: 10000, maxBuffer: 8 * 1024 * 1024 }
   ).toString().trim();
   if (!output) return null;
@@ -6869,8 +6874,7 @@ app.post('/skills/:slug/install', async (req, res) => {
    return res.status(400).json({ error: 'skills.sh installs require sourceRepo and skillId' });
  }
  console.log(`📦 Installing skill "${slug}" via skills.sh...`);
- const repoUrl = `https://github.com/${sourceRepo}`;
- const innerCommand = `cd /home/node/.openclaw && npx skills add ${shellQuote(repoUrl)} --skill ${shellQuote(skillId)} -y 2>&1`;
+ const innerCommand = `cd /home/node/.openclaw && npx skills add ${shellQuote(sourceRepo)} --skill ${shellQuote(skillId)} -y 2>&1`;
  let output = '';
  let cliError = '';
  try {
@@ -7007,7 +7011,7 @@ app.get('/skills/installed', (req, res) => {
    repo: sourceRepo ? `https://github.com/${sourceRepo}` : null,
    pageUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
    sourceUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
-   installCommand: sourceRepo ? `npx skills add https://github.com/${sourceRepo} --skill ${dir}` : null,
+   installCommand: sourceRepo ? `npx skills add ${sourceRepo} --skill ${dir}` : null,
    content: skillMd,
    files: runtime?.files || { 'SKILL.md': skillMd },
   });
