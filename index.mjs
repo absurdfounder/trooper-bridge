@@ -6508,34 +6508,29 @@ app.get('/skills/catalog', (req, res) => {
 });
 
 app.get('/skills/:slug/content', (req, res) => {
- const skill = skillRegistry.get(req.params.slug);
- if (!skill || !skill.content) {
  const runtime = readRuntimeSkillFiles(req.params.slug);
- const content = runtime?.files?.['SKILL.md'];
- if (content) return res.type('text/plain').send(content);
- return res.status(404).json({ error: 'Skill not found' });
- }
+ const runtimeContent = getSkillMdFromPayload({ files: runtime?.files || {} });
+ if (runtimeContent) return res.type('text/plain').send(runtimeContent);
+ const skill = skillRegistry.get(req.params.slug);
+ if (!skill || !skill.content) return res.status(404).json({ error: 'Skill not found' });
  res.type('text/plain').send(skill.content);
 });
 
 app.get('/skills/:slug/files', (req, res) => {
- const skill = skillRegistry.get(req.params.slug);
- if (!skill) {
  const runtime = readRuntimeSkillFiles(req.params.slug);
  if (runtime?.files) return res.json({ slug: req.params.slug, alias: runtime.alias, files: runtime.files });
- return res.status(404).json({ error: 'Skill not found' });
- }
+ const skill = skillRegistry.get(req.params.slug);
+ if (!skill) return res.status(404).json({ error: 'Skill not found' });
  res.json({ slug: skill.slug, files: skill.files || {} });
 });
 
 app.get('/skills/:slug/files/:filename', (req, res) => {
- const skill = skillRegistry.get(req.params.slug);
- if (!skill) {
  const runtime = readRuntimeSkillFiles(req.params.slug);
- const runtimeContent = runtime?.files?.[req.params.filename] || runtime?.files?.['SKILL.md'];
- if (runtimeContent && /skill\.md/i.test(req.params.filename)) return res.type('text/plain').send(runtimeContent);
- return res.status(404).json({ error: 'Skill not found' });
- }
+ const runtimeContent = runtime?.files?.[req.params.filename]
+   || (/skill\.md/i.test(req.params.filename) ? getSkillMdFromPayload({ files: runtime?.files || {} }) : '');
+ if (runtimeContent) return res.type('text/plain').send(runtimeContent);
+ const skill = skillRegistry.get(req.params.slug);
+ if (!skill) return res.status(404).json({ error: 'Skill not found' });
  const content = (skill.files || {})[req.params.filename];
  if (!content) return res.status(404).json({ error: `File ${req.params.filename} not found` });
  res.type('text/plain').send(content);
@@ -6586,6 +6581,8 @@ function shellQuote(value) {
  return JSON.stringify(String(value));
 }
 
+const MAX_SKILL_FILE_BYTES = 512 * 1024;
+
 const HOST_RUNTIME_SKILL_ROOTS = [
  '/opt/openclaw-data/workspace/skills',
  '/home/node/.openclaw/skills',
@@ -6623,11 +6620,119 @@ function buildSkillLookupAliases({ slug, skillId, sourcePath } = {}) {
 function getSkillMdFromPayload({ content, files } = {}) {
  if (typeof content === 'string' && content.trim()) return content;
  if (files && typeof files === 'object') {
-  for (const key of ['SKILL.md', 'skill.md']) {
-   if (typeof files[key] === 'string' && files[key].trim()) return files[key];
+  for (const [key, value] of Object.entries(files)) {
+   if (/^skill\.md$/i.test(key) && typeof value === 'string' && value.trim()) return value;
   }
  }
  return '';
+}
+
+function collectHostSkillFiles(baseDir, currentDir, out) {
+ const entries = readdirSync(currentDir, { withFileTypes: true });
+ for (const entry of entries) {
+  const absolutePath = path.join(currentDir, entry.name);
+  const relativePath = path.relative(baseDir, absolutePath).replace(/\\/g, '/');
+  if (entry.isDirectory()) {
+   collectHostSkillFiles(baseDir, absolutePath, out);
+   continue;
+  }
+  if (!entry.isFile()) continue;
+  try {
+   const stats = statSync(absolutePath);
+   if (stats.size > MAX_SKILL_FILE_BYTES) continue;
+   out[relativePath] = readFileSync(absolutePath, 'utf8');
+  } catch {}
+ }
+}
+
+function readHostSkillFiles(alias) {
+ for (const root of HOST_RUNTIME_SKILL_ROOTS) {
+  try {
+   const dir = path.join(root, alias);
+   if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
+   const files = {};
+   collectHostSkillFiles(dir, dir, files);
+   if (Object.keys(files).length > 0) return { alias, root, files };
+  } catch {}
+ }
+ return null;
+}
+
+function listHostSkillAliases() {
+ const aliases = new Set();
+ for (const root of HOST_RUNTIME_SKILL_ROOTS) {
+  try {
+   if (!existsSync(root) || !statSync(root).isDirectory()) continue;
+   const entries = readdirSync(root, { withFileTypes: true });
+   for (const entry of entries) {
+    if (entry.isDirectory()) aliases.add(entry.name);
+   }
+  } catch {}
+ }
+ return aliases;
+}
+
+function runContainerNodeJson(script, arg) {
+ try {
+  const output = execSync(
+   `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(`node -e ${shellQuote(script)} ${shellQuote(arg)}`)}`,
+   { timeout: 10000, maxBuffer: 8 * 1024 * 1024 }
+  ).toString().trim();
+  if (!output) return null;
+  return JSON.parse(output);
+ } catch {
+  return null;
+ }
+}
+
+function readContainerSkillFiles(alias) {
+ const script = `
+const fs = require('fs');
+const path = require('path');
+const dir = process.argv[1];
+const maxBytes = ${MAX_SKILL_FILE_BYTES};
+function walk(baseDir, currentDir, out) {
+  const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const absolutePath = path.join(currentDir, entry.name);
+    const relativePath = path.relative(baseDir, absolutePath).replace(/\\\\/g, '/');
+    if (entry.isDirectory()) {
+      walk(baseDir, absolutePath, out);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    const stats = fs.statSync(absolutePath);
+    if (stats.size > maxBytes) continue;
+    out[relativePath] = fs.readFileSync(absolutePath, 'utf8');
+  }
+}
+if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+  process.stdout.write('');
+  process.exit(0);
+}
+const out = {};
+walk(dir, dir, out);
+process.stdout.write(JSON.stringify(out));
+`;
+ for (const root of CONTAINER_RUNTIME_SKILL_ROOTS) {
+  const files = runContainerNodeJson(script, `${root}/${alias}`);
+  if (files && Object.keys(files).length > 0) return { alias, root, files };
+ }
+ return null;
+}
+
+function listContainerSkillAliases() {
+ const aliases = new Set();
+ for (const root of CONTAINER_RUNTIME_SKILL_ROOTS) {
+  try {
+   const output = execSync(
+    `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(`find ${shellQuote(root)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' 2>/dev/null || true`)}`,
+    { timeout: 8000, maxBuffer: 1024 * 1024 }
+   ).toString();
+   output.split('\n').map((value) => value.trim()).filter(Boolean).forEach((value) => aliases.add(value));
+  } catch {}
+ }
+ return aliases;
 }
 
 function readHostSkillMd(alias) {
@@ -6674,14 +6779,17 @@ async function fetchGitHubSkillMd(sourceRepo, sourcePath) {
  }
 }
 
-function writeHostSkillMd(alias, content) {
+function writeHostSkillFiles(alias, files = {}) {
  let wrote = 0;
  for (const root of HOST_RUNTIME_SKILL_ROOTS) {
   try {
-   const dir = path.join(root, alias);
-   mkdirSync(dir, { recursive: true });
-   writeFileSync(path.join(dir, 'SKILL.md'), content, 'utf8');
-   wrote++;
+   for (const [relativePath, content] of Object.entries(files)) {
+    if (typeof content !== 'string') continue;
+    const target = path.join(root, alias, relativePath);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, content, 'utf8');
+    wrote++;
+   }
   } catch (err) {
    console.warn(`[skills] Failed to write host skill ${root}/${alias}: ${err.message}`);
   }
@@ -6689,14 +6797,17 @@ function writeHostSkillMd(alias, content) {
  return wrote;
 }
 
-function writeContainerSkillMd(alias, content) {
+function writeContainerSkillFiles(alias, files = {}) {
  let wrote = 0;
  for (const root of CONTAINER_RUNTIME_SKILL_ROOTS) {
-  try {
-   writeContainerFile(`${root}/${alias}/SKILL.md`, content);
-   wrote++;
-  } catch (err) {
-   console.warn(`[skills] Failed to write container skill ${root}/${alias}: ${err.message}`);
+  for (const [relativePath, content] of Object.entries(files)) {
+   if (typeof content !== 'string') continue;
+   try {
+    writeContainerFile(`${root}/${alias}/${relativePath}`, content);
+    wrote++;
+   } catch (err) {
+    console.warn(`[skills] Failed to write container skill ${root}/${alias}/${relativePath}: ${err.message}`);
+   }
   }
  }
  return wrote;
@@ -6705,19 +6816,29 @@ function writeContainerSkillMd(alias, content) {
 function readRuntimeSkillFiles(slug) {
  const aliases = buildSkillLookupAliases({ slug });
  for (const alias of aliases) {
-  const content = readHostSkillMd(alias) || readContainerSkillMd(alias);
-  if (content) return { alias, files: { 'SKILL.md': content } };
+  const candidates = [readHostSkillFiles(alias), readContainerSkillFiles(alias)]
+   .filter((runtime) => runtime?.files && Object.keys(runtime.files).length > 0)
+   .sort((a, b) => Object.keys(b.files || {}).length - Object.keys(a.files || {}).length);
+  if (candidates.length > 0) return candidates[0];
  }
  return null;
 }
 
 async function materializeSkillForRuntime({ slug, sourceRepo, skillId, sourcePath, content, files } = {}) {
  const aliases = buildSkillLookupAliases({ slug, skillId, sourcePath });
- let skillMd = getSkillMdFromPayload({ content, files });
+ let runtimeFiles = files && typeof files === 'object' ? { ...files } : {};
+ let skillMd = getSkillMdFromPayload({ content, files: runtimeFiles });
  if (!skillMd) skillMd = await fetchGitHubSkillMd(sourceRepo, sourcePath);
+ if (skillMd && !getSkillMdFromPayload({ files: runtimeFiles })) {
+  runtimeFiles['SKILL.md'] = skillMd;
+ }
  if (!skillMd) {
   for (const alias of aliases) {
-   skillMd = readHostSkillMd(alias) || readContainerSkillMd(alias);
+   const runtime = readHostSkillFiles(alias) || readContainerSkillFiles(alias);
+   if (runtime?.files && Object.keys(runtime.files).length > 0) {
+    runtimeFiles = runtime.files;
+    skillMd = getSkillMdFromPayload({ files: runtime.files });
+   }
    if (skillMd) break;
   }
  }
@@ -6728,11 +6849,11 @@ async function materializeSkillForRuntime({ slug, sourceRepo, skillId, sourcePat
  let hostWrites = 0;
  let containerWrites = 0;
  for (const alias of aliases) {
-  hostWrites += writeHostSkillMd(alias, skillMd);
-  containerWrites += writeContainerSkillMd(alias, skillMd);
+  hostWrites += writeHostSkillFiles(alias, runtimeFiles);
+  containerWrites += writeContainerSkillFiles(alias, runtimeFiles);
  }
  try { execSync('chown -R 1000:1000 /opt/openclaw-data/workspace/skills /home/node/.openclaw/skills /home/node/.openclaw/.agents/skills 2>/dev/null', { timeout: 5000 }); } catch {}
- return { ok: true, aliases, hostWrites, containerWrites, bytes: Buffer.byteLength(skillMd) };
+ return { ok: true, aliases, hostWrites, containerWrites, bytes: Buffer.byteLength(skillMd), files: runtimeFiles };
 }
 
 app.post('/skills/:slug/install', async (req, res) => {
@@ -6763,29 +6884,44 @@ app.post('/skills/:slug/install', async (req, res) => {
   console.error(`❌ skills.sh install failed for "${slug}":`, cliError);
  }
 
- const materialized = await materializeSkillForRuntime({
-  slug,
-  sourceRepo,
-  skillId,
-  sourcePath,
-  content: req.body?.content,
-  files: req.body?.files,
- });
+ let runtimeSnapshot = null;
+ if (!cliError) {
+  runtimeSnapshot = readRuntimeSkillFiles(slug) || readRuntimeSkillFiles(skillId);
+ }
 
- if (cliError && !materialized.ok) {
+ let materialized = null;
+ if (cliError || !runtimeSnapshot) {
+  materialized = await materializeSkillForRuntime({
+   slug,
+   sourceRepo,
+   skillId,
+   sourcePath,
+   content: req.body?.content,
+   files: req.body?.files,
+  });
+ }
+
+ if (cliError && !materialized?.ok) {
    return res.status(500).json({ error: `Install failed: ${cliError}`, materialized });
  }
 
  // Signal OpenClaw to reload (SIGUSR1)
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
 
+ const effectiveRuntimeFiles = runtimeSnapshot?.files || materialized?.files || {};
+
  res.json({
   success: true,
   slug,
   output: output.trim(),
   materialized,
-  runtimeReady: materialized.ok || !cliError,
-  warning: cliError ? `skills.sh install failed; ${materialized.ok ? 'materialized SKILL.md directly instead' : 'runtime materialization also failed'}` : null,
+  files: effectiveRuntimeFiles,
+  runtimeReady: Object.keys(effectiveRuntimeFiles).length > 0,
+  warning: cliError
+   ? `skills.sh install failed; ${materialized?.ok ? 'materialized provided skill files directly instead' : 'runtime materialization also failed'}`
+   : Object.keys(effectiveRuntimeFiles).length === 0
+    ? 'skills.sh install completed but no runtime files were discovered afterward'
+    : null,
  });
  } catch (err) {
  const stderr = err.stderr?.toString() || err.stdout?.toString() || err.message;
@@ -6834,61 +6970,47 @@ app.get('/skills/installed', (req, res) => {
      lock = JSON.parse(readFileSync(lockPath, 'utf8'));
    }
  } catch {}
- // Scan all skill directories: workspace, managed, bundled
- const skillDirs = [
-   '/opt/openclaw-data/workspace/skills',                    // workspace skills
-   '/home/node/.openclaw/skills',                             // managed/project skills (skills.sh install)
-   '/home/node/.openclaw/.agents/skills',                     // universal agent skills
- ];
- // Also try to find bundled skills from the OpenClaw package
- try {
-   const ocDir = execSync('docker exec openclaw-openclaw-gateway-1 node -e "console.log(require.resolve(\'openclaw\').replace(/dist.*/, \'\'))"', { timeout: 5000 }).toString().trim();
-   if (ocDir) skillDirs.push(`${ocDir}dist/skills/bundled`);
- } catch {}
+ const aliases = new Set([
+  ...Object.keys(lock.skills || {}),
+  ...Array.from(listHostSkillAliases()),
+  ...Array.from(listContainerSkillAliases()),
+ ]);
 
- for (const skillsDir of skillDirs) {
-   try {
-     const dirs = readdirSync(skillsDir);
-     for (const dir of dirs) {
-       if (seen.has(dir)) continue;
-     try {
-       const skillMd = readFileSync(`${skillsDir}/${dir}/SKILL.md`, 'utf8');
-       const nameMatch = skillMd.match(/^#\s+(.+)/m);
-       const descMatch = skillMd.match(/^(?:>|description:)\s*(.+)/mi);
-       const summaryMatch = skillMd.match(/^summary:\s*["']?(.+?)["']?\s*$/m);
-       const lockEntry = lock.skills?.[dir] || null;
-       const sourceRepo = lockEntry?.source || null;
-       const slug = buildSkillsMarketplaceSlug(sourceRepo, dir);
-       const includeLocalContent =
-         skillsDir.includes('/opt/openclaw-data/workspace/skills') ||
-         skillsDir.includes('/.openclaw/skills') ||
-         skillsDir.includes('/.agents/skills');
-        seen.add(dir);
-        skills.push({
-          slug,
-          skillId: dir,
-          sourceRepo,
-          name: nameMatch ? nameMatch[1].trim() : dir,
-          description: summaryMatch ? summaryMatch[1].trim() : (descMatch ? descMatch[1].trim() : ''),
-          installed: true,
-          source: sourceRepo
-            ? 'skills.sh'
-            : skillsDir.includes('workspace')
-            ? 'workspace'
-            : (skillsDir.includes('/.openclaw/skills') || skillsDir.includes('/.agents/skills'))
-            ? 'managed'
-            : 'bundled',
-          repository: sourceRepo ? `https://github.com/${sourceRepo}` : null,
-          repo: sourceRepo ? `https://github.com/${sourceRepo}` : null,
-          pageUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
-          sourceUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
-          installCommand: sourceRepo ? `npx skills add https://github.com/${sourceRepo} --skill ${dir}` : null,
-          content: includeLocalContent ? skillMd : null,
-          files: includeLocalContent ? { 'SKILL.md': skillMd } : null,
-        });
-      } catch {}
-     }
-   } catch {}
+ for (const dir of aliases) {
+  if (!dir || seen.has(dir)) continue;
+  const runtime = readRuntimeSkillFiles(dir);
+  const skillMd = getSkillMdFromPayload({ files: runtime?.files || {} });
+  if (!skillMd) continue;
+  const nameMatch = skillMd.match(/^#\s+(.+)/m);
+  const descMatch = skillMd.match(/^(?:>|description:)\s*(.+)/mi);
+  const summaryMatch = skillMd.match(/^summary:\s*["']?(.+?)["']?\s*$/m);
+  const lockEntry = lock.skills?.[dir] || null;
+  const sourceRepo = lockEntry?.source || null;
+  const slug = buildSkillsMarketplaceSlug(sourceRepo, dir);
+  const root = runtime?.root || '';
+  seen.add(dir);
+  skills.push({
+   slug,
+   skillId: dir,
+   sourceRepo,
+   name: nameMatch ? nameMatch[1].trim() : dir,
+   description: summaryMatch ? summaryMatch[1].trim() : (descMatch ? descMatch[1].trim() : ''),
+   installed: true,
+   source: sourceRepo
+    ? 'skills.sh'
+    : root.includes('workspace')
+    ? 'workspace'
+    : (root.includes('/.openclaw/skills') || root.includes('/.agents/skills'))
+    ? 'managed'
+    : 'bundled',
+   repository: sourceRepo ? `https://github.com/${sourceRepo}` : null,
+   repo: sourceRepo ? `https://github.com/${sourceRepo}` : null,
+   pageUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
+   sourceUrl: sourceRepo ? `https://skills.sh/${sourceRepo}/${dir}` : null,
+   installCommand: sourceRepo ? `npx skills add https://github.com/${sourceRepo} --skill ${dir}` : null,
+   content: skillMd,
+   files: runtime?.files || { 'SKILL.md': skillMd },
+  });
  }
  res.json({ skills, total: skills.length });
  } catch (err) {
