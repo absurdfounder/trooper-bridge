@@ -3564,13 +3564,15 @@ const emitViewportScreenshotFrame = ({
  resolvedSystemPrompt = resolvedSystemPrompt ? `${resolvedSystemPrompt}\n\n${folderRule}` : folderRule;
  }
 
- try {
- console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${context?.executionLane ? ` [lane:${context.executionLane}]` : isBrowserTask ? ' [browser task]' : ''}...`);
- // Task work needs longer inactivity timeout — gateway agents do internal tool work
- // that emits WS events. 600s for tasks, 180s for chat.
- const isTaskWork = !!(context?.taskId);
- const inactivityMs = isTaskWork ? 600000 : 180000;
- const { explicitModel: streamingExplicitModel, effectiveModel: streamingEffectiveModel } = resolveGatewayModelSelection(model);
+	 let streamingExplicitModel = null;
+	 let streamingEffectiveModel = null;
+	 try {
+	 console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${context?.executionLane ? ` [lane:${context.executionLane}]` : isBrowserTask ? ' [browser task]' : ''}...`);
+	 // Task work needs longer inactivity timeout — gateway agents do internal tool work
+	 // that emits WS events. 600s for tasks, 180s for chat.
+	 const isTaskWork = !!(context?.taskId);
+	 const inactivityMs = isTaskWork ? 600000 : 180000;
+	 ({ explicitModel: streamingExplicitModel, effectiveModel: streamingEffectiveModel } = resolveGatewayModelSelection(model));
 
 	 let response, toolLog, gatewayRunId, resolvedSessionKey;
 	 let abortedForPlanMode = false;
@@ -6956,21 +6958,6 @@ app.post('/skills/:slug/install', async (req, res) => {
 	  } catch (err) {
 	   cliError = formatExecError(err);
 	   console.error(`❌ skills.sh install failed for "${slug}":`, cliError);
-	   const availableSkills = extractAvailableSkillsFromCliOutput(cliError);
-	   if (availableSkills.length === 1 && availableSkills[0] !== resolvedSkillId) {
-	    const retrySkillId = availableSkills[0];
-	    console.warn(`↪️ Retrying skills.sh install for "${slug}" with available skill "${retrySkillId}"`);
-	    try {
-	     resolvedSkillId = retrySkillId;
-	     resolvedSlug = buildSkillsMarketplaceSlug(sourceRepo, resolvedSkillId);
-	     output = runSkillsCliInstall(sourceRepo, resolvedSkillId);
-	     cliError = '';
-	     console.log(`✅ Skill "${slug}" installed as "${resolvedSkillId}": ${output.trim().split('\n').pop()}`);
-	    } catch (retryErr) {
-	     cliError = formatExecError(retryErr);
-	     console.error(`❌ skills.sh retry failed for "${slug}" as "${retrySkillId}":`, cliError);
-	    }
-	   }
 	  }
 
 	  let runtimeSnapshot = null;
@@ -6983,9 +6970,11 @@ app.post('/skills/:slug/install', async (req, res) => {
 
 	  let materialized = null;
 	  if (cliError) {
+	   const availableSkills = extractAvailableSkillsFromCliOutput(cliError);
 	   return res.status(502).json({
 	    error: `skills.sh install failed: ${cliError}`,
 	    cliError,
+	    availableSkills,
 	    runtimeReady: false,
 	   });
 	  }
