@@ -24,7 +24,7 @@ import { ensureXvnc } from './lib/xvnc.mjs';
 import cors from 'cors';
 import { EventEmitter } from 'events';
 import { execSync, spawn } from 'child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, cpSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, rmSync, cpSync } from 'fs';
 import { readFile, writeFile, readdir } from 'fs/promises';
 import { db, sqlite, DB_PATH } from './db/index.mjs';
 import { migrate } from './db/migrate.mjs';
@@ -6586,14 +6586,29 @@ const MAX_SKILL_FILE_BYTES = 512 * 1024;
 const HOST_RUNTIME_SKILL_ROOTS = [
  '/opt/openclaw-data/workspace/skills',
  '/home/node/.openclaw/skills',
+];
+
+const HOST_RUNTIME_SKILL_FALLBACK_ROOTS = [
  '/home/node/.openclaw/.agents/skills',
+];
+
+const HOST_RUNTIME_SKILL_WRITE_ROOTS = [
+ '/opt/openclaw-data/workspace/skills',
+ '/home/node/.openclaw/skills',
 ];
 
 const CONTAINER_RUNTIME_SKILL_ROOTS = [
  '/app/skills',
  '/home/node/.openclaw/skills',
- '/home/node/.openclaw/.agents/skills',
  '/home/node/.openclaw/workspace/skills',
+];
+
+const CONTAINER_RUNTIME_SKILL_FALLBACK_ROOTS = [
+ '/home/node/.openclaw/.agents/skills',
+];
+
+const CONTAINER_RUNTIME_SKILL_WRITE_ROOTS = [
+ '/home/node/.openclaw/skills',
 ];
 
 function sanitizeSkillDirName(value) {
@@ -6646,7 +6661,7 @@ function collectHostSkillFiles(baseDir, currentDir, out) {
 }
 
 function readHostSkillFiles(alias) {
- for (const root of HOST_RUNTIME_SKILL_ROOTS) {
+ for (const root of [...HOST_RUNTIME_SKILL_ROOTS, ...HOST_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   try {
    const dir = path.join(root, alias);
    if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
@@ -6660,7 +6675,7 @@ function readHostSkillFiles(alias) {
 
 function listHostSkillAliases() {
  const aliases = new Set();
- for (const root of HOST_RUNTIME_SKILL_ROOTS) {
+ for (const root of [...HOST_RUNTIME_SKILL_ROOTS, ...HOST_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   try {
    if (!existsSync(root) || !statSync(root).isDirectory()) continue;
    const entries = readdirSync(root, { withFileTypes: true });
@@ -6719,7 +6734,7 @@ const out = {};
 walk(dir, dir, out);
 process.stdout.write(JSON.stringify(out));
 `;
- for (const root of CONTAINER_RUNTIME_SKILL_ROOTS) {
+ for (const root of [...CONTAINER_RUNTIME_SKILL_ROOTS, ...CONTAINER_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   const files = runContainerNodeJson(script, `${root}/${alias}`);
   if (files && Object.keys(files).length > 0) return { alias, root, files };
  }
@@ -6728,7 +6743,7 @@ process.stdout.write(JSON.stringify(out));
 
 function listContainerSkillAliases() {
  const aliases = new Set();
- for (const root of CONTAINER_RUNTIME_SKILL_ROOTS) {
+ for (const root of [...CONTAINER_RUNTIME_SKILL_ROOTS, ...CONTAINER_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   try {
    const output = execSync(
     `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(`find ${shellQuote(root)} -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' 2>/dev/null || true`)}`,
@@ -6741,7 +6756,7 @@ function listContainerSkillAliases() {
 }
 
 function readHostSkillMd(alias) {
- for (const root of HOST_RUNTIME_SKILL_ROOTS) {
+ for (const root of [...HOST_RUNTIME_SKILL_ROOTS, ...HOST_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   for (const fileName of ['SKILL.md', 'skill.md']) {
    const target = path.join(root, alias, fileName);
    try {
@@ -6756,7 +6771,7 @@ function readHostSkillMd(alias) {
 }
 
 function readContainerSkillMd(alias) {
- for (const root of CONTAINER_RUNTIME_SKILL_ROOTS) {
+ for (const root of [...CONTAINER_RUNTIME_SKILL_ROOTS, ...CONTAINER_RUNTIME_SKILL_FALLBACK_ROOTS]) {
   for (const fileName of ['SKILL.md', 'skill.md']) {
    const target = `${root}/${alias}/${fileName}`;
    try {
@@ -6786,8 +6801,14 @@ async function fetchGitHubSkillMd(sourceRepo, sourcePath) {
 
 function writeHostSkillFiles(alias, files = {}) {
  let wrote = 0;
- for (const root of HOST_RUNTIME_SKILL_ROOTS) {
+ for (const root of HOST_RUNTIME_SKILL_WRITE_ROOTS) {
   try {
+   const dir = path.join(root, alias);
+   try {
+    const current = lstatSync(dir);
+    if (current.isSymbolicLink() || !current.isDirectory()) rmSync(dir, { recursive: true, force: true });
+   } catch {}
+   mkdirSync(dir, { recursive: true });
    for (const [relativePath, content] of Object.entries(files)) {
     if (typeof content !== 'string') continue;
     const target = path.join(root, alias, relativePath);
@@ -6802,9 +6823,29 @@ function writeHostSkillFiles(alias, files = {}) {
  return wrote;
 }
 
+function ensureContainerSkillDir(root, alias) {
+ const dir = `${root}/${alias}`;
+ const command = [
+  `target=${shellQuote(dir)}`,
+  'if [ -L "$target" ] || { [ -e "$target" ] && [ ! -d "$target" ]; }; then rm -rf "$target"; fi',
+  'mkdir -p "$target"',
+  'chown -R 1000:1000 "$target"',
+ ].join('; ');
+ execSync(
+  `docker exec openclaw-openclaw-gateway-1 bash -lc ${shellQuote(command)}`,
+  { timeout: 10000 }
+ );
+}
+
 function writeContainerSkillFiles(alias, files = {}) {
  let wrote = 0;
- for (const root of CONTAINER_RUNTIME_SKILL_ROOTS) {
+ for (const root of CONTAINER_RUNTIME_SKILL_WRITE_ROOTS) {
+  try {
+   ensureContainerSkillDir(root, alias);
+  } catch (err) {
+   console.warn(`[skills] Failed to prepare container skill ${root}/${alias}: ${err.message}`);
+   continue;
+  }
   for (const [relativePath, content] of Object.entries(files)) {
    if (typeof content !== 'string') continue;
    try {
@@ -6857,7 +6898,7 @@ async function materializeSkillForRuntime({ slug, sourceRepo, skillId, sourcePat
   hostWrites += writeHostSkillFiles(alias, runtimeFiles);
   containerWrites += writeContainerSkillFiles(alias, runtimeFiles);
  }
- try { execSync('chown -R 1000:1000 /opt/openclaw-data/workspace/skills /home/node/.openclaw/skills /home/node/.openclaw/.agents/skills 2>/dev/null', { timeout: 5000 }); } catch {}
+ try { execSync('chown -R 1000:1000 /opt/openclaw-data/workspace/skills /home/node/.openclaw/skills 2>/dev/null', { timeout: 5000 }); } catch {}
  return { ok: true, aliases, hostWrites, containerWrites, bytes: Buffer.byteLength(skillMd), files: runtimeFiles };
 }
 
@@ -6894,7 +6935,15 @@ app.post('/skills/:slug/install', async (req, res) => {
  }
 
  let materialized = null;
- if (cliError || !runtimeSnapshot) {
+ if (!cliError && runtimeSnapshot?.files && Object.keys(runtimeSnapshot.files).length > 0) {
+  materialized = await materializeSkillForRuntime({
+   slug,
+   sourceRepo,
+   skillId,
+   sourcePath,
+   files: runtimeSnapshot.files,
+  });
+ } else if (cliError || !runtimeSnapshot) {
   materialized = await materializeSkillForRuntime({
    slug,
    sourceRepo,
@@ -6912,7 +6961,7 @@ app.post('/skills/:slug/install', async (req, res) => {
  // Signal OpenClaw to reload (SIGUSR1)
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
 
- const effectiveRuntimeFiles = runtimeSnapshot?.files || materialized?.files || {};
+ const effectiveRuntimeFiles = materialized?.files || runtimeSnapshot?.files || {};
 
  res.json({
   success: true,
