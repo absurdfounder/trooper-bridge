@@ -8087,6 +8087,7 @@ app.get('/config/provider-settings', (req, res) => {
   const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
   const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
+  const chatThinkingLevel = readConfigKey('chatThinkingLevel') || 'auto';
 
   res.json({
    providers,
@@ -8096,6 +8097,7 @@ app.get('/config/provider-settings', (req, res) => {
    modelRoutingFallbacks,
    pendingBridgeApply,
    defaultModel,
+   chatThinkingLevel,
   });
  } catch (err) {
   res.status(500).json({ error: err.message });
@@ -8132,12 +8134,13 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
   if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
+  if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
   res.json({ ok: true });
  } catch (err) {
   res.status(500).json({ error: err.message });
