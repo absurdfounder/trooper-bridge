@@ -8037,6 +8037,7 @@ const hasStoredCodexOAuthProfile = () => {
  if (!config.models.providers) config.models.providers = {};
  if (localProvider && typeof localProvider === 'object') {
    config.models.providers['local-llamacpp'] = localProvider;
+   if (localProvider.baseUrl) writeConfigKey('localModelUrl', String(localProvider.baseUrl).trim().replace(/\/+$/, ''));
    console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${localProvider.baseUrl || '(no baseUrl)'}`);
  } else if (removeLocalProvider) {
    delete config.models.providers['local-llamacpp'];
@@ -8044,6 +8045,7 @@ const hasStoredCodexOAuthProfile = () => {
  }
  if (ollamaProvider && typeof ollamaProvider === 'object') {
    config.models.providers.ollama = ollamaProvider;
+   if (ollamaProvider.baseUrl) writeConfigKey('ollamaBaseUrl', String(ollamaProvider.baseUrl).trim().replace(/\/+$/, ''));
    console.log(`[bridge] Added Ollama provider to openclaw.json: ${ollamaProvider.baseUrl || '(no baseUrl)'}`);
  } else if (removeOllamaProvider) {
    delete config.models.providers.ollama;
@@ -8365,6 +8367,7 @@ app.get('/config/provider-settings', (req, res) => {
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
   const chatThinkingLevel = readConfigKey('chatThinkingLevel') || 'auto';
   const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
+  const localModelUrl = readConfigKey('localModelUrl') || null;
 
   res.json({
    providers,
@@ -8376,6 +8379,7 @@ app.get('/config/provider-settings', (req, res) => {
    defaultModel,
    chatThinkingLevel,
    ollamaBaseUrl,
+   localModelUrl,
   });
  } catch (err) {
   res.status(500).json({ error: err.message });
@@ -8403,8 +8407,10 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
   const modelRouting = readConfigKey('modelRouting') || {};
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
+  const localModelUrl = readConfigKey('localModelUrl') || null;
+  const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
 
-  res.json({ keys, openaiCodex, defaultModel, modelRouting });
+  res.json({ keys, openaiCodex, defaultModel, modelRouting, localModelUrl, ollamaBaseUrl });
  } catch (err) {
   res.status(500).json({ error: err.message });
  }
@@ -8412,7 +8418,7 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, ollamaBaseUrl } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, ollamaBaseUrl, localModelUrl } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
@@ -8420,6 +8426,7 @@ app.put('/config/provider-settings', (req, res) => {
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
   if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
   if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
+  if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
   res.json({ ok: true });
  } catch (err) {
   res.status(500).json({ error: err.message });
