@@ -557,6 +557,19 @@ function readRuntimeEnvSummary() {
  return { path: envPath, present };
 }
 
+function readWorkspaceTextFile(fileName, maxChars = 50000) {
+ const workspaceRoot = '/opt/openclaw-data/workspace';
+ const safeName = String(fileName || '').replace(/^\/+/, '');
+ if (safeName.includes('..')) return '';
+ const filePath = `${workspaceRoot}/${safeName}`;
+ try {
+  const content = readFileSync(filePath, 'utf8');
+  return content.slice(0, maxChars);
+ } catch {
+  return '';
+ }
+}
+
 function writeOpenClawConfig(config) {
  writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
  try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
@@ -7500,6 +7513,8 @@ function buildOpenClawCapabilitiesPayload() {
    modelCatalog: true,
    diagnosticsExport: true,
    voiceCapabilities: true,
+   dreaming: true,
+   activeMemory: true,
   },
   openclaw: {
    nativeAgentRpc: true,
@@ -7510,6 +7525,15 @@ function buildOpenClawCapabilitiesPayload() {
    modelCatalog: true,
    diagnosticsExport: true,
    fullAgentVoice: true,
+   dreaming: true,
+   activeMemory: true,
+  },
+  memory: {
+   activeMemory: true,
+   dreaming: true,
+   dreamDiary: true,
+   memoryCore: true,
+   recommendationSource: 'dreaming',
   },
   modelRouting: {
    localProviderBaseUrlOnly: true,
@@ -7609,6 +7633,35 @@ app.get('/diagnostics/export', async (req, res) => {
   },
   config: redactDiagnosticValue(readOpenClawConfig()),
   env: readRuntimeEnvSummary(),
+ });
+});
+
+app.get('/memory/dreaming', async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ const safeExec = (command, timeout = 15000) => {
+  try {
+   return { ok: true, output: execSync(command, { timeout, encoding: 'utf8' }).trim() };
+  } catch (err) {
+   return { ok: false, error: err.message, output: String(err.stdout || '').trim() };
+  }
+ };
+ const status = safeExec('docker exec openclaw-openclaw-gateway-1 openclaw memory status --deep --json 2>&1', 20000);
+ const dreamsMd = readWorkspaceTextFile('DREAMS.md', 60000) || readWorkspaceTextFile('dreams.md', 60000);
+ const config = readOpenClawConfig();
+ const dreamingConfig = config?.plugins?.entries?.['memory-core']?.config?.dreaming || null;
+ const activeMemoryConfig = config?.plugins?.entries?.['active-memory']?.config || null;
+ res.json({
+  ok: true,
+  status: status.ok ? (() => {
+   try { return JSON.parse(status.output); } catch { return { raw: redactDiagnosticText(status.output) }; }
+  })() : redactDiagnosticValue(status),
+  dreamDiary: dreamsMd,
+  dreamDiaryAvailable: Boolean(dreamsMd),
+  config: {
+   dreaming: redactDiagnosticValue(dreamingConfig),
+   activeMemory: redactDiagnosticValue(activeMemoryConfig),
+  },
+  timestamp: Date.now(),
  });
 });
 

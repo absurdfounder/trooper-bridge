@@ -912,6 +912,9 @@ else
  MEMORY_SEARCH_JSON='"memorySearch": { "enabled": true }'
 fi
 
+DREAMING_FREQUENCY="${OPENCLAW_DREAMING_FREQUENCY:-0 3 * * *}"
+DREAMING_TIMEZONE="${OPENCLAW_DREAMING_TIMEZONE:-UTC}"
+
 # OpenClaw config — security-hardened, multi-model support
 cat > /opt/openclaw-data/config/openclaw.json << OCCONFIG
 {
@@ -975,6 +978,31 @@ ${MODELS_PROVIDERS}
  },
  "plugins": {
  "entries": {
+ "memory-core": {
+ "enabled": true,
+ "config": {
+ "dreaming": {
+ "enabled": true,
+ "frequency": "${DREAMING_FREQUENCY}",
+ "timezone": "${DREAMING_TIMEZONE}"
+ }
+ }
+ },
+ "active-memory": {
+ "enabled": true,
+ "config": {
+ "enabled": true,
+ "agents": ["main"],
+ "allowedChatTypes": ["direct", "channel"],
+ "modelFallbackPolicy": "resolved-only",
+ "queryMode": "recent",
+ "promptStyle": "balanced",
+ "timeoutMs": 10000,
+ "maxSummaryChars": 220,
+ "persistTranscripts": false,
+ "logging": false
+ }
+ },
  "lobster": { "enabled": true },
  "llm-task": { "enabled": true },
  "acpx": { "enabled": true }
