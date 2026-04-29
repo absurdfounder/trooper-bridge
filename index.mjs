@@ -719,6 +719,23 @@ class OpenClawGateway {
  this.connect();
  }
 
+ _disposeSocket(ws, { preserveCloseHandler = false } = {}) {
+ if (!ws) return;
+ try {
+ if (!preserveCloseHandler) ws.removeAllListeners('close');
+ ws.removeAllListeners('error');
+ ws.removeAllListeners('message');
+ // Closing a CONNECTING socket can emit an error before `close`. Keep a
+ // no-op handler attached so reconnect churn does not crash the bridge.
+ ws.on('error', () => {});
+ if (ws.readyState === WebSocket.CONNECTING) {
+   try { ws.terminate(); } catch {}
+   return;
+ }
+ try { ws.close(); } catch {}
+ } catch {}
+ }
+
  // Attempt reconnect if not connected; returns true if ready
  async ensureConnected() {
  if (this.isReady) return true;
@@ -747,11 +764,8 @@ class OpenClawGateway {
  // Clear any pending reconnect timer to prevent close→reconnect→close loops
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
  if (this.ws) {
-   // Remove listeners before closing to prevent on('close') from scheduling another reconnect
-   this.ws.removeAllListeners('close');
-   this.ws.removeAllListeners('error');
-   this.ws.removeAllListeners('message');
-   try { this.ws.close(); } catch {}
+   // Dispose the old socket without letting a half-open connection crash the bridge.
+   this._disposeSocket(this.ws);
  }
 
  console.log('[OpenClaw] Connecting to ' + this.url + '...');
@@ -2274,7 +2288,10 @@ const formattedToolLog = toolLog.map(t => ({
  }
 
  get isReady() { return this.connected && this.ws?.readyState === WebSocket.OPEN; }
- close() { if (this._reconnectTimer) clearTimeout(this._reconnectTimer); if (this.ws) this.ws.close(); }
+ close() {
+ if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+ if (this.ws) this._disposeSocket(this.ws, { preserveCloseHandler: true });
+ }
 }
 
 // Initialize the gateway client (connects on startup)
