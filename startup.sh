@@ -21,22 +21,26 @@ if command -v Xvnc &>/dev/null; then
   fi
 fi
 
-# Belt-and-suspenders: keep runtime permissions aligned with entrypoint.sh.
-# The bridge-side helpers may run under a different UID than the in-container
-# node user, so config/device paths must stay traversable and group/world
-# readable instead of being re-hardened back to 600/700 here.
-chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
-chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
-find /home/node/.openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
-find /home/node/.openclaw -name '*.json' -exec chmod 664 {} \; 2>/dev/null || true
-chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
-chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
-chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
-chmod 755 /home/node/.openclaw/identity 2>/dev/null || true
-chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true
-mkdir -p /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
-chown -R 1000:1000 /var/lib/openclaw 2>/dev/null || true
-chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true
+repair_openclaw_permissions() {
+  # Belt-and-suspenders: keep runtime permissions aligned with entrypoint.sh.
+  # Restore can rewrite config/sessions after container start, so this function
+  # is run now and repeatedly in the background during the cutover window.
+  chown -R 1000:1000 /home/node/.openclaw 2>/dev/null || true
+  chown -R 1000:1000 /home/node/.npm 2>/dev/null || true
+  find /home/node/.openclaw -type d -exec chmod 777 {} \; 2>/dev/null || true
+  find /home/node/.openclaw -type f -exec chmod a+rw {} \; 2>/dev/null || true
+  chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true
+  chmod 777 /home/node/.openclaw/devices /home/node/.openclaw/cron /home/node/.openclaw/cron/runs 2>/dev/null || true
+  chmod 666 /home/node/.openclaw/devices/*.json /home/node/.openclaw/cron/*.json 2>/dev/null || true
+  chmod 755 /home/node/.openclaw/identity 2>/dev/null || true
+  chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true
+  mkdir -p /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
+  chown -R 1000:1000 /var/lib/openclaw 2>/dev/null || true
+  chmod -R 777 /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true
+}
+
+repair_openclaw_permissions
+(for i in $(seq 1 90); do sleep 4; repair_openclaw_permissions; done) &
 
 # Startup optimizations (recommended by openclaw doctor)
 export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache

@@ -19,7 +19,7 @@ RUN apt-get update && \
 # as node, so this must be writable before plugins validate or startup degrades.
 RUN mkdir -p /var/lib/openclaw/plugin-runtime-deps && \
     chown -R 1000:1000 /var/lib/openclaw && \
-    chmod -R u+rwX,go+rX /var/lib/openclaw
+    chmod -R 777 /var/lib/openclaw/plugin-runtime-deps
 
 # Chrome wrapper script (starts Xvnc + Chrome)
 COPY chrome-wrapper.sh /opt/chrome-wrapper.sh

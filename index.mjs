@@ -574,24 +574,28 @@ function normalizeOpenClawRuntimePermissions({ docker = true } = {}) {
  const hostCmd = [
   'mkdir -p /opt/openclaw-data/config/devices /opt/openclaw-data/config/identity /opt/openclaw-data/config/agents /opt/openclaw-data/workspace /var/lib/openclaw/plugin-runtime-deps',
   'chown -R 1000:1000 /opt/openclaw-data/config /opt/openclaw-data/workspace /var/lib/openclaw 2>/dev/null || true',
-  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type d -exec chmod 755 {} + 2>/dev/null || true',
-  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true',
+  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type d -exec chmod 777 {} + 2>/dev/null || true',
+  'find /opt/openclaw-data/config /opt/openclaw-data/workspace -type f -exec chmod a+rw {} + 2>/dev/null || true',
   'chmod 666 /opt/openclaw-data/config/openclaw.json /opt/openclaw-data/config/auth-profiles.json /opt/openclaw-data/config/agents/main/agent/auth-profiles.json 2>/dev/null || true',
   'chmod 777 /opt/openclaw-data/config/devices /opt/openclaw-data/config/cron /opt/openclaw-data/config/cron/runs 2>/dev/null || true',
   'chmod 666 /opt/openclaw-data/config/devices/*.json /opt/openclaw-data/config/cron/*.json 2>/dev/null || true',
-  'chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true',
+  'chmod 755 /opt/openclaw-data/config/identity 2>/dev/null || true',
+  'chmod 644 /opt/openclaw-data/config/identity/*.json 2>/dev/null || true',
+  'chmod -R 777 /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true',
  ].join('; ');
  try { execSync(hostCmd, { timeout: 15000 }); } catch {}
  if (!docker) return;
  const containerCmd = [
   'mkdir -p /home/node/.openclaw/devices /home/node/.openclaw/identity /home/node/.openclaw/agents /home/node/.openclaw/workspace /var/lib/openclaw/plugin-runtime-deps',
   'chown -R 1000:1000 /home/node/.openclaw /var/lib/openclaw 2>/dev/null || true',
-  'find /home/node/.openclaw -type d -exec chmod 755 {} + 2>/dev/null || true',
-  'find /home/node/.openclaw -type f -exec chmod u+rw,go+r {} + 2>/dev/null || true',
+  'find /home/node/.openclaw -type d -exec chmod 777 {} + 2>/dev/null || true',
+  'find /home/node/.openclaw -type f -exec chmod a+rw {} + 2>/dev/null || true',
   'chmod 666 /home/node/.openclaw/openclaw.json /home/node/.openclaw/auth-profiles.json /home/node/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null || true',
   'chmod 777 /home/node/.openclaw/devices /home/node/.openclaw/cron /home/node/.openclaw/cron/runs 2>/dev/null || true',
   'chmod 666 /home/node/.openclaw/devices/*.json /home/node/.openclaw/cron/*.json 2>/dev/null || true',
-  'chmod -R u+rwX,go+rX /var/lib/openclaw 2>/dev/null || true',
+  'chmod 755 /home/node/.openclaw/identity 2>/dev/null || true',
+  'chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true',
+  'chmod -R 777 /var/lib/openclaw/plugin-runtime-deps 2>/dev/null || true',
  ].join('; ');
  try {
   execSync(`docker exec openclaw-openclaw-gateway-1 bash -lc ${JSON.stringify(containerCmd)}`, { timeout: 20000 });
@@ -2711,7 +2715,7 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
    try {
     mkdirSync(dirname(sub), { recursive: true });
     writeFileSync(sub, serialized);
-    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 664 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
+    try { execSync(`chown 1000:1000 ${sub} 2>/dev/null; chmod 666 ${sub} 2>/dev/null`, { timeout: 3000 }); } catch {}
    } catch (err) {
     console.warn(`[bridge] Failed to mirror auth profiles to ${sub}: ${err.message}`);
    }
