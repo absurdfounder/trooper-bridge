@@ -1177,7 +1177,8 @@ class OpenClawGateway {
  const _agentId = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:crabhq:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
  const timeoutMs = opts.timeoutMs || 180000;
- const { explicitModel } = resolveGatewayModelSelection(opts.model);
+ const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
+ const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
 
  const textChunks = [];
  const toolCalls = []; // Capture tool usage for TOOL_LOG
@@ -1222,7 +1223,7 @@ class OpenClawGateway {
  params: {
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
- thinking: opts.thinking || undefined,
+ thinking: selectedThinking || undefined,
  model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
  deliver: false,
@@ -1467,6 +1468,7 @@ class OpenClawGateway {
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
+ const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
  let bridgeEventSequence = 0;
  const rawOnEvent = onEvent;
  onEvent = rawOnEvent
@@ -2074,7 +2076,7 @@ function extractPatchFilePaths(patchText = '') {
  params: {
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
- thinking: opts.thinking || undefined,
+ thinking: selectedThinking || undefined,
  model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
  deliver: false,
@@ -2992,6 +2994,22 @@ function resolveGatewayModelSelection(model) {
   explicitModel,
   effectiveModel: explicitModel || readConfiguredDefaultModelId() || null,
  };
+}
+
+function isLocalGatewayModel(model) {
+ const normalized = model ? normalizeGatewayModelId(model) : '';
+ return normalized.startsWith('ollama/') || normalized.startsWith('local-llamacpp/');
+}
+
+function resolveGatewayThinkingSelection(thinking, model) {
+ const requested = thinking === undefined || thinking === null || thinking === ''
+   ? undefined
+   : String(thinking);
+ if (!isLocalGatewayModel(model)) return requested;
+ if (requested && requested !== 'off') {
+  console.log(`[bridge] Forcing thinking=off for local model ${model} (requested ${requested})`);
+ }
+ return 'off';
 }
 
 function normalizeGatewayFallbackModels(models) {
