@@ -7650,14 +7650,17 @@ app.get('/models/list', async (req, res) => {
  try {
   const raw = await gateway.request('models.list', {}, { timeoutMs: 15000 });
   const providerModels = readConfigKey('providerModels') || {};
+  const configuredProviders = readOpenClawConfig()?.models?.providers || {};
+  const hasConfiguredProviderBaseUrl = (provider) =>
+   Boolean(String(configuredProviders?.[provider]?.baseUrl || '').trim());
   const configuredLocalModels = [];
   for (const [provider, model] of Object.entries(providerModels)) {
    if (!model) continue;
-   if (provider === 'ollama' || String(model).startsWith('ollama/')) {
+   if ((provider === 'ollama' || String(model).startsWith('ollama/')) && hasConfiguredProviderBaseUrl('ollama')) {
     const id = String(model).startsWith('ollama/') ? String(model) : `ollama/${model}`;
     configuredLocalModels.push({ id, name: id.replace(/^ollama\//, '') + ' (Ollama)', provider: 'ollama', category: 'local', tags: ['local', 'ollama'] });
    }
-   if (provider === 'local-llamacpp' || String(model).startsWith('local-llamacpp/')) {
+   if ((provider === 'local-llamacpp' || String(model).startsWith('local-llamacpp/')) && hasConfiguredProviderBaseUrl('local-llamacpp')) {
     const id = String(model).startsWith('local-llamacpp/') ? String(model) : `local-llamacpp/${model}`;
     configuredLocalModels.push({ id, name: id.replace(/^local-llamacpp\//, '') + ' (llama.cpp)', provider: 'local-llamacpp', category: 'local', tags: ['local', 'llama.cpp'] });
    }
@@ -8071,7 +8074,39 @@ const hasStoredCodexOAuthProfile = () => {
  }
 };
 
- const _syncWarnings = [];
+const _syncWarnings = [];
+
+ // Local providers must be present before a local model becomes the default.
+ // Otherwise OpenClaw can reload between writes and reject the model as unknown.
+ if (localProvider || removeLocalProvider || ollamaProvider || removeOllamaProvider) {
+ try {
+ const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
+ if (!config.models) config.models = {};
+ if (!config.models.providers) config.models.providers = {};
+ if (localProvider && typeof localProvider === 'object') {
+   config.models.providers['local-llamacpp'] = localProvider;
+   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${localProvider.baseUrl || '(no baseUrl)'}`);
+ } else if (removeLocalProvider) {
+   delete config.models.providers['local-llamacpp'];
+   console.log('[bridge] Removed local-llamacpp provider from openclaw.json');
+ }
+ if (ollamaProvider && typeof ollamaProvider === 'object') {
+   config.models.providers.ollama = ollamaProvider;
+   console.log(`[bridge] Added Ollama provider to openclaw.json: ${ollamaProvider.baseUrl || '(no baseUrl)'}`);
+ } else if (removeOllamaProvider) {
+   delete config.models.providers.ollama;
+   console.log('[bridge] Removed Ollama provider from openclaw.json');
+ }
+ writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
+ await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
+ } catch (e) { console.error('Failed to update local providers in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
+ try {
+ ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, ollamaProvider, removeOllamaProvider });
+ } catch (e) {
+ console.error('Failed to update synthetic local auth profiles:', e.message);
+ _syncWarnings.push(`Local provider auth update failed: ${e.message}`);
+ }
+ }
 
  // Update default/native models in openclaw.json
  if (defaultModel !== undefined || defaultFallbacks !== undefined || imageModel !== undefined || pdfModel !== undefined) {
@@ -8113,38 +8148,6 @@ const hasStoredCodexOAuthProfile = () => {
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
- }
-
- // Update local providers in openclaw.json models.providers. OpenClaw supports
- // baseUrl-only local provider config, so do not write dummy keys/adapters here.
- if (localProvider || removeLocalProvider || ollamaProvider || removeOllamaProvider) {
- try {
- const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
- if (!config.models) config.models = {};
- if (!config.models.providers) config.models.providers = {};
- if (localProvider && typeof localProvider === 'object') {
-   config.models.providers['local-llamacpp'] = localProvider;
-   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${localProvider.baseUrl || '(no baseUrl)'}`);
- } else if (removeLocalProvider) {
-   delete config.models.providers['local-llamacpp'];
-   console.log('[bridge] Removed local-llamacpp provider from openclaw.json');
- }
- if (ollamaProvider && typeof ollamaProvider === 'object') {
-   config.models.providers.ollama = ollamaProvider;
-   console.log(`[bridge] Added Ollama provider to openclaw.json: ${ollamaProvider.baseUrl || '(no baseUrl)'}`);
- } else if (removeOllamaProvider) {
-   delete config.models.providers.ollama;
-   console.log('[bridge] Removed Ollama provider from openclaw.json');
- }
- writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
- await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
- } catch (e) { console.error('Failed to update local providers in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
- try {
- ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, ollamaProvider, removeOllamaProvider });
- } catch (e) {
- console.error('Failed to update synthetic local auth profiles:', e.message);
- _syncWarnings.push(`Local provider auth update failed: ${e.message}`);
- }
  }
 
  // Update auth-profiles.json for ALL providers
