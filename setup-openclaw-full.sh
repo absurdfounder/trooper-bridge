@@ -1241,6 +1241,9 @@ fi
 if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
  add_auth_profile "openrouter:default" "openrouter" "${OPENROUTER_API_KEY}"
 fi
+if [ -n "${LOCAL_MODEL_PORT:-}" ]; then
+ add_auth_profile "local-llamacpp:default" "local-llamacpp" "local-model"
+fi
 
 # Fallback: if no keys, create empty profiles
 if [ -z "$AUTH_PROFILES" ]; then

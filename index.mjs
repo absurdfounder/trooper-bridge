@@ -2691,6 +2691,49 @@ function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  } catch {}
 }
 
+function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, ollamaProvider, removeOllamaProvider }) {
+ let auth;
+ try {
+  auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+ } catch {
+  auth = { version: 1, profiles: {}, lastGood: {} };
+ }
+ if (!auth.profiles) auth.profiles = {};
+ if (!auth.lastGood) auth.lastGood = {};
+
+ let changed = false;
+ const touched = [];
+ const ensureProfile = (provider) => {
+  const profileId = `${provider}:default`;
+  const next = { type: 'api_key', provider, key: 'local-model' };
+  if (JSON.stringify(auth.profiles[profileId]) !== JSON.stringify(next)) {
+   auth.profiles[profileId] = next;
+   changed = true;
+  }
+  if (auth.lastGood[provider] !== profileId) {
+   auth.lastGood[provider] = profileId;
+   changed = true;
+  }
+  touched.push(provider);
+ };
+ const removeProfile = (provider) => {
+  if (deleteAuthProfilesForProvider(auth, provider)) {
+   changed = true;
+   touched.push(provider);
+  }
+ };
+
+ if (localProvider && typeof localProvider === 'object') ensureProfile('local-llamacpp');
+ else if (removeLocalProvider) removeProfile('local-llamacpp');
+ if (ollamaProvider && typeof ollamaProvider === 'object') ensureProfile('ollama');
+ else if (removeOllamaProvider) removeProfile('ollama');
+
+ if (changed) {
+  writeMirroredAuthProfiles(auth);
+  console.log(`[bridge] Updated synthetic local auth profiles for: ${touched.join(', ') || '(none)'}`);
+ }
+}
+
 function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/workspace') {
  try {
   mkdirSync(`${workspacePath}/memory`, { recursive: true });
@@ -8096,6 +8139,12 @@ const hasStoredCodexOAuthProfile = () => {
  writeFileSync('/opt/openclaw-data/config/openclaw.json', JSON.stringify(config, null, 2));
  await run('chown 1000:1000 /opt/openclaw-data/config/openclaw.json 2>/dev/null; chmod 664 /opt/openclaw-data/config/openclaw.json').catch(() => {});
  } catch (e) { console.error('Failed to update local providers in openclaw.json:', e.message); _syncWarnings.push(`Local provider update failed: ${e.message}`); }
+ try {
+ ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, ollamaProvider, removeOllamaProvider });
+ } catch (e) {
+ console.error('Failed to update synthetic local auth profiles:', e.message);
+ _syncWarnings.push(`Local provider auth update failed: ${e.message}`);
+ }
  }
 
  // Update auth-profiles.json for ALL providers
