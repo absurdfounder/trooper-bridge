@@ -2736,6 +2736,65 @@ function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, 
  }
 }
 
+function normalizeLocalProviderModelName(model) {
+ const raw = String(
+  typeof model === 'object' && model
+   ? (model.id || model.model || model.name || '')
+   : (model || '')
+ ).trim();
+ if (!raw) return '';
+ return raw.replace(/^(local-llamacpp|llamacpp|ollama)\//, '').trim();
+}
+
+function modelBelongsToLocalProvider(model, providerName) {
+ const raw = String(
+  typeof model === 'object' && model
+   ? (model.id || model.model || model.name || '')
+   : (model || '')
+ ).trim();
+ if (!raw) return false;
+ if (providerName === 'local-llamacpp') {
+  return raw.startsWith('local-llamacpp/') || raw.startsWith('llamacpp/');
+ }
+ if (providerName === 'ollama') {
+  return raw.startsWith('ollama/');
+ }
+ return false;
+}
+
+function normalizeLocalProviderConfig(providerName, providerConfig, selectedModels = []) {
+ const next = { ...(providerConfig || {}) };
+ const isLlamaCpp = providerName === 'local-llamacpp';
+ if (next.baseUrl) {
+  let baseUrl = String(next.baseUrl).trim().replace(/\/+$/, '');
+  if (isLlamaCpp && !/\/v1$/i.test(baseUrl)) baseUrl = `${baseUrl}/v1`;
+  if (!isLlamaCpp) baseUrl = baseUrl.replace(/\/v1$/i, '');
+  next.baseUrl = baseUrl;
+ }
+ if (isLlamaCpp && !next.api) {
+  next.api = 'openai-completions';
+ }
+
+ const entries = Array.isArray(next.models) ? next.models : [];
+ const selectedEntries = selectedModels
+  .filter((model) => modelBelongsToLocalProvider(model, providerName))
+  .map((model) => ({ id: normalizeLocalProviderModelName(model) }));
+ const merged = [];
+ const seen = new Set();
+ for (const entry of [...entries, ...selectedEntries]) {
+  const id = normalizeLocalProviderModelName(entry);
+  if (!id || seen.has(id)) continue;
+  seen.add(id);
+  const objectEntry = typeof entry === 'object' && entry ? { ...entry } : {};
+  objectEntry.id = id;
+  objectEntry.name = normalizeLocalProviderModelName(objectEntry.name) || id;
+  if (isLlamaCpp && !objectEntry.contextWindow) objectEntry.contextWindow = 262144;
+  merged.push(objectEntry);
+ }
+ if (merged.length > 0) next.models = merged;
+ return next;
+}
+
 function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/workspace') {
  try {
   mkdirSync(`${workspacePath}/memory`, { recursive: true });
@@ -8093,6 +8152,19 @@ const hasStoredCodexOAuthProfile = () => {
 };
 
 const _syncWarnings = [];
+ const storedProviderModelsForSync = readConfigKey('providerModels') || {};
+ const localProviderSelectedModels = [
+  defaultModel,
+  selectedModel,
+  storedProviderModelsForSync['local-llamacpp'],
+  ...(Array.isArray(defaultFallbacks) ? defaultFallbacks : []),
+ ];
+ const ollamaProviderSelectedModels = [
+  defaultModel,
+  selectedModel,
+  storedProviderModelsForSync.ollama,
+  ...(Array.isArray(defaultFallbacks) ? defaultFallbacks : []),
+ ];
 
  // Local providers must be present before a local model becomes the default.
  // Otherwise OpenClaw can reload between writes and reject the model as unknown.
@@ -8102,15 +8174,23 @@ const _syncWarnings = [];
  if (!config.models) config.models = {};
  if (!config.models.providers) config.models.providers = {};
  if (localProvider && typeof localProvider === 'object') {
-   config.models.providers['local-llamacpp'] = localProvider;
-   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${localProvider.baseUrl || '(no baseUrl)'}`);
+   const normalizedLocalProvider = normalizeLocalProviderConfig('local-llamacpp', localProvider, localProviderSelectedModels);
+   config.models.providers['local-llamacpp'] = normalizedLocalProvider;
+   const modelList = Array.isArray(normalizedLocalProvider.models)
+    ? normalizedLocalProvider.models.map((m) => m.id).filter(Boolean).join(', ')
+    : '';
+   console.log(`[bridge] Added local-llamacpp provider to openclaw.json: ${normalizedLocalProvider.baseUrl || '(no baseUrl)'}${modelList ? ` (${modelList})` : ''}`);
  } else if (removeLocalProvider) {
    delete config.models.providers['local-llamacpp'];
    console.log('[bridge] Removed local-llamacpp provider from openclaw.json');
  }
  if (ollamaProvider && typeof ollamaProvider === 'object') {
-   config.models.providers.ollama = ollamaProvider;
-   console.log(`[bridge] Added Ollama provider to openclaw.json: ${ollamaProvider.baseUrl || '(no baseUrl)'}`);
+   const normalizedOllamaProvider = normalizeLocalProviderConfig('ollama', ollamaProvider, ollamaProviderSelectedModels);
+   config.models.providers.ollama = normalizedOllamaProvider;
+   const modelList = Array.isArray(normalizedOllamaProvider.models)
+    ? normalizedOllamaProvider.models.map((m) => m.id).filter(Boolean).join(', ')
+    : '';
+   console.log(`[bridge] Added Ollama provider to openclaw.json: ${normalizedOllamaProvider.baseUrl || '(no baseUrl)'}${modelList ? ` (${modelList})` : ''}`);
  } else if (removeOllamaProvider) {
    delete config.models.providers.ollama;
    console.log('[bridge] Removed Ollama provider from openclaw.json');
