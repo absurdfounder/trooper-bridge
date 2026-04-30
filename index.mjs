@@ -7479,20 +7479,51 @@ app.get('/upgrade/status', (req, res) => {
  }
 });
 
+const LOCAL_MODEL_LOG_RE = /(ollama|llama\.?cpp|local-llamacpp|local model|local-model|models\.list|OLLAMA_BASE_URL|OPENCLAW_OLLAMA|OPENCLAW_LOCAL_MODEL|provider-settings|model-routing|fetchSessionSnapshot|fetchSessionHistory|Agent timeout|Gateway WebSocket error|SSE agent failed)/i;
+
+function flattenLogContentToLines(content) {
+ if (content == null || content === '') return [];
+ if (typeof content === 'string') return content.split('\n').filter((line) => line.trim());
+ if (Array.isArray(content)) return content.flatMap((item) => flattenLogContentToLines(item));
+ if (typeof content === 'object') {
+  const direct = content.msg ?? content.message ?? content.line ?? content.text ?? content.content;
+  if (typeof direct === 'string') return flattenLogContentToLines(direct);
+  try { return JSON.stringify(content).split('\n').filter((line) => line.trim()); } catch {}
+ }
+ return String(content).split('\n').filter((line) => line.trim());
+}
+
+function filterLocalModelLogs(logs) {
+ const lines = Object.entries(logs || {}).flatMap(([service, content]) =>
+  flattenLogContentToLines(content)
+   .filter((line) => LOCAL_MODEL_LOG_RE.test(line))
+   .map((line) => `[${service}] ${line}`),
+ );
+ return {
+  localModels: lines.length
+   ? lines.slice(-300).join('\n')
+   : 'No local model log lines found yet. Save/apply Ollama or llama.cpp settings, then refresh this tab.',
+ };
+}
+
 app.get('/logs', (req, res) => {
  try {
  const lines = parseInt(req.query.lines) || 100;
  const service = req.query.service || 'all';
  const safeLines = Math.min(Math.max(lines, 10), 500);
  const logs = {};
- if (service === 'all' || service === 'openclaw') {
+ const collectAllForLocalModels = service === 'local-models';
+ if (service === 'all' || service === 'openclaw' || collectAllForLocalModels) {
  try { logs.openclaw = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${safeLines} 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.openclaw = e.stdout?.toString() || e.message; }
  }
- if (service === 'all' || service === 'poller') {
+ if (service === 'all' || service === 'poller' || collectAllForLocalModels) {
  try { logs.poller = execSync(`journalctl -u openclaw-poller --no-pager -n ${safeLines} --output=short-iso 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.poller = e.message; }
  }
- if (service === 'all' || service === 'bridge') {
+ if (service === 'all' || service === 'bridge' || collectAllForLocalModels) {
  try { logs.bridge = execSync(`journalctl -u openclaw-bridge --no-pager -n ${safeLines} --output=short-iso 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.bridge = e.message; }
+ }
+ if (collectAllForLocalModels) {
+  return res.json({ logs: filterLocalModelLogs(logs), service: 'local-models', timestamp: Date.now() });
  }
  res.json({ logs, timestamp: Date.now() });
  } catch (err) { res.status(500).json({ error: err.message }); }
@@ -7575,7 +7606,20 @@ app.get('/models/list', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
   const raw = await gateway.request('models.list', {}, { timeoutMs: 15000 });
-  res.json({ ok: true, source: 'openclaw-gateway', method: 'models.list', raw });
+  const providerModels = readConfigKey('providerModels') || {};
+  const configuredLocalModels = [];
+  for (const [provider, model] of Object.entries(providerModels)) {
+   if (!model) continue;
+   if (provider === 'ollama' || String(model).startsWith('ollama/')) {
+    const id = String(model).startsWith('ollama/') ? String(model) : `ollama/${model}`;
+    configuredLocalModels.push({ id, name: id.replace(/^ollama\//, '') + ' (Ollama)', provider: 'ollama', category: 'local', tags: ['local', 'ollama'] });
+   }
+   if (provider === 'local-llamacpp' || String(model).startsWith('local-llamacpp/')) {
+    const id = String(model).startsWith('local-llamacpp/') ? String(model) : `local-llamacpp/${model}`;
+    configuredLocalModels.push({ id, name: id.replace(/^local-llamacpp\//, '') + ' (llama.cpp)', provider: 'local-llamacpp', category: 'local', tags: ['local', 'llama.cpp'] });
+   }
+  }
+  res.json({ ok: true, source: 'openclaw-gateway', method: 'models.list', raw, configuredLocalModels });
  } catch (err) {
   res.status(502).json({ ok: false, source: 'openclaw-gateway', method: 'models.list', error: err.message });
  }
