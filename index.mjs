@@ -2836,9 +2836,12 @@ function modelBelongsToLocalProvider(model, providerName) {
  return false;
 }
 
+const DEFAULT_LOCAL_OLLAMA_CONTEXT_WINDOW = 4096;
+
 function normalizeLocalProviderConfig(providerName, providerConfig, selectedModels = []) {
  const next = { ...(providerConfig || {}) };
  const isLlamaCpp = providerName === 'local-llamacpp';
+ const isOllama = providerName === 'ollama';
  if (next.baseUrl) {
   let baseUrl = String(next.baseUrl).trim().replace(/\/+$/, '');
   if (isLlamaCpp && !/\/v1$/i.test(baseUrl)) baseUrl = `${baseUrl}/v1`;
@@ -2863,6 +2866,15 @@ function normalizeLocalProviderConfig(providerName, providerConfig, selectedMode
   objectEntry.id = id;
   objectEntry.name = normalizeLocalProviderModelName(objectEntry.name) || id;
   if (isLlamaCpp && !objectEntry.contextWindow) objectEntry.contextWindow = 262144;
+  if (isOllama) {
+   const currentContext = Number(objectEntry.contextWindow || objectEntry.context_length || 0);
+   if (!Number.isFinite(currentContext) || currentContext <= 0 || currentContext > DEFAULT_LOCAL_OLLAMA_CONTEXT_WINDOW) {
+    objectEntry.contextWindow = DEFAULT_LOCAL_OLLAMA_CONTEXT_WINDOW;
+   }
+   if (objectEntry.context_length && Number(objectEntry.context_length) > DEFAULT_LOCAL_OLLAMA_CONTEXT_WINDOW) {
+    objectEntry.context_length = DEFAULT_LOCAL_OLLAMA_CONTEXT_WINDOW;
+   }
+  }
   merged.push(objectEntry);
  }
  if (merged.length > 0) next.models = merged;
