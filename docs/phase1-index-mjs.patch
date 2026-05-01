@@ -1,0 +1,62 @@
+# Phase 1 / Workstream 7 wiring patch for openclawbridge/index.mjs
+#
+# Apply with:
+#   git checkout claude/crabbox-integration-brainstorm-qnWUg
+#   git apply docs/phase1-index-mjs.patch
+#   git add index.mjs && git commit -m "feat(fleet): wire fleet heartbeat into index.mjs (Phase 1 W7)"
+#
+# Four hunks:
+#   1. Imports for the new lib/version-info.mjs and lib/fleet-heartbeat.mjs modules.
+#   2. New BRIDGE_BOOTED_AT module constant for stable boot timestamp.
+#   3. /health response gains `draining`, `bootedAt`, and `version` fields.
+#      version is null while setupDone is false so install-phase /health stays cheap.
+#   4. server.listen() callback fires startFleetHeartbeat(); no-op when
+#      MISSION_CONTROL_URL or ORG_ID is unset.
+#
+diff --git a/index.mjs b/index.mjs
+--- a/index.mjs
++++ b/index.mjs
+@@ -67,6 +67,8 @@
+   resolveProviderRuntimeContext,
+   stripGatewayErrorPrefix,
+ } from './lib/provider-runtime.mjs';
++import { readBridgeVersion } from './lib/version-info.mjs';
++import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
+ 
+ const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
+ 
+@@ -500,6 +502,7 @@
+ const PORT = parseInt(process.env.BRIDGE_PORT || '3002');
+ const server = createServer(app);
+ const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
++const BRIDGE_BOOTED_AT = new Date().toISOString();
+ const bridgeWS = new BridgeWSServer({ server, path: '/ws', bridgeAuthToken: BRIDGE_AUTH_TOKEN });
+ initFirebaseAuth();
+ const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.CRABHQ_CALLBACK_URL || '';
+@@ -4612,6 +4615,9 @@
+  mode: gatewayHealthy ? 'websocket' : 'poller-fallback',
+  pending: pendingRequests.size, skills: skillRegistry.size,
+  uptime: Math.floor(process.uptime()),
++ draining: false,
++ bootedAt: BRIDGE_BOOTED_AT,
++ version: setupDone ? readBridgeVersion() : null,
+  });
+ });
+ 
+@@ -9970,6 +9976,16 @@
+ server.listen(PORT, '0.0.0.0', () => {
+  console.log(`OpenClaw Bridge v2.1 on :${PORT} (HTTP + WS) | DirectBridge: enabled | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
+  captureLog('info', `Bridge started on port ${PORT}`);
++ // Phase 1 (W7): report version + presence to Crabs-HQ /api/fleet/heartbeat.
++ // No-op when MISSION_CONTROL_URL or ORG_ID is unset (e.g. dev / pre-provision).
++ startFleetHeartbeat({
++   missionControlUrl: MISSION_CONTROL_URL,
++   orgId: process.env.ORG_ID || '',
++   bridgeAuthToken: BRIDGE_AUTH_TOKEN,
++   port: PORT,
++   bootedAt: BRIDGE_BOOTED_AT,
++   readVersion: () => readBridgeVersion(),
++ });
+ });
+ 
+ export { bridgeWS };
