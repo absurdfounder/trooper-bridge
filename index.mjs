@@ -611,6 +611,83 @@ function syncGatewayAuthTokenInConfig() {
  return { updated: true, token: desiredToken, config: next };
 }
 
+const OPENCLAW_DEVICES_DIR = '/opt/openclaw-data/config/devices';
+const OPENCLAW_PAIRED_JSON_PATH = `${OPENCLAW_DEVICES_DIR}/paired.json`;
+
+function buildBridgePairedDeviceEntry(existing = {}) {
+ const now = Date.now();
+ const publicKey = getDevicePublicKeyBase64Url(deviceIdentity);
+ return {
+  ...existing,
+  deviceId: deviceIdentity.deviceId,
+  publicKey,
+  displayName: 'CrabsHQ Bridge',
+  platform: 'linux',
+  role: 'operator',
+  roles: ['operator'],
+  scopes: OPERATOR_SCOPES,
+  approvedScopes: OPERATOR_SCOPES,
+  clientId: 'gateway-client',
+  clientMode: 'backend',
+  approvedAt: existing.approvedAt || now,
+  approved: true,
+  ts: now,
+ };
+}
+
+function bridgePairedDeviceNeedsRewrite(existing = {}, desired = {}) {
+ if (!existing || typeof existing !== 'object') return true;
+ const checks = [
+  ['deviceId', desired.deviceId],
+  ['publicKey', desired.publicKey],
+  ['displayName', desired.displayName],
+  ['role', desired.role],
+  ['clientId', desired.clientId],
+  ['clientMode', desired.clientMode],
+ ];
+ for (const [key, expected] of checks) {
+  if (String(existing[key] || '') !== String(expected || '')) return true;
+ }
+ if (existing.approved !== true) return true;
+ const existingScopes = Array.isArray(existing.scopes) ? existing.scopes.map(String).sort() : [];
+ const desiredScopes = [...OPERATOR_SCOPES].sort();
+ if (JSON.stringify(existingScopes) !== JSON.stringify(desiredScopes)) return true;
+ const existingApprovedScopes = Array.isArray(existing.approvedScopes) ? existing.approvedScopes.map(String).sort() : [];
+ if (JSON.stringify(existingApprovedScopes) !== JSON.stringify(desiredScopes)) return true;
+ return false;
+}
+
+function upsertBridgePairedDevice({ force = false, reason = 'repair' } = {}) {
+ if (!deviceIdentity?.deviceId) throw new Error('Bridge device identity is not available');
+ mkdirSync(OPENCLAW_DEVICES_DIR, { recursive: true });
+ let paired = {};
+ try { paired = JSON.parse(readFileSync(OPENCLAW_PAIRED_JSON_PATH, 'utf8')); } catch {}
+ const normalized = normalizePairedDeviceMap(paired);
+ paired = normalized.paired;
+ const existing = paired[deviceIdentity.deviceId] || {};
+ const desired = buildBridgePairedDeviceEntry(existing);
+ const changed = force || normalized.changed || bridgePairedDeviceNeedsRewrite(existing, desired);
+ if (changed) {
+  paired[deviceIdentity.deviceId] = desired;
+  writeFileSync(OPENCLAW_PAIRED_JSON_PATH, JSON.stringify(paired, null, 2), { mode: 0o600 });
+  try { execSync(`chown -R 1000:1000 ${OPENCLAW_DEVICES_DIR} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
+  const action = Object.keys(existing).length ? 'repaired' : 'added';
+  console.log(`[OpenClaw] Bridge device ${action} in paired.json (${reason})`);
+ } else {
+  console.log(`[OpenClaw] Bridge device already matches paired.json (${reason})`);
+ }
+ return {
+  changed,
+  deviceId: deviceIdentity.deviceId,
+  path: OPENCLAW_PAIRED_JSON_PATH,
+  entries: Object.keys(paired || {}).length,
+ };
+}
+
+function isGatewayPairingError(message = '') {
+ return /pairing required|not paired|unpaired|device.*pair|pair.*device|approval required|device.*approval/i.test(String(message || ''));
+}
+
 const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
@@ -684,6 +761,8 @@ class OpenClawGateway {
  this._pingInterval = null;
  this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
  this._lastAuthRepairMs = 0;
+ this.lastAuthError = null;
+ this.lastAuthAt = null;
  this.connect();
  }
 
@@ -710,6 +789,31 @@ class OpenClawGateway {
  return this._connectPromise;
  }
 
+ forceReconnect(delayMs = 0, reason = 'manual') {
+ if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+ this.connected = false;
+ this._connectPromise = null;
+ this._stopPing();
+ for (const [, pending] of this._pendingRequests) {
+   try { pending.reject(new Error('Gateway reconnecting')); } catch {}
+ }
+ this._pendingRequests.clear();
+ this._eventListeners.clear();
+ if (this.ws) {
+   try {
+    this.ws.removeAllListeners('close');
+    this.ws.removeAllListeners('error');
+    this.ws.removeAllListeners('message');
+    if (typeof this.ws.terminate === 'function') this.ws.terminate();
+    else this.ws.close();
+   } catch {}
+   this.ws = null;
+ }
+ console.log(`[OpenClaw] Forcing gateway reconnect in ${Math.round(delayMs / 1000)}s (${reason})`);
+ this._reconnectTimer = setTimeout(() => this.connect(), Math.max(0, delayMs));
+ return true;
+ }
+
  _doConnect() {
  return new Promise((resolve) => {
  // Clear any pending reconnect timer to prevent close→reconnect→close loops
@@ -731,7 +835,7 @@ class OpenClawGateway {
  .then((result) => {
  if (result === null) {
  // Pairing required — close and retry with longer delay
- this._reconnectDelay = 10000;
+ this._reconnectDelay = Math.max(this._reconnectDelay, 10000);
  if (this.ws) this.ws.close();
  resolve(false);
  return;
@@ -744,41 +848,9 @@ class OpenClawGateway {
  captureLog('info', 'Gateway connected — native protocol');
  // Auto-approve bridge device so sessions_spawn works after gateway restarts
  // Write to paired.json directly (reliable) rather than relying on the CLI flow
- (async () => {
  try {
- const fs = await import('fs');
- const { promisify: _promisify } = await import('util');
- const { exec: _execCb } = await import('child_process');
- const _run = _promisify(_execCb);
- const PAIRED_JSON_PATH = '/opt/openclaw-data/config/devices/paired.json';
- const DEVICES_DIR = '/opt/openclaw-data/config/devices';
- fs.mkdirSync(DEVICES_DIR, { recursive: true });
- let existing = {};
- try { existing = JSON.parse(fs.readFileSync(PAIRED_JSON_PATH, 'utf8')); } catch {}
- const normalized = normalizePairedDeviceMap(existing);
- existing = normalized.paired;
- if (!existing[deviceIdentity.deviceId]) {
- const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
- existing[deviceIdentity.deviceId] = {
- deviceId: deviceIdentity.deviceId, publicKey: pubKey,
- displayName: 'CrabsHQ Bridge', platform: 'linux',
- role: 'operator', roles: ['operator'], scopes: OPERATOR_SCOPES,
- clientId: 'gateway-client', clientMode: 'backend',
- approvedAt: Date.now(), approved: true, ts: Date.now(),
- };
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
- await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
- console.log('[OpenClaw] Bridge device written to paired.json for sessions_spawn');
- } else {
- if (normalized.changed) {
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
- await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
- console.log('[OpenClaw] Normalized paired device display names');
- }
- console.log('[OpenClaw] Bridge device already in paired.json');
- }
+ upsertBridgePairedDevice({ reason: 'connect' });
  } catch (e) { console.warn('[OpenClaw] paired.json auto-approve failed:', e.message); }
- })();
  // Reconcile ACP sessions on connect — discover active sessions that survived bridge restart
  (async () => {
  try {
@@ -806,6 +878,10 @@ class OpenClawGateway {
  })
  .catch((err) => {
  console.error('[OpenClaw] Auth failed:', err.message);
+ this.lastAuthError = err.message;
+ this.lastAuthAt = Date.now();
+ this._connectPromise = null;
+ try { this.ws?.close(); } catch {}
  captureLog('error', `Gateway auth failed: ${err.message}`, { stack: err.stack });
  resolve(false);
  });
@@ -949,11 +1025,16 @@ class OpenClawGateway {
 
  if (!frame.ok) {
  const errMsg = frame.error?.message || 'Request failed';
+ if (frame.id === this._authRequestId) {
+ this.lastAuthError = errMsg;
+ this.lastAuthAt = Date.now();
+ }
  // If auth drifted after a reinstall/config restore, repair openclaw.json to the bridge's
  // live token and restart the gateway so the next reconnect uses a consistent token.
  if (frame.id === this._authRequestId && /token mismatch|token missing|unauthorized/i.test(errMsg)) {
  console.warn('[OpenClaw] Gateway auth mismatch detected — attempting token repair...');
  this._pendingRequests.delete(frame.id);
+ this._reconnectDelay = 10000;
  const now = Date.now();
  if (now - this._lastAuthRepairMs >= 30 * 1000) {
  this._lastAuthRepairMs = now;
@@ -964,7 +1045,8 @@ class OpenClawGateway {
  console.log('[OpenClaw] Rewrote openclaw.json with live gateway token before restart');
  }
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
- this._reconnectDelay = 10000;
+ this.token = getDesiredGatewayToken() || this.token;
+ this.forceReconnect(10000, 'auth-token-repair');
  } catch (repairErr) {
  console.warn('[OpenClaw] Gateway auth repair failed:', repairErr.message);
  }
@@ -981,7 +1063,7 @@ class OpenClawGateway {
  return;
  }
  // Handle pairing required gracefully — resolve (not reject!) to avoid unhandled rejection crash
- if (errMsg === 'pairing required' && frame.id === this._authRequestId) {
+ if (isGatewayPairingError(errMsg) && frame.id === this._authRequestId) {
  console.log('[OpenClaw] Pairing required — attempting self-approve via paired.json...');
  this._pendingRequests.delete(frame.id);
  // Self-approval strategy: write our device directly to paired.json on the host,
@@ -995,45 +1077,18 @@ class OpenClawGateway {
  return;
  }
  this._lastSelfApproveMs = now;
+ this._reconnectDelay = 35000;
  (async () => {
  try {
  const { promisify: _p } = await import('util');
  const { exec: _e } = await import('child_process');
- const fs = await import('fs');
  const _run = _p(_e);
  if (deviceIdentity?.deviceId) {
  console.log(`[OpenClaw] Self-approving deviceId ${deviceIdentity.deviceId.slice(0, 12)}...`);
 
- // Build our device entry in the format OpenClaw expects
- const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
- const deviceEntry = {
- deviceId: deviceIdentity.deviceId,
- publicKey: pubKey,
- displayName: 'CrabsHQ Bridge',
- platform: 'linux',
- role: 'operator',
- roles: ['operator'],
- scopes: OPERATOR_SCOPES,
- clientId: 'gateway-client',
- clientMode: 'backend',
- approvedAt: Date.now(),
- approved: true,
- ts: Date.now(),
- };
-
  // Write directly to paired.json on the host (gateway config dir is bind-mounted here)
- const PAIRED_JSON_PATH = '/opt/openclaw-data/config/devices/paired.json';
- const DEVICES_DIR = '/opt/openclaw-data/config/devices';
  try {
- fs.mkdirSync(DEVICES_DIR, { recursive: true });
- let existing = {};
- try { existing = JSON.parse(fs.readFileSync(PAIRED_JSON_PATH, 'utf8')); } catch {}
- const normalized = normalizePairedDeviceMap(existing);
- existing = normalized.paired;
- existing[deviceIdentity.deviceId] = deviceEntry;
- fs.writeFileSync(PAIRED_JSON_PATH, JSON.stringify(existing, null, 2), { mode: 0o600 });
- // Fix ownership so gateway container (uid 1000) can read it
- await _run(`chown -R 1000:1000 ${DEVICES_DIR} 2>/dev/null || true`).catch(() => {});
+ upsertBridgePairedDevice({ force: true, reason: 'pairing-required' });
  console.log('[OpenClaw] Written to paired.json — restarting gateway to apply...');
  } catch (writeErr) {
  console.warn('[OpenClaw] Could not write paired.json directly:', writeErr.message, '— falling back to docker exec approve');
@@ -1050,6 +1105,8 @@ class OpenClawGateway {
  await _run(`chown -R 1000:1000 /opt/openclaw-data/config/identity 2>/dev/null || true`).catch(() => {});
  // Give gateway time to fully start before bridge reconnects
  this._reconnectDelay = 35000;
+ this.token = getDesiredGatewayToken() || this.token;
+ this.forceReconnect(35000, 'pairing-required');
  console.log('[OpenClaw] Gateway restarted — will reconnect in 35s');
  }
  } catch (err) {
@@ -2258,6 +2315,13 @@ const formattedToolLog = toolLog.map(t => ({
 }
 
 // Initialize the gateway client (connects on startup)
+try {
+ const authRepair = syncGatewayAuthTokenInConfig();
+ if (authRepair.updated) console.log('[OpenClaw] Repaired gateway auth token during bridge startup');
+ upsertBridgePairedDevice({ force: true, reason: 'startup' });
+} catch (err) {
+ console.warn('[OpenClaw] Startup pairing repair failed:', err.message);
+}
 const gateway = new OpenClawGateway(OPENCLAW_URL, OPENCLAW_GATEWAY_TOKEN);
 
 // ── Live agent event forwarding (cron, background runs → CrabsHQ frontend) ──
@@ -7406,29 +7470,12 @@ app.post('/gateway/patch-auth', (req, res) => {
  // Fix identity file ownership so bridge can read it (uses ES module import from top of file)
  execSync('chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1000:1000 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
  execSync('chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
- // Ensure paired.json has our device — use fs imported at top of file
- const PAIRED_PATH = '/opt/openclaw-data/config/devices/paired.json';
- const DEVICES_DIR = '/opt/openclaw-data/config/devices';
- execSync('mkdir -p ' + DEVICES_DIR, { timeout: 5000 });
- let paired = {};
- try { paired = JSON.parse(readFileSync(PAIRED_PATH, 'utf8')); } catch {}
- const normalized = normalizePairedDeviceMap(paired);
- paired = normalized.paired;
- if (!paired[deviceIdentity.deviceId]) {
- const pubKey = getDevicePublicKeyBase64Url(deviceIdentity);
- paired[deviceIdentity.deviceId] = { deviceId: deviceIdentity.deviceId, publicKey: pubKey, displayName: 'CrabsHQ Bridge', platform: 'linux', role: 'operator', roles: ['operator'], scopes: OPERATOR_SCOPES, clientId: 'gateway-client', clientMode: 'backend', approvedAt: Date.now(), approved: true, ts: Date.now() };
- writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
- execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
- console.log('[bridge] Added device to paired.json');
- } else if (normalized.changed) {
- writeFileSync(PAIRED_PATH, JSON.stringify(paired, null, 2));
- execSync('chown -R 1000:1000 ' + DEVICES_DIR + ' 2>/dev/null || true', { timeout: 5000 });
- console.log('[bridge] Normalized paired device display names');
- }
+ const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'patch-auth' });
  // Restart gateway to apply paired.json changes
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
- setTimeout(() => gateway.connect(), 15000);
- res.json({ success: true, message: 'Identity fixed, gateway auth synced, and gateway restarted' });
+ gateway.token = getDesiredGatewayToken() || gateway.token;
+ gateway.forceReconnect(15000, 'patch-auth');
+ res.json({ success: true, message: 'Identity fixed, gateway auth synced, paired.json repaired, and gateway restarted', authRepair: repair, pairedRepair });
  } catch (err) {
  res.status(500).json({ error: 'Patch failed', details: err.message });
  }
@@ -7437,14 +7484,15 @@ app.post('/gateway/patch-auth', (req, res) => {
 app.post('/gateway/restart', (req, res) => {
  try {
  console.log('Restarting OpenClaw gateway container...');
+ const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'gateway-restart' });
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
  try { execSync(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 }); } catch {}
  gateway.token = getDesiredGatewayToken() || gateway.token;
- gateway.connect();
+ gateway.forceReconnect(5000, 'gateway-restart');
  }, 5000);
- res.json({ success: true, message: 'Gateway container restarted' });
+ res.json({ success: true, message: 'Gateway container restarted', pairedRepair });
  } catch (err) {
  res.status(500).json({ error: 'Failed to restart gateway', details: err.stderr?.toString() || err.message });
  }
@@ -7456,7 +7504,7 @@ app.get('/gateway/status', (req, res) => {
  const [state, running, restarts] = status.split(':');
  let logs = '';
  try { logs = execSync('docker logs --tail 20 openclaw-openclaw-gateway-1 2>&1', { timeout: 10000 }).toString(); } catch {}
- res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, websocketConnected: gateway.isReady, connected: gateway.isReady, paired: gateway.isReady, recentLogs: logs });
+ res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, websocketConnected: gateway.isReady, connected: gateway.isReady, paired: gateway.isReady, authError: gateway.lastAuthError, authAt: gateway.lastAuthAt, recentLogs: logs });
  } catch (err) {
  res.status(500).json({ error: 'Failed to get gateway status', details: err.message });
  }
@@ -7473,8 +7521,10 @@ app.put('/gateway/config', (req, res) => {
  try {
  writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
  console.log('Gateway config updated, restarting...');
+ upsertBridgePairedDevice({ force: true, reason: 'config-update' });
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
- setTimeout(() => gateway.connect(), 5000);
+ gateway.token = getDesiredGatewayToken() || gateway.token;
+ gateway.forceReconnect(5000, 'config-update');
  res.json({ success: true, message: 'Config updated and gateway restarted' });
  } catch (err) { res.status(500).json({ error: 'Failed to update config', details: err.message }); }
 });
