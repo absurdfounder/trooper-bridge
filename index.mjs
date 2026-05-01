@@ -1286,7 +1286,7 @@ class OpenClawGateway {
 
 
  // Fetch session history from gateway — returns tool calls and messages
- async fetchSessionHistory(sessionKey, limit = 50) {
+ async fetchSessionHistory(sessionKey, limit = 50, { timeoutMs = 10000 } = {}) {
   if (!this.connected) return null;
   const id = randomUUID();
   try {
@@ -1294,7 +1294,7 @@ class OpenClawGateway {
     const timeout = setTimeout(() => {
      this._pendingRequests.delete(id);
      reject(new Error('History fetch timeout'));
-    }, 10000);
+    }, timeoutMs);
     this._pendingRequests.set(id, {
      resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
      reject: (err) => { clearTimeout(timeout); reject(err); },
@@ -1499,6 +1499,7 @@ class OpenClawGateway {
  let sawLiveStreamPayload = false;
  let historyPoller = null;
  let historyPollInFlight = false;
+ let historyPollFailures = 0;
  let lastHistoryAssistantText = '';
  let lastHistoryThinkingText = '';
  const seenHistoryEventKeys = new Set();
@@ -2091,7 +2092,8 @@ function extractPatchFilePaths(patchText = '') {
  if (historyPollInFlight || sawLiveStreamPayload) return;
  historyPollInFlight = true;
  try {
- const historyMessages = await this.fetchSessionHistory(sessionKey, 30);
+ const historyMessages = await this.fetchSessionHistory(sessionKey, 30, { timeoutMs: 3000 });
+ historyPollFailures = 0;
  if (!Array.isArray(historyMessages) || historyMessages.length === 0) return;
  const runCutoff = runStartedAt - 5000;
   const effectiveRunId = mainRunId || this._pendingRequests.get(id)?.runId || null;
@@ -2138,6 +2140,12 @@ function extractPatchFilePaths(patchText = '') {
   }
  } catch (err) {
  console.warn('[OpenClaw] Live history poll failed:', err.message);
+ historyPollFailures += 1;
+ if (historyPollFailures >= 2 && historyPoller) {
+ clearInterval(historyPoller);
+ historyPoller = null;
+ console.warn('[OpenClaw] Live history polling disabled after repeated timeouts');
+ }
  } finally {
  historyPollInFlight = false;
  }
@@ -2145,9 +2153,9 @@ function extractPatchFilePaths(patchText = '') {
 
  setTimeout(() => {
  if (historyPoller || sawLiveStreamPayload) return;
- historyPoller = setInterval(pollSessionHistory, 1500);
+ historyPoller = setInterval(pollSessionHistory, 10000);
  pollSessionHistory().catch(() => {});
- }, 2500);
+ }, 8000);
  });
 
  if (pendingSubAgentSpawn || activeSubAgents.size > 0) {
@@ -3934,22 +3942,12 @@ desktopRecordingUrl: desktopRecordingUrl || undefined,
  // This gives us exec commands, Read/Write calls, browser actions etc.
  try {
   console.log("[Post-completion] Starting history fetch for " + agentId + " / " + agentName + " session=" + sessionKey);
-  // Try the actual session key first, then fallback to chat/task variants
-  const sessionKeysToTry = [sessionKey];
-  const slug2 = (agentName || 'default').toLowerCase().replace(/\s+/g, '-');
-  if (!sessionKey.endsWith(':chat')) sessionKeysToTry.push(`agent:${agentId}:hook:crabhq:${slug2}:chat`);
-  if (!sessionKey.endsWith(':task')) sessionKeysToTry.push(`agent:${agentId}:hook:crabhq:${slug2}:task`);
-  let historyMessages = null;
-  for (const sk of sessionKeysToTry) {
-    try {
-      historyMessages = await gateway.fetchSessionHistory(sk, 100);
-      if (historyMessages && historyMessages.length > 0) {
-        console.log(`[Post-completion] Got ${historyMessages.length} messages from ${sk}`);
-        break;
-      }
-    } catch (e) {
-      console.log(`[Post-completion] ${sk} fetch failed: ${e.message}`);
-    }
+  // Keep this replay best-effort. Chat completion has already been sent, so a
+  // slow session file lock must not hold the browser response open.
+  const historySessionKey = resolvedSessionKey || sessionKey;
+  const historyMessages = await gateway.fetchSessionHistory(historySessionKey, 100, { timeoutMs: 3000 });
+  if (historyMessages && historyMessages.length > 0) {
+   console.log(`[Post-completion] Got ${historyMessages.length} messages from ${historySessionKey}`);
   }
   if (historyMessages && historyMessages.length > 0) {
    // Debug: log message roles/types to understand the history format
