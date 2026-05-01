@@ -1179,6 +1179,7 @@ class OpenClawGateway {
  const timeoutMs = opts.timeoutMs || 180000;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
+ await assertLocalGatewayModelReachable(effectiveRequestedModel);
 
  const textChunks = [];
  const toolCalls = []; // Capture tool usage for TOOL_LOG
@@ -1469,6 +1470,7 @@ class OpenClawGateway {
  const _projectFolder = opts.projectFolder || null;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
+ await assertLocalGatewayModelReachable(effectiveRequestedModel);
  let bridgeEventSequence = 0;
  const rawOnEvent = onEvent;
  onEvent = rawOnEvent
@@ -3058,6 +3060,41 @@ function resolveGatewayModelSelection(model) {
 function isLocalGatewayModel(model) {
  const normalized = model ? normalizeGatewayModelId(model) : '';
  return normalized.startsWith('ollama/') || normalized.startsWith('local-llamacpp/');
+}
+
+function getLocalGatewayModelProvider(model) {
+ const normalized = model ? normalizeGatewayModelId(model) : '';
+ if (normalized.startsWith('ollama/')) return 'ollama';
+ if (normalized.startsWith('local-llamacpp/')) return 'local-llamacpp';
+ return '';
+}
+
+function getLocalGatewayModelProbeUrl(model) {
+ const provider = getLocalGatewayModelProvider(model);
+ if (!provider) return null;
+ const providerConfig = readOpenClawConfig()?.models?.providers?.[provider] || {};
+ const root = String(providerConfig.baseUrl || providerConfig.baseURL || providerConfig.url || '').trim().replace(/\/+$/, '');
+ if (!root) {
+  throw new Error(`Local model provider "${provider}" is not configured on this VPS. Reconnect the local model from the CrabsHQ desktop app.`);
+ }
+ if (provider === 'ollama') return { provider, url: `${root}/api/tags` };
+ return { provider, url: `${root.replace(/\/v1$/i, '')}/health` };
+}
+
+async function assertLocalGatewayModelReachable(model) {
+ if (!isLocalGatewayModel(model)) return;
+ const probe = getLocalGatewayModelProbeUrl(model);
+ if (!probe?.url) return;
+ let res;
+ try {
+  res = await fetch(probe.url, { signal: AbortSignal.timeout(6000) });
+ } catch (error) {
+  throw new Error(`Local model tunnel for ${probe.provider} is unreachable from this VPS. Restart/reconnect the local model in the CrabsHQ desktop app, then select it again. (${error?.message || 'network error'})`);
+ }
+ if (!res.ok) {
+  const text = await res.text().catch(() => '');
+  throw new Error(`Local model tunnel for ${probe.provider} returned HTTP ${res.status}. Restart/reconnect the local model in the CrabsHQ desktop app, then select it again.${text ? ` ${text.slice(0, 180)}` : ''}`);
+ }
 }
 
 function resolveGatewayThinkingSelection(thinking, model) {
