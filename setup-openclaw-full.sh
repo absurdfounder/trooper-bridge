@@ -2372,8 +2372,38 @@ if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}"
   tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
   dlog "CrabsHQ org runtime installed from bundle"
 elif [ "${CRABHQ_SNAPSHOT_BUILD:-0}" = "1" ]; then
-  echo "ERROR: CRABHQ_RUNTIME_TARBALL_URL missing during snapshot build" >&2
-  exit 1
+  echo "[setup] CRABHQ_SNAPSHOT_BUILD=1 and no usable runtime URL - skipping per-org runtime install (boot.sh re-fetches at customer boot)"
+  mkdir -p /opt/crabhq-org-runtime/server/org-runtime
+  printf 'snapshot-build-placeholder\n' > /opt/crabhq-org-runtime/.snapshot-builder
+  cat > /opt/crabhq-org-runtime/server/package.json <<'PKG'
+{"name":"crabhq-org-runtime-snapshot-placeholder","version":"0.0.0","private":true}
+PKG
+  cat > /opt/crabhq-org-runtime/server/org-runtime/index.js <<'RUNTIMEJS'
+const http = require('http');
+const port = Number(process.env.ORG_RUNTIME_PORT || process.env.PORT || 3101);
+http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', snapshotPlaceholder: true }));
+    return;
+  }
+  res.writeHead(404, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ error: 'snapshot-placeholder' }));
+}).listen(port, '127.0.0.1');
+RUNTIMEJS
+  cat > /opt/crabhq-org-runtime/server/index.js <<'SERVERJS'
+const http = require('http');
+const port = Number(process.env.PORT || 3001);
+http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', snapshotPlaceholder: true }));
+    return;
+  }
+  res.writeHead(404, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ error: 'snapshot-placeholder' }));
+}).listen(port, '127.0.0.1');
+SERVERJS
 elif git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
   cp -r /tmp/crabhq-clone/server /opt/crabhq-org-runtime/
   rm -rf /tmp/crabhq-clone
