@@ -2355,12 +2355,20 @@ dlog "Preparing CrabsHQ org runtime..."
 mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
 
 dlog "Installing CrabsHQ org runtime..."
+if { [ -z "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] || [ "${CRABHQ_RUNTIME_TARBALL_URL}" = "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; } && [ -s /tmp/crabhq-runtime-url ]; then
+  CRABHQ_RUNTIME_TARBALL_URL="$(tr -d '\r\n' < /tmp/crabhq-runtime-url)"
+  echo "[setup] Runtime bundle URL recovered from /tmp/crabhq-runtime-url"
+fi
+
 if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
   dlog "Downloading CrabsHQ org runtime bundle..."
   echo "[setup] Runtime bundle URL: ${CRABHQ_RUNTIME_TARBALL_URL}"
   curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${CRABHQ_RUNTIME_TARBALL_URL}" >&2; exit 1; }
   tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
   dlog "CrabsHQ org runtime installed from bundle"
+elif [ "${CRABHQ_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  echo "ERROR: CRABHQ_RUNTIME_TARBALL_URL missing during snapshot build" >&2
+  exit 1
 elif git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
   cp -r /tmp/crabhq-clone/server /opt/crabhq-org-runtime/
   rm -rf /tmp/crabhq-clone
