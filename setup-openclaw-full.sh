@@ -48,6 +48,15 @@ CRABHQ_RUNTIME_TARBALL_URL="$(_resolve_input "${CRABHQ_RUNTIME_TARBALL_URL:-}" "
 CRABHQ_RUNTIME_PORT=3101
 CRABHQ_RUNTIME_DATA_DIR=/var/lib/crabhq-org-runtime
 
+# Defaults must be applied before validation. Snapshot-builder bootstrap may
+# omit optional values, but BRIDGE_PORT is required by the early log server.
+if [ -z "$OPENCLAW_DOCKER_IMAGE" ] || echo "$OPENCLAW_DOCKER_IMAGE" | grep -q '{{.*}}'; then
+  OPENCLAW_DOCKER_IMAGE="ghcr.io/absurdfounder/crabhq-gateway:latest"
+fi
+if [ -z "$BRIDGE_PORT" ] || echo "$BRIDGE_PORT" | grep -q '{{.*}}'; then
+  BRIDGE_PORT="3002"
+fi
+
 # Input validation — fail fast if critical vars are missing or still have template placeholders
 _validate_var() {
   local name="$1" value="$2" required="$3"
@@ -83,10 +92,6 @@ _validate_var PRIMARY_PROVIDER "$PRIMARY_PROVIDER" optional
 _validate_var PRIMARY_MODEL "$PRIMARY_MODEL" optional
 _validate_var RUNTIME_AUTH_SECRET "$RUNTIME_AUTH_SECRET" optional
 _validate_var CRABHQ_RUNTIME_TARBALL_URL "$CRABHQ_RUNTIME_TARBALL_URL" optional
-
-# Apply defaults for optional vars
-OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/crabhq-gateway:latest}"
-BRIDGE_PORT="${BRIDGE_PORT:-3002}"
 
 # Detect if booting from a pre-built snapshot (skip heavy installs)
 FROM_SNAPSHOT="${CRABHQ_FROM_SNAPSHOT:-0}"
@@ -2349,20 +2354,19 @@ cd /opt/openclaw
 dlog "Preparing CrabsHQ org runtime..."
 mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
 
-dlog "Cloning CrabsHQ from GitHub (always gets latest)..."
-if git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
+dlog "Installing CrabsHQ org runtime..."
+if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
+  dlog "Downloading CrabsHQ org runtime bundle..."
+  curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle" >&2; exit 1; }
+  tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
+  dlog "CrabsHQ org runtime installed from bundle"
+elif git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
   cp -r /tmp/crabhq-clone/server /opt/crabhq-org-runtime/
   rm -rf /tmp/crabhq-clone
   dlog "CrabsHQ org runtime cloned from GitHub"
 else
-  dlog "Git clone failed, falling back to tarball..."
-  if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
-    curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle" >&2; exit 1; }
-    tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
-  else
-    echo "ERROR: git clone failed and no CRABHQ_RUNTIME_TARBALL_URL fallback" >&2
-    exit 1
-  fi
+  echo "ERROR: failed to install CrabsHQ org runtime from bundle or git" >&2
+  exit 1
 fi
 
 if [ ! -f /opt/crabhq-org-runtime/server/package.json ] || [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
@@ -2530,6 +2534,16 @@ Environment=NODE_ENV=production
 WantedBy=multi-user.target
 PSVC
 
+# Pull-based update backstop. Installed from the checked-out bridge repo so
+# snapshot bakes keep the exact script/unit versions for the baked commit.
+if [ -f /opt/openclaw-bridge/scripts/check-update.sh ]; then
+ install -m 0755 /opt/openclaw-bridge/scripts/check-update.sh /usr/local/bin/check-update.sh
+ install -m 0644 /opt/openclaw-bridge/scripts/openclaw-updater.service /etc/systemd/system/openclaw-updater.service
+ install -m 0644 /opt/openclaw-bridge/scripts/openclaw-updater.timer /etc/systemd/system/openclaw-updater.timer
+else
+ echo "[setup] openclaw updater assets missing; skipping pull-backstop install"
+fi
+
 # Websockify service — bridges noVNC WebSocket to Xvnc inside the container
 # Xvnc runs inside the container on :99 (port 5999), websockify exposes it via WebSocket on 6080
 cat > /etc/systemd/system/openclaw-vnc.service << VNCSVC
@@ -2678,6 +2692,9 @@ fi
 
 run_cmd systemctl daemon-reload
 run_cmd systemctl enable openclaw-docker openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright
+if [ -f /etc/systemd/system/openclaw-updater.timer ]; then
+ run_cmd systemctl enable openclaw-updater.timer
+fi
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."

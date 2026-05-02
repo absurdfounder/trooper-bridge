@@ -67,6 +67,8 @@ import {
   resolveProviderRuntimeContext,
   stripGatewayErrorPrefix,
 } from './lib/provider-runtime.mjs';
+import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
+import { readBridgeVersion } from './lib/version-info.mjs';
 
 const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
 
@@ -4611,6 +4613,7 @@ app.get('/health', async (req, res) => {
  },
  mode: gatewayHealthy ? 'websocket' : 'poller-fallback',
  pending: pendingRequests.size, skills: skillRegistry.size,
+ version: readBridgeVersion(),
  uptime: Math.floor(process.uptime()),
  });
 });
@@ -7566,6 +7569,7 @@ app.get('/stats', async (req, res) => {
  memory: { total: totalMem, used: usedMem, free: freeMem, usagePercent: Math.round(usedMem / totalMem * 100) },
  disk, uptime,
  services: { openclaw: dockerStatus, poller: pollerStatus, bridge: 'active' },
+ version: readBridgeVersion(),
  hostname: os.hostname(),
  });
  } catch (err) { res.status(500).json({ error: err.message }); }
@@ -7576,7 +7580,7 @@ app.get('/version', (req, res) => {
  const gitHash = execSync('git -C /opt/openclaw rev-parse --short HEAD 2>/dev/null').toString().trim();
  const gitDate = execSync('git -C /opt/openclaw log -1 --format=%ci 2>/dev/null').toString().trim();
  const dockerImage = execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19);
- res.json({ gitHash, gitDate, dockerImage });
+ res.json({ gitHash, gitDate, dockerImage, ...readBridgeVersion() });
  } catch (err) { res.json({ error: err.message }); }
 });
 
@@ -8248,6 +8252,44 @@ const hasStoredCodexOAuthProfile = () => {
  }
 };
 
+const hasConfiguredProviderCredential = (provider) => {
+ if (provider === 'openai-codex') return hasStoredCodexOAuthProfile();
+ if (readProviderEnvValue(envContent, provider)) return true;
+ try {
+  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  const preferred = getPreferredAuthProfile(auth, provider)?.profile;
+  return Boolean(preferred?.key || preferred?.token || preferred?.access);
+ } catch {
+  return false;
+ }
+};
+
+const pickCredentialBackedDefaultModel = () => {
+ if (hasConfiguredProviderCredential('openai-codex')) return 'openai-codex/gpt-5.4';
+ if (hasConfiguredProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
+ if (hasConfiguredProviderCredential('openai')) return 'openai/gpt-5.2';
+ if (hasConfiguredProviderCredential('gemini')) return 'google/gemini-2.5-pro';
+ if (hasConfiguredProviderCredential('openrouter')) return 'openrouter/openai/gpt-5-mini';
+ return null;
+};
+
+const pickSafeNativeDefaultModel = (config, requestedFallbacks = []) => {
+ const candidates = [
+  config?.agents?.defaults?.model?.primary,
+  pickCredentialBackedDefaultModel(),
+  ...(Array.isArray(requestedFallbacks) ? requestedFallbacks : []),
+  ...(Array.isArray(config?.agents?.defaults?.model?.fallbacks) ? config.agents.defaults.model.fallbacks : []),
+  config?.agents?.defaults?.subagents?.model,
+ ];
+ for (const candidate of candidates) {
+  const normalized = candidate ? normalizeModelId(candidate) : null;
+  if (!normalized || isGatewayInheritedModel(normalized) || isLocalGatewayModel(normalized)) continue;
+  if (normalized.startsWith('openai-codex/') && !hasConfiguredProviderCredential('openai-codex')) continue;
+  return normalized;
+ }
+ return null;
+};
+
 const _syncWarnings = [];
  const storedProviderModelsForSync = readConfigKey('providerModels') || {};
  const localProviderSelectedModels = [
@@ -8316,7 +8358,20 @@ const _syncWarnings = [];
  }
  if (defaultModel !== undefined) {
    const normalizedModel = defaultModel ? normalizeModelId(defaultModel) : null;
-   if (normalizedModel?.startsWith?.('openai-codex/') && !openaiCodexAuthProfile?.access && !hasStoredCodexOAuthProfile()) {
+   if (normalizedModel && isLocalGatewayModel(normalizedModel)) {
+     const safeModel = pickSafeNativeDefaultModel(config, defaultFallbacks);
+     if (safeModel) {
+       config.agents.defaults.model.primary = safeModel;
+       const msg = `Kept local model ${normalizedModel} out of native defaults; using ${safeModel} for OpenClaw boot/internal runs`;
+       console.warn(`[bridge] ${msg}`);
+       _syncWarnings.push(msg);
+     } else {
+       delete config.agents.defaults.model.primary;
+       const msg = `Kept local model ${normalizedModel} out of native defaults; no non-local credentialed fallback is configured`;
+       console.warn(`[bridge] ${msg}`);
+       _syncWarnings.push(msg);
+     }
+   } else if (normalizedModel?.startsWith?.('openai-codex/') && !openaiCodexAuthProfile?.access && !hasStoredCodexOAuthProfile()) {
      const msg = `Skipped default model update to ${normalizedModel}: Codex OAuth profile is missing`;
      console.warn(`[bridge] ${msg}`);
      _syncWarnings.push(msg);
@@ -8327,7 +8382,7 @@ const _syncWarnings = [];
  }
  if (defaultFallbacks !== undefined) {
    const normalizedFallbacks = Array.isArray(defaultFallbacks)
-     ? defaultFallbacks.filter(Boolean).map(normalizeModelId)
+     ? defaultFallbacks.filter(Boolean).map(normalizeModelId).filter((model) => !isLocalGatewayModel(model))
      : [];
    config.agents.defaults.model.fallbacks = normalizedFallbacks;
    console.log(`[bridge] Updating default fallbacks to: ${normalizedFallbacks.join(', ') || '(none)'}`);
@@ -8654,6 +8709,7 @@ app.get('/config/provider-settings', (req, res) => {
   const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
   const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
+  const composerChatModel = readConfigKey('composerChatModel') || null;
   const chatThinkingLevel = readConfigKey('chatThinkingLevel') || 'auto';
   const localModelUrl = readConfigKey('localModelUrl') || null;
   const ollamaBaseUrl = readConfigKey('ollamaBaseUrl') || readProviderEnvValue(envContent, 'ollama') || null;
@@ -8666,6 +8722,7 @@ app.get('/config/provider-settings', (req, res) => {
    modelRoutingFallbacks,
    pendingBridgeApply,
    defaultModel,
+   composerChatModel,
    chatThinkingLevel,
    localModelUrl,
    ollamaBaseUrl,
@@ -8705,12 +8762,13 @@ app.get('/config/provider-keys-internal', (req, res) => {
 
 app.put('/config/provider-settings', (req, res) => {
  try {
-  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, chatThinkingLevel, localModelUrl, ollamaBaseUrl } = req.body;
+  const { modelRouting, providerModels, modelRoutingFallbacks, pendingBridgeApply, defaultModel, composerChatModel, chatThinkingLevel, localModelUrl, ollamaBaseUrl } = req.body;
   if (modelRouting !== undefined) writeConfigKey('modelRouting', modelRouting);
   if (providerModels !== undefined) writeConfigKey('providerModels', providerModels);
   if (modelRoutingFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', modelRoutingFallbacks);
   if (pendingBridgeApply !== undefined) writeConfigKey('pendingBridgeApply', pendingBridgeApply);
   if (defaultModel !== undefined) writeConfigKey('defaultModel', defaultModel);
+  if (composerChatModel !== undefined) writeConfigKey('composerChatModel', composerChatModel || null);
   if (chatThinkingLevel !== undefined) writeConfigKey('chatThinkingLevel', chatThinkingLevel || 'auto');
   if (localModelUrl !== undefined) writeConfigKey('localModelUrl', String(localModelUrl || '').trim().replace(/\/+$/, ''));
   if (ollamaBaseUrl !== undefined) writeConfigKey('ollamaBaseUrl', String(ollamaBaseUrl || '').trim().replace(/\/+$/, ''));
@@ -9970,6 +10028,13 @@ registerApiRoutes(app, {
 server.listen(PORT, '0.0.0.0', () => {
  console.log(`OpenClaw Bridge v2.1 on :${PORT} (HTTP + WS) | DirectBridge: enabled | OpenClaw: ${OPENCLAW_GATEWAY_TOKEN ? 'native' : 'poller'} | Browser: built-in tool`);
  captureLog('info', `Bridge started on port ${PORT}`);
+ startFleetHeartbeat({
+  missionControlUrl: MISSION_CONTROL_URL,
+  orgId: process.env.ORG_ID || '',
+  bridgeAuthToken: BRIDGE_AUTH_TOKEN,
+  port: PORT,
+  readVersion: () => readBridgeVersion({ force: true }),
+ });
 });
 
 export { bridgeWS };
