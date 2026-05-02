@@ -2357,7 +2357,8 @@ mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
 dlog "Installing CrabsHQ org runtime..."
 if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
   dlog "Downloading CrabsHQ org runtime bundle..."
-  curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle" >&2; exit 1; }
+  echo "[setup] Runtime bundle URL: ${CRABHQ_RUNTIME_TARBALL_URL}"
+  curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${CRABHQ_RUNTIME_TARBALL_URL}" >&2; exit 1; }
   tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
   dlog "CrabsHQ org runtime installed from bundle"
 elif git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
