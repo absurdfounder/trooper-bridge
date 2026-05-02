@@ -55,10 +55,11 @@ jobs:
 
       - name: Fire repository_dispatch on crabs-hq
         env:
-          GH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
+          RAW_GH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
           BRIDGE_SHA: ${{ steps.sha.outputs.sha }}
           TRIGGER_EVENT: ${{ github.event_name }}
         run: |
+          GH_TOKEN="$(printf '%s' "${RAW_GH_TOKEN:-}" | tr -d '\r\n[:space:]')"
           if [ -z "$GH_TOKEN" ]; then
             echo "::warning::CRABSHQ_DISPATCH_TOKEN not set — skipping dispatch"
             exit 0
