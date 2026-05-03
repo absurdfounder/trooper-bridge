@@ -158,8 +158,33 @@ fi
 # Snapshot images may boot previously-enabled services before cloud-init runs.
 # Stop them before re-rendering per-org config so old ports/processes do not
 # race the temporary progress server or final service startup.
+_free_progress_port() {
+  local port="$1"
+  if ! command -v ss >/dev/null 2>&1; then
+    return 0
+  fi
+  local pids
+  pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u)
+  if [ -z "$pids" ]; then
+    return 0
+  fi
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    echo "[setup] Stopping stale process on port ${port} (pid ${pid})"
+    kill "$pid" 2>/dev/null || true
+  done
+  sleep 1
+  pids=$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u)
+  for pid in $pids; do
+    [ "$pid" = "$$" ] && continue
+    echo "[setup] Force-stopping stale process on port ${port} (pid ${pid})"
+    kill -9 "$pid" 2>/dev/null || true
+  done
+}
+
 if [ "$FROM_SNAPSHOT" = "1" ]; then
   systemctl stop openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright 2>/dev/null || true
+  _free_progress_port "${BRIDGE_PORT}"
 fi
 
 # Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT.
