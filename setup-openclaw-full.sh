@@ -2355,24 +2355,8 @@ dlog "Preparing CrabsHQ org runtime..."
 mkdir -p /opt/crabhq-org-runtime /var/lib/crabhq-org-runtime
 
 dlog "Installing CrabsHQ org runtime..."
-if { [ -z "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] || [ "${CRABHQ_RUNTIME_TARBALL_URL}" = "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; } && [ -s /tmp/crabhq-runtime-url ]; then
-  _recovered_runtime_url="$(tr -d '\r\n' < /tmp/crabhq-runtime-url)"
-  if [ -n "$_recovered_runtime_url" ] && [ "$_recovered_runtime_url" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
-    CRABHQ_RUNTIME_TARBALL_URL="$_recovered_runtime_url"
-    echo "[setup] Runtime bundle URL recovered from /tmp/crabhq-runtime-url"
-  else
-    echo "[setup] Runtime bundle marker was present but unusable"
-  fi
-fi
-
-if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
-  dlog "Downloading CrabsHQ org runtime bundle..."
-  echo "[setup] Runtime bundle URL: ${CRABHQ_RUNTIME_TARBALL_URL}"
-  curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${CRABHQ_RUNTIME_TARBALL_URL}" >&2; exit 1; }
-  tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
-  dlog "CrabsHQ org runtime installed from bundle"
-elif [ "${CRABHQ_SNAPSHOT_BUILD:-0}" = "1" ]; then
-  echo "[setup] CRABHQ_SNAPSHOT_BUILD=1 and no usable runtime URL - skipping per-org runtime install (boot.sh re-fetches at customer boot)"
+if [ "${CRABHQ_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  echo "[setup] CRABHQ_SNAPSHOT_BUILD=1 - skipping per-org runtime install (boot.sh re-fetches at customer boot)"
   mkdir -p /opt/crabhq-org-runtime/server/org-runtime
   printf 'snapshot-build-placeholder\n' > /opt/crabhq-org-runtime/.snapshot-builder
   cat > /opt/crabhq-org-runtime/server/package.json <<'PKG'
@@ -2404,13 +2388,31 @@ http.createServer((req, res) => {
   res.end(JSON.stringify({ error: 'snapshot-placeholder' }));
 }).listen(port, '127.0.0.1');
 SERVERJS
-elif git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
-  cp -r /tmp/crabhq-clone/server /opt/crabhq-org-runtime/
-  rm -rf /tmp/crabhq-clone
-  dlog "CrabsHQ org runtime cloned from GitHub"
 else
-  echo "ERROR: failed to install CrabsHQ org runtime from bundle or git" >&2
-  exit 1
+  if { [ -z "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] || [ "${CRABHQ_RUNTIME_TARBALL_URL}" = "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; } && [ -s /tmp/crabhq-runtime-url ]; then
+    _recovered_runtime_url="$(tr -d '\r\n' < /tmp/crabhq-runtime-url)"
+    if [ -n "$_recovered_runtime_url" ] && [ "$_recovered_runtime_url" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
+      CRABHQ_RUNTIME_TARBALL_URL="$_recovered_runtime_url"
+      echo "[setup] Runtime bundle URL recovered from /tmp/crabhq-runtime-url"
+    else
+      echo "[setup] Runtime bundle marker was present but unusable"
+    fi
+  fi
+
+  if [ -n "${CRABHQ_RUNTIME_TARBALL_URL:-}" ] && [ "${CRABHQ_RUNTIME_TARBALL_URL}" != "{{CRABHQ_RUNTIME_TARBALL_URL}}" ]; then
+    dlog "Downloading CrabsHQ org runtime bundle..."
+    echo "[setup] Runtime bundle URL: ${CRABHQ_RUNTIME_TARBALL_URL}"
+    curl -fsSL "$CRABHQ_RUNTIME_TARBALL_URL" -o /tmp/crabhq-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${CRABHQ_RUNTIME_TARBALL_URL}" >&2; exit 1; }
+    tar -xzf /tmp/crabhq-org-runtime.tar.gz -C /opt/crabhq-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
+    dlog "CrabsHQ org runtime installed from bundle"
+  elif git clone --depth 1 https://github.com/absurdfounder/Crabs-HQ.git /tmp/crabhq-clone 2>/dev/null; then
+    cp -r /tmp/crabhq-clone/server /opt/crabhq-org-runtime/
+    rm -rf /tmp/crabhq-clone
+    dlog "CrabsHQ org runtime cloned from GitHub"
+  else
+    echo "ERROR: failed to install CrabsHQ org runtime from bundle or git" >&2
+    exit 1
+  fi
 fi
 
 if [ ! -f /opt/crabhq-org-runtime/server/package.json ] || [ ! -f /opt/crabhq-org-runtime/server/org-runtime/index.js ]; then
