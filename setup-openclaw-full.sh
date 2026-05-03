@@ -3001,4 +3001,51 @@ else
   echo "Skipping deploy-complete callback (API_URL, ORG_ID, or GATEWAY_TOKEN not set)"
 fi
 
+if [ "${CRABHQ_SNAPSHOT_BUILD:-0}" = "1" ]; then
+  echo "[setup] Preparing snapshot image for reusable first boot..."
+  cat > /usr/local/sbin/crabhq-snapshot-firstboot-guard.sh <<'SNAPGUARD'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ ! -f /opt/crabhq-org-runtime/.snapshot-builder ]; then
+  systemctl disable crabhq-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
+  exit 0
+fi
+
+echo "[snapshot-firstboot] Clearing baked setup markers before customer cloud-init"
+rm -f /tmp/openclaw-setup-complete /opt/openclaw-bridge/.setup-complete 2>/dev/null || true
+systemctl stop openclaw-bridge crabhq-org-runtime crabhq-server openclaw-poller openclaw-vnc crabhq-desktop crabhq-desktop-api crabhq-playwright 2>/dev/null || true
+systemctl disable crabhq-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
+SNAPGUARD
+  chmod +x /usr/local/sbin/crabhq-snapshot-firstboot-guard.sh
+  cat > /etc/systemd/system/crabhq-snapshot-firstboot-guard.service <<'SNAPGUARDSVC'
+[Unit]
+Description=CrabsHQ snapshot first-boot guard
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target cloud-init-local.service cloud-init.service openclaw-bridge.service crabhq-org-runtime.service crabhq-server.service openclaw-poller.service
+ConditionPathExists=/opt/crabhq-org-runtime/.snapshot-builder
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/crabhq-snapshot-firstboot-guard.sh
+
+[Install]
+WantedBy=multi-user.target
+SNAPGUARDSVC
+  systemctl enable crabhq-snapshot-firstboot-guard.service >/dev/null 2>&1 || true
+  rm -f /tmp/deploy.log /tmp/deploy-raw.log /tmp/crabhq-setup-failed 2>/dev/null || true
+  rm -f /var/log/cloud-init.log /var/log/cloud-init-output.log 2>/dev/null || true
+  rm -f /var/lib/cloud/instance/user-data.txt 2>/dev/null || true
+  rm -f /var/lib/cloud/instance/scripts/runcmd 2>/dev/null || true
+  rm -f /var/lib/cloud/instance/scripts/part-001 2>/dev/null || true
+  rm -rf /var/lib/cloud/instances/* /var/lib/cloud/instance /var/lib/cloud/sem/* 2>/dev/null || true
+  if command -v cloud-init >/dev/null 2>&1; then
+    cloud-init clean --logs --machine-id >/dev/null 2>&1 || cloud-init clean --logs >/dev/null 2>&1 || true
+  fi
+  : > /etc/machine-id 2>/dev/null || true
+  rm -f /var/lib/dbus/machine-id 2>/dev/null || true
+  echo "[setup] Snapshot image prepared for cloud-init rerun on cloned servers"
+fi
+
 echo done
