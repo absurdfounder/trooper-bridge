@@ -1372,32 +1372,57 @@ class OpenClawGateway {
   }
  }
 
- async abortSession(sessionKey) {
-  if (!sessionKey) throw new Error('sessionKey is required');
-  if (!this.connected) {
-   const ok = await this.connect();
-   if (!ok) throw new Error('Cannot connect to OpenClaw gateway');
-  }
-  const id = randomUUID();
+ async abortSession(sessionKey, opts = {}) {
+  const safeSessionKey = typeof sessionKey === 'string' ? sessionKey.trim() : '';
+  const safeRunId = typeof opts?.runId === 'string' ? opts.runId.trim() : '';
+  const timeoutMs = Number.isFinite(Number(opts?.timeoutMs)) ? Number(opts.timeoutMs) : 10000;
+  if (!safeSessionKey && !safeRunId) throw new Error('sessionKey or runId is required');
+  const nativeParams = {
+   ...(safeSessionKey ? { key: safeSessionKey } : {}),
+   ...(safeRunId ? { runId: safeRunId } : {}),
+  };
   try {
-   const result = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-     this._pendingRequests.delete(id);
-     reject(new Error('Abort timeout'));
-    }, 10000);
-    this._pendingRequests.set(id, {
-     resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
-     reject: (err) => { clearTimeout(timeout); reject(err); },
-    });
-    this.ws.send(JSON.stringify({
-     type: 'req', id, method: 'chat.abort',
-     params: { sessionKey },
-    }));
-   });
-   return result || { ok: true };
-  } finally {
-   this._pendingRequests.delete(id);
+   const result = await this.request('sessions.abort', nativeParams, { timeoutMs });
+   return { ok: true, method: 'sessions.abort', ...(result || {}) };
+  } catch (err) {
+   if (!safeSessionKey) throw err;
+   console.warn(`[OpenClaw] sessions.abort failed; falling back to chat.abort: ${err.message}`);
+   const legacyParams = {
+    sessionKey: safeSessionKey,
+    ...(safeRunId ? { runId: safeRunId } : {}),
+   };
+   const result = await this.request('chat.abort', legacyParams, { timeoutMs });
+   return { ok: true, method: 'chat.abort', ...(result || {}) };
   }
+ }
+
+ async steerSession(sessionKey, message, opts = {}) {
+  const safeSessionKey = typeof sessionKey === 'string' ? sessionKey.trim() : '';
+  const safeMessage = typeof message === 'string' ? message.trim() : '';
+  if (!safeSessionKey) throw new Error('sessionKey is required');
+  if (!safeMessage) throw new Error('message is required');
+  const idempotencyKey = typeof opts?.idempotencyKey === 'string' && opts.idempotencyKey.trim()
+   ? opts.idempotencyKey.trim()
+   : randomUUID();
+  const params = {
+   key: safeSessionKey,
+   message: safeMessage,
+   idempotencyKey,
+   ...(typeof opts?.thinking === 'string' && opts.thinking.trim() ? { thinking: opts.thinking.trim() } : {}),
+   ...(Array.isArray(opts?.attachments) ? { attachments: opts.attachments } : {}),
+   ...(Number.isFinite(Number(opts?.timeoutMs)) ? { timeoutMs: Number(opts.timeoutMs) } : {}),
+  };
+  const result = await this.request('sessions.steer', params, {
+   timeoutMs: Number.isFinite(Number(opts?.requestTimeoutMs)) ? Number(opts.requestTimeoutMs) : 30000,
+  });
+  return {
+   ok: true,
+   success: true,
+   method: 'sessions.steer',
+   sessionKey: safeSessionKey,
+   idempotencyKey,
+   ...(result || {}),
+  };
  }
 
  async fetchSessionSnapshot(sessionKey) {
@@ -1529,7 +1554,32 @@ class OpenClawGateway {
  const _projectFolder = opts.projectFolder || null;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel);
- await assertLocalGatewayModelReachable(effectiveRequestedModel);
+ const steerMode = opts.steer === true;
+ if (!steerMode) await assertLocalGatewayModelReachable(effectiveRequestedModel);
+ const steerWaitTimeoutMs = Math.max(30000, Math.min(timeoutMs, Number(opts.steerTimeoutMs) || timeoutMs));
+ let steerAckRunId = null;
+ let steerRunComplete = false;
+ let steerCompletionResolve = null;
+ let steerCompletionTimer = null;
+ const completeSteerWait = () => {
+  if (steerCompletionTimer) {
+   clearTimeout(steerCompletionTimer);
+   steerCompletionTimer = null;
+  }
+  const resolve = steerCompletionResolve;
+  steerCompletionResolve = null;
+  if (resolve) resolve();
+ };
+ const waitForSteerCompletion = async () => {
+  if (!steerMode || steerRunComplete) return;
+  await new Promise((resolve) => {
+   steerCompletionResolve = resolve;
+   steerCompletionTimer = setTimeout(() => {
+    console.warn(`[OpenClaw] sessions.steer run did not emit lifecycle:end within ${Math.round(steerWaitTimeoutMs / 1000)}s; returning captured output`);
+    completeSteerWait();
+   }, steerWaitTimeoutMs);
+  });
+ };
  let bridgeEventSequence = 0;
  const rawOnEvent = onEvent;
  onEvent = rawOnEvent
@@ -1871,6 +1921,9 @@ function extractPatchFilePaths(patchText = '') {
  const visibleText = sanitizeVisibleAssistantText(data.text);
  if (visibleText && onEvent) onEvent('text', { text: visibleText, runId: runId || mainRunId || null, sessionKey });
  }
+ if (stream === 'progress' && data) {
+ if (onEvent) onEvent('progress', { ...data, runId: runId || mainRunId || null, sessionKey });
+ }
  // Track ALL lifecycle events (including from nested runIds via _activeSessionListener)
  if (stream === 'lifecycle' && data?.phase === 'start') {
  if (!isSubAgent && !emittedMainRunStart) {
@@ -1890,6 +1943,10 @@ function extractPatchFilePaths(patchText = '') {
  }
  if (stream === 'lifecycle' && data?.phase === 'end') {
  lifecycleDepth = Math.max(0, lifecycleDepth - 1);
+ if (steerMode && (!steerAckRunId || runId === steerAckRunId || runId === mainRunId)) {
+ steerRunComplete = true;
+ completeSteerWait();
+ }
  }
  // Gateway auth/provider error — forward immediately and terminate
  if (stream === 'lifecycle' && data?.phase === 'error') {
@@ -2130,22 +2187,32 @@ function extractPatchFilePaths(patchText = '') {
  this._pendingRequests.set(id, {
  resolve: (payload) => { clearTimeout(timeout); this._activeTimeoutReset = null; resolve(payload); },
  reject: (err) => { clearTimeout(timeout); this._activeTimeoutReset = null; reject(err); },
- expectFinal: true, runId: null, idempotencyKey,
+ expectFinal: !steerMode, runId: null, idempotencyKey,
  });
 
- this.ws.send(JSON.stringify({
- type: 'req', id, method: 'agent',
- params: {
+ const method = steerMode ? 'sessions.steer' : 'agent';
+ const params = steerMode
+ ? {
+ key: sessionKey,
+ message,
+ idempotencyKey,
+ thinking: selectedThinking || undefined,
+ timeoutMs,
+ }
+ : {
  message, sessionKey, idempotencyKey,
  agentId: opts.agentId || undefined,
  thinking: selectedThinking || undefined,
  model: explicitModel || undefined,
  extraSystemPrompt: opts.extraSystemPrompt || undefined,
  deliver: false,
- },
+ };
+ this.ws.send(JSON.stringify({
+ type: 'req', id, method,
+ params,
  }));
 
- console.log(`[OpenClaw] Agent streaming request sent (session=${sessionKey})`);
+ console.log(`[OpenClaw] ${steerMode ? 'Native steer' : 'Agent'} streaming request sent (session=${sessionKey})`);
 
  const pollSessionHistory = async () => {
  if (historyPollInFlight || sawLiveStreamPayload) return;
@@ -2217,6 +2284,24 @@ function extractPatchFilePaths(patchText = '') {
  }, 8000);
  });
 
+ if (steerMode) {
+ steerAckRunId = result?.runId || result?.idempotencyKey || idempotencyKey;
+ const listener = this._eventListeners.get(idempotencyKey);
+ if (listener && steerAckRunId) this._eventListeners.set(steerAckRunId, listener);
+ if (!mainRunId && steerAckRunId) mainRunId = steerAckRunId;
+ if (onEvent && steerAckRunId) {
+ onEvent('lifecycle', {
+ phase: 'start',
+ accepted: true,
+ method: 'sessions.steer',
+ runId: steerAckRunId,
+ sessionKey,
+ interruptedActiveRun: result?.interruptedActiveRun === true,
+ });
+ }
+ await waitForSteerCompletion();
+ }
+
  if (pendingSubAgentSpawn || activeSubAgents.size > 0) {
  console.log(`[OpenClaw] Main agent response finished but ${activeSubAgents.size} sub-agent(s) are still active${pendingSubAgentSpawn ? ' (pending spawn detected)' : ''}; keeping stream open for child activity`);
  await new Promise((resolve) => {
@@ -2271,6 +2356,7 @@ const formattedToolLog = toolLog.map(t => ({
  } finally {
  if (historyPoller) clearInterval(historyPoller);
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
+ if (steerCompletionTimer) clearTimeout(steerCompletionTimer);
  // Clean up session listener and event listeners
  this._activeSessionListener = null;
  const listener = this._eventListeners.get(idempotencyKey);
@@ -3957,6 +4043,8 @@ const emitViewportScreenshotFrame = ({
  extraSystemPrompt: resolvedSystemPrompt,
  timeoutMs: inactivityMs,
  projectFolder,
+ steer: req.body?.steer === true || context?.steer === true,
+ steerTimeoutMs: inactivityMs,
  }, streamingCallback));
 
 // Stop all screen recordings and get video paths before sending done event
@@ -4924,17 +5012,98 @@ function arrayFromPayload(payload, keys = []) {
  return [];
 }
 
+function normalizeTimestampMs(value) {
+ if (value == null || value === '') return null;
+ if (value instanceof Date) {
+  const ms = value.getTime();
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+ }
+ if (typeof value === 'number') {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  return value < 10000000000 ? Math.round(value * 1000) : Math.round(value);
+ }
+ const text = String(value || '').trim();
+ if (!text) return null;
+ if (/^\d+(\.\d+)?$/.test(text)) return normalizeTimestampMs(Number(text));
+ const parsed = Date.parse(text);
+ return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function isoFromTimestampMs(value) {
+ const ms = normalizeTimestampMs(value);
+ return ms ? new Date(ms).toISOString() : null;
+}
+
+function firstString(...values) {
+ for (const value of values) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (text) return text;
+ }
+ return '';
+}
+
+function normalizeNodeRecord(record = {}, { source = 'node' } = {}) {
+ const raw = record && typeof record === 'object' ? record : {};
+ const nodeId = firstString(raw.nodeId, raw.id, raw.deviceId, raw.clientId, raw.requestId);
+ const displayName = firstString(raw.displayName, raw.name, raw.hostname, raw.host, raw.label, nodeId);
+ const statusText = firstString(raw.status, raw.state, raw.connectionState).toLowerCase();
+ const explicitlyDisconnected = raw.connected === false || /\b(disconnected|offline|stale|lost|removed)\b/i.test(statusText);
+ const explicitlyConnected = raw.connected === true || /\b(connected|online|running|ready|live)\b/i.test(statusText);
+ const connected = explicitlyDisconnected ? false : (explicitlyConnected || (source === 'node' && raw.connected !== false));
+ const lastSeenAtMs = normalizeTimestampMs(
+  raw.lastSeenAtMs ?? raw.lastSeenAt ?? raw.lastSeen ?? raw.lastConnectedAtMs ?? raw.connectedAtMs ?? raw.approvedAtMs ?? raw.ts,
+ );
+ const connectedAtMs = normalizeTimestampMs(raw.connectedAtMs ?? raw.connectedAt);
+ const approvedAtMs = normalizeTimestampMs(raw.approvedAtMs ?? raw.approvedAt);
+ const status = connected ? 'connected' : (lastSeenAtMs ? 'recently_seen' : (statusText || 'disconnected'));
+ return {
+  ...raw,
+  nodeId: nodeId || raw.nodeId || raw.id || null,
+  id: raw.id || nodeId || null,
+  displayName: displayName || 'Unknown node',
+  name: raw.name || displayName || 'Unknown node',
+  connected,
+  paired: raw.paired !== false,
+  status,
+  lastSeenAtMs,
+  lastSeenAt: isoFromTimestampMs(lastSeenAtMs),
+  lastSeenReason: raw.lastSeenReason || raw.reason || null,
+  connectedAtMs,
+  connectedAt: isoFromTimestampMs(connectedAtMs),
+  approvedAtMs,
+  approvedAt: isoFromTimestampMs(approvedAtMs),
+ };
+}
+
 function normalizeNodeInventoryPayload(rawNodeList = {}, rawDevicePairs = {}) {
- const nodes = arrayFromPayload(rawNodeList, ['nodes', 'liveNodes', 'items', 'data']);
- const pending = arrayFromPayload(rawNodeList, ['pending', 'pendingNodes', 'requests']);
- const paired = arrayFromPayload(rawNodeList, ['paired', 'pairedNodes', 'approved']);
- const devicePending = arrayFromPayload(rawDevicePairs, ['pending', 'requests']);
- const devicePaired = arrayFromPayload(rawDevicePairs, ['paired', 'devices', 'items']);
+ const nodes = arrayFromPayload(rawNodeList, ['nodes', 'liveNodes', 'items', 'data'])
+  .map((node) => normalizeNodeRecord(node, { source: 'node' }));
+ const pending = arrayFromPayload(rawNodeList, ['pending', 'pendingNodes', 'requests'])
+  .map((node) => normalizeNodeRecord(node, { source: 'pending' }));
+ const paired = arrayFromPayload(rawNodeList, ['paired', 'pairedNodes', 'approved'])
+  .map((node) => normalizeNodeRecord(node, { source: 'paired' }));
+ const devicePending = arrayFromPayload(rawDevicePairs, ['pending', 'requests'])
+  .map((node) => normalizeNodeRecord(node, { source: 'device-pending' }));
+ const devicePaired = arrayFromPayload(rawDevicePairs, ['paired', 'devices', 'items'])
+  .map((node) => normalizeNodeRecord(node, { source: 'device-paired' }));
+ const liveNodes = nodes.filter((node) => node.connected !== false);
+ const recentlySeenNodes = nodes.filter((node) => node.connected === false && node.lastSeenAtMs);
  return {
   nodes,
-  liveNodes: nodes,
+  knownNodes: nodes,
+  liveNodes,
+  recentlySeenNodes,
   pending,
   paired,
+  counts: {
+   known: nodes.length,
+   live: liveNodes.length,
+   recentlySeen: recentlySeenNodes.length,
+   pending: pending.length,
+   paired: paired.length,
+   devicePending: devicePending.length,
+   devicePaired: devicePaired.length,
+  },
   devicePairs: {
    pending: devicePending,
    paired: devicePaired,
@@ -5669,10 +5838,34 @@ app.post('/webhook/mission-control/stop', async (req, res) => {
     return res.status(503).json({ error: 'OpenClaw gateway not connected' });
    }
   }
-  await gateway.abortSession(sessionKey);
-  return res.json({ success: true, sessionKey });
+  const runId = req.body?.runId || req.body?.context?.runId || null;
+  const result = await gateway.abortSession(sessionKey, { runId });
+  return res.json({ success: true, sessionKey, runId: runId || undefined, result });
  } catch (err) {
   console.error('[stop] Failed to abort session:', err.message);
+  return res.status(502).json({ error: err.message });
+ }
+});
+
+app.post('/webhook/mission-control/steer', async (req, res) => {
+ try {
+  const sessionKey = resolveMissionControlSessionKey(req.body || {});
+  const message = req.body?.message || req.body?.task || req.body?.text || '';
+  if (!sessionKey) return res.status(400).json({ error: 'Missing session target' });
+  if (!String(message || '').trim()) return res.status(400).json({ error: 'Missing steer message' });
+  if (!gateway.isReady) {
+   const reconnected = await gateway.ensureConnected();
+   if (!reconnected) {
+    return res.status(503).json({ error: 'OpenClaw gateway not connected' });
+   }
+  }
+  const result = await gateway.steerSession(sessionKey, message, {
+   thinking: req.body?.thinking,
+   idempotencyKey: req.body?.idempotencyKey || req.body?.requestId,
+  });
+  return res.json({ success: true, steered: true, sessionKey, result });
+ } catch (err) {
+  console.error('[steer] Failed to steer session:', err.message);
   return res.status(502).json({ error: err.message });
  }
 });
@@ -7761,11 +7954,17 @@ function buildOpenClawCapabilitiesPayload() {
   endpoints: {
    missionControlStream: true,
    missionControlStop: true,
+   missionControlSteer: true,
    nativeNodes: true,
    nativeNodeRemove: true,
+   nativeNodePresence: true,
    commandCatalog: true,
    modelCatalog: true,
    diagnosticsExport: true,
+   fileTransfer: true,
+   nativeSteer: true,
+   progressStreaming: true,
+   commitments: true,
    voiceCapabilities: true,
    dreaming: true,
    activeMemory: true,
@@ -7774,13 +7973,43 @@ function buildOpenClawCapabilitiesPayload() {
    nativeAgentRpc: true,
    nativeRunRegistry: true,
    nativeAbort: true,
+   nativeSessionAbort: true,
+   nativeSteer: true,
    nativeNodeRemove: true,
+   nativeNodePresence: true,
    commandCatalog: true,
    modelCatalog: true,
    diagnosticsExport: true,
+   fileTransfer: true,
+   progressStreaming: true,
+   commitments: true,
    fullAgentVoice: true,
    dreaming: true,
    activeMemory: true,
+  },
+  nodes: {
+   canonicalInventory: 'node.list',
+   includesPairedOfflineNodes: true,
+   lastSeenAtMs: true,
+   lastSeenReason: true,
+   statusEndpoint: true,
+  },
+  fileTransfer: {
+   enabled: true,
+   policyRequired: true,
+   tools: ['file_fetch', 'dir_list', 'dir_fetch', 'file_write'],
+   nodeCommands: ['file.fetch', 'dir.list', 'dir.fetch', 'file.write'],
+  },
+  streaming: {
+   sse: true,
+   progressEvents: true,
+   nativeSteer: true,
+   nativeAbort: 'sessions.abort',
+  },
+  commitments: {
+   enabledByOpenClawConfig: readOpenClawConfig()?.commitments?.enabled === true,
+   supported: true,
+   configKeys: ['commitments.enabled', 'commitments.maxPerDay'],
   },
   memory: {
    activeMemory: true,
