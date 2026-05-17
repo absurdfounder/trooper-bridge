@@ -966,12 +966,11 @@ class OpenClawGateway {
 
  authPromise.finally(() => clearTimeout(authTimeout));
 
- // Don't send connect yet — wait for connect.challenge event from gateway.
- // The _handleFrame handler will call _sendConnect() when the challenge arrives.
- // Only send immediately if we already have a nonce (reconnect scenario).
- if (this._connectNonce) {
+ // Start with a plain connect. Newer gateway builds may not emit an eager
+ // connect.challenge event until the client has attempted connect once. If the
+ // gateway does require a nonce, _handleFrame will receive connect.challenge and
+ // call _sendConnect() again with the signed nonce.
  this._sendConnect();
- }
  return authPromise;
  }
 
