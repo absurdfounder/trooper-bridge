@@ -2914,6 +2914,18 @@ function ensureSyntheticLocalAuthProfiles({ localProvider, removeLocalProvider, 
  }
 }
 
+function isUsableCodexOAuthProfile(profile) {
+ return Boolean(
+  profile
+  && profile.provider === 'openai-codex'
+  && profile.type === 'oauth'
+  && (
+   profile.access
+   || (profile.oauthRef && typeof profile.oauthRef === 'object' && profile.oauthRef.source)
+  )
+ );
+}
+
 function normalizeLocalProviderModelName(model) {
  const raw = String(
   typeof model === 'object' && model
@@ -3102,7 +3114,7 @@ try {
   // configured to boot into openai-codex/* models. Pick a working provider from
   // the auth profile store instead. This prevents fresh installs from entering
   // a repeated "No API key found for provider openai-codex" failure loop.
-  const hasValidCodexProfile = Object.entries(auth.profiles).some(([k, v]) => k.startsWith('openai-codex:') && v.type === 'oauth');
+  const hasValidCodexProfile = Object.entries(auth.profiles).some(([k, v]) => k.startsWith('openai-codex:') && isUsableCodexOAuthProfile(v));
   if (!hasValidCodexProfile) {
    try {
     const chooseFallbackModel = () => {
@@ -8589,7 +8601,7 @@ function normalizeModelId(model) {
 const hasStoredCodexOAuthProfile = () => {
  try {
   const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
-  return Object.values(auth.profiles || {}).some((profile) => profile?.provider === 'openai-codex' && profile?.type === 'oauth' && profile?.access);
+  return Object.values(auth.profiles || {}).some((profile) => isUsableCodexOAuthProfile(profile));
  } catch {
   return false;
  }
@@ -8996,7 +9008,7 @@ function getPreferredAuthProfile(authDoc, provider) {
  const matches = listAuthProfilesForProvider(authDoc, provider);
  if (matches.length === 0) return null;
  const preferred = provider === 'openai-codex'
-  ? matches.find(([, profile]) => profile?.type === 'oauth' && profile?.access)
+  ? matches.find(([, profile]) => isUsableCodexOAuthProfile(profile))
   : matches[0];
  const [id, profile] = preferred || matches[0];
  return { id, profile };
@@ -9038,8 +9050,13 @@ app.get('/config/provider-settings', (req, res) => {
   try {
    const authDoc = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
    const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
-   if (codexProfile?.access) {
-    openaiCodexAuthProfile = { hasAccess: true, email: codexProfile.email || null, expires: codexProfile.expires || null };
+   if (isUsableCodexOAuthProfile(codexProfile)) {
+    openaiCodexAuthProfile = {
+     hasAccess: true,
+     email: codexProfile.email || null,
+     expires: codexProfile.expires || null,
+     authMode: codexProfile.access ? 'inline' : 'oauthRef',
+    };
    }
   } catch {}
 
@@ -9088,7 +9105,7 @@ app.get('/config/provider-keys-internal', (req, res) => {
   try {
    const authDoc = JSON.parse(readFileSync('/opt/openclaw-data/config/agents/main/agent/auth-profiles.json', 'utf8'));
    const codexProfile = getPreferredAuthProfile(authDoc, 'openai-codex')?.profile;
-   if (codexProfile?.access) openaiCodex = codexProfile;
+   if (isUsableCodexOAuthProfile(codexProfile)) openaiCodex = codexProfile;
   } catch {}
 
   const modelRouting = readConfigKey('modelRouting') || {};
