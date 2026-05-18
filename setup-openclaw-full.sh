@@ -739,6 +739,86 @@ has_codex_auth_profile() {
  [ -n "${OPENAI_CODEX_AUTH_PROFILE_B64:-}" ] && [ "${OPENAI_CODEX_AUTH_PROFILE_B64}" != "__UNSET_OPENAI_CODEX_AUTH_PROFILE_B64__" ]
 }
 
+restore_codex_oauth_sidecars() {
+ if ! has_codex_auth_profile; then
+  return 0
+ fi
+ OPENAI_CODEX_AUTH_PROFILE_B64="$OPENAI_CODEX_AUTH_PROFILE_B64" python3 - <<'PYCODEXSIDECAR' || true
+import base64
+import json
+import os
+import pathlib
+import re
+
+raw = os.environ.get("OPENAI_CODEX_AUTH_PROFILE_B64", "").strip()
+if not raw:
+    raise SystemExit(0)
+try:
+    incoming = json.loads(base64.b64decode(raw).decode("utf-8"))
+except Exception:
+    raise SystemExit(0)
+if not isinstance(incoming, dict) or not incoming.get("access"):
+    raise SystemExit(0)
+
+profile_id_hint = incoming.get("id") if isinstance(incoming.get("id"), str) else "openai-codex:default"
+material = {
+    key: incoming[key]
+    for key in ("access", "refresh", "idToken")
+    if isinstance(incoming.get(key), str) and incoming.get(key).strip()
+}
+if not material:
+    raise SystemExit(0)
+
+auth_paths = [
+    pathlib.Path("/opt/openclaw-data/config/agents/main/agent/auth-profiles.json"),
+    pathlib.Path("/opt/openclaw-data/config/auth-profiles.json"),
+]
+sidecar_root = pathlib.Path("/opt/openclaw-data/config/credentials/auth-profiles")
+sidecar_root.mkdir(parents=True, exist_ok=True)
+
+ref_re = re.compile(r"^[a-f0-9]{32}$")
+written = 0
+
+for auth_path in auth_paths:
+    if not auth_path.exists():
+        continue
+    try:
+        doc = json.loads(auth_path.read_text())
+    except Exception:
+        continue
+    profiles = doc.get("profiles")
+    if not isinstance(profiles, dict):
+        continue
+    for profile_id, profile in list(profiles.items()):
+        if not isinstance(profile, dict) or profile.get("provider") != "openai-codex":
+            continue
+        if profile_id != profile_id_hint and not str(profile_id).startswith("openai-codex:"):
+            continue
+        ref = profile.get("oauthRef")
+        if not isinstance(ref, dict):
+            continue
+        if ref.get("source") != "openclaw-credentials" or ref.get("provider") != "openai-codex":
+            continue
+        ref_id = ref.get("id")
+        if not isinstance(ref_id, str) or not ref_re.match(ref_id):
+            continue
+        sidecar = {
+            "version": 1,
+            "profileId": profile_id,
+            "provider": "openai-codex",
+            **material,
+        }
+        (sidecar_root / f"{ref_id}.json").write_text(json.dumps(sidecar, indent=2) + "\n")
+        written += 1
+
+if written:
+    print(f"[setup] Restored Codex OAuth sidecar material for {written} auth profile reference(s)")
+PYCODEXSIDECAR
+ chown -R node:node /opt/openclaw-data/config/credentials 2>/dev/null || chown -R 1000:1000 /opt/openclaw-data/config/credentials 2>/dev/null || true
+ find /opt/openclaw-data/config/credentials -type d -exec chmod 755 {} \; 2>/dev/null || true
+ find /opt/openclaw-data/config/credentials -type f -exec chmod 600 {} \; 2>/dev/null || true
+}
+
 resolve_non_codex_model() {
  if [ -n "${ANTHROPIC_API_KEY:-}" ] && [ "${ANTHROPIC_API_KEY}" != "__UNSET_ANTHROPIC_API_KEY__" ]; then
  echo "anthropic/claude-sonnet-4-5"
@@ -1728,6 +1808,7 @@ docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --works
 docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
   || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
   || true
+restore_codex_oauth_sidecars
 
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
 # Download bridge, create poller, and start sandbox build concurrently

@@ -2834,6 +2834,7 @@ try {
 // not type "api_key"/"key" with field "key". Fix any that were created incorrectly.
 const AUTH_PROFILES_PATH = '/opt/openclaw-data/config/agents/main/agent/auth-profiles.json';
 const AUTH_PROFILES_ROOT_PATH = '/opt/openclaw-data/config/auth-profiles.json';
+const CODEX_OAUTH_SIDECAR_DIR = '/opt/openclaw-data/config/credentials/auth-profiles';
 
 function writeMirroredAuthProfiles(authDoc, { backup = false } = {}) {
  for (const target of [AUTH_PROFILES_PATH, AUTH_PROFILES_ROOT_PATH]) {
@@ -2924,6 +2925,37 @@ function isUsableCodexOAuthProfile(profile) {
    || (profile.oauthRef && typeof profile.oauthRef === 'object' && profile.oauthRef.source)
   )
  );
+}
+
+function getCodexOAuthRef(profile) {
+ const ref = profile?.oauthRef;
+ if (!ref || typeof ref !== 'object') return null;
+ if (ref.source !== 'openclaw-credentials' || ref.provider !== 'openai-codex') return null;
+ if (typeof ref.id !== 'string' || !/^[a-f0-9]{32}$/.test(ref.id)) return null;
+ return ref;
+}
+
+function writeCodexOAuthSidecar(profileId, profile) {
+ const ref = getCodexOAuthRef(profile);
+ if (!ref || !profile?.access) return false;
+ const sidecar = {
+  version: 1,
+  profileId,
+  provider: 'openai-codex',
+  access: profile.access,
+  ...(profile.refresh ? { refresh: profile.refresh } : {}),
+  ...(profile.idToken ? { idToken: profile.idToken } : {}),
+ };
+ try {
+  mkdirSync(CODEX_OAUTH_SIDECAR_DIR, { recursive: true });
+  const sidecarPath = path.join(CODEX_OAUTH_SIDECAR_DIR, `${ref.id}.json`);
+  writeJsonFileIfChanged(sidecarPath, sidecar);
+  try { execSync(`chown 1000:1000 ${sidecarPath} 2>/dev/null; chmod 600 ${sidecarPath} 2>/dev/null`, { timeout: 3000 }); } catch {}
+  return true;
+ } catch (err) {
+  console.warn(`[bridge] Failed to write Codex OAuth sidecar for ${profileId}: ${err.message}`);
+  return false;
+ }
 }
 
 function normalizeLocalProviderModelName(model) {
@@ -8800,15 +8832,21 @@ const _syncWarnings = [];
  // Write Codex OAuth profile if included in the same request (avoids race with container restart)
  if (openaiCodexAuthProfile?.access) {
  const codexId = openaiCodexAuthProfile.id || 'openai-codex:default';
+ const existingCodexProfile = auth.profiles[codexId]
+  || auth.profiles[auth.lastGood?.['openai-codex']]
+  || Object.values(auth.profiles).find((profile) => profile?.provider === 'openai-codex' && getCodexOAuthRef(profile));
+ const oauthRef = getCodexOAuthRef(existingCodexProfile);
  auth.profiles[codexId] = {
   type: 'oauth',
   provider: 'openai-codex',
   access: openaiCodexAuthProfile.access,
   refresh: openaiCodexAuthProfile.refresh,
   expires: openaiCodexAuthProfile.expires,
+  ...(oauthRef ? { oauthRef } : {}),
   ...(openaiCodexAuthProfile.accountId ? { accountId: openaiCodexAuthProfile.accountId } : {}),
   ...(openaiCodexAuthProfile.email ? { email: openaiCodexAuthProfile.email } : {}),
  };
+ if (oauthRef) writeCodexOAuthSidecar(codexId, auth.profiles[codexId]);
  auth.lastGood['openai-codex'] = codexId;
  console.log(`[bridge] Included Codex OAuth profile: ${codexId}`);
  }
@@ -10243,6 +10281,19 @@ app.put('/config/auth-profiles', (req, res) => {
  try {
  const data = req.body;
  if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
+ let existing = null;
+ try { existing = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8')); } catch {}
+ if (data.profiles && typeof data.profiles === 'object') {
+  for (const [profileId, profile] of Object.entries(data.profiles)) {
+   if (!profile || typeof profile !== 'object' || profile.provider !== 'openai-codex' || !profile.access) continue;
+   const existingProfile = existing?.profiles?.[profileId]
+    || existing?.profiles?.[existing?.lastGood?.['openai-codex']]
+    || Object.values(existing?.profiles || {}).find((candidate) => candidate?.provider === 'openai-codex' && getCodexOAuthRef(candidate));
+   const oauthRef = getCodexOAuthRef(profile) || getCodexOAuthRef(existingProfile);
+   if (oauthRef && !getCodexOAuthRef(profile)) profile.oauthRef = oauthRef;
+   if (oauthRef) writeCodexOAuthSidecar(profileId, profile);
+  }
+ }
  writeMirroredAuthProfiles(data, { backup: true });
  // Restart OpenClaw gateway to pick up changes
  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
