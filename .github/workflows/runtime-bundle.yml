@@ -26,8 +26,8 @@ jobs:
 
       - name: Download Trooper server source
         env:
-          RAW_Trooper_READ_TOKEN: ${{ secrets.Trooper_READ_TOKEN }}
-          RAW_Trooper_DISPATCH_TOKEN: ${{ secrets.Trooper_DISPATCH_TOKEN }}
+          RAW_CRABSHQ_READ_TOKEN: ${{ secrets.CRABSHQ_READ_TOKEN }}
+          RAW_CRABSHQ_DISPATCH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
         run: |
           try_token() {
             local name="$1"
@@ -53,9 +53,9 @@ jobs:
 
           GH_TOKEN=''
           TOKEN_SOURCE=''
-          if ! try_token "Trooper_READ_TOKEN" "${RAW_Trooper_READ_TOKEN:-}" && \
-             ! try_token "Trooper_DISPATCH_TOKEN" "${RAW_Trooper_DISPATCH_TOKEN:-}"; then
-            echo "::error::No configured Trooper token can read ${Trooper_REPO}. Give Trooper_DISPATCH_TOKEN or Trooper_READ_TOKEN Contents: Read access to the private repo."
+          if ! try_token "CRABSHQ_READ_TOKEN" "${RAW_CRABSHQ_READ_TOKEN:-}" && \
+             ! try_token "CRABSHQ_DISPATCH_TOKEN" "${RAW_CRABSHQ_DISPATCH_TOKEN:-}"; then
+            echo "::error::No configured Trooper token can read ${Trooper_REPO}. Give CRABSHQ_DISPATCH_TOKEN or CRABSHQ_READ_TOKEN Contents: Read access to the private repo."
             exit 1
           fi
 

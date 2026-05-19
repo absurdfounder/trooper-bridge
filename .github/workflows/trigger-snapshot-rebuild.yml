@@ -7,7 +7,7 @@ name: Trigger Snapshot Rebuild
 # Phase 3 / Workstream 1 of CRABBOX_FLEET_AUTOMATION_PLAN.
 #
 # Required secret in this repo:
-#   Trooper_DISPATCH_TOKEN — fine-grained PAT with actions:write on
+#   CRABSHQ_DISPATCH_TOKEN — fine-grained PAT with actions:write on
 #   absurdfounder/Trooper. Pattern mirrors the existing
 #   OPENCLAWBRIDGE_DISPATCH_TOKEN flow on the trooper side.
 
@@ -55,13 +55,13 @@ jobs:
 
       - name: Fire repository_dispatch on trooper
         env:
-          RAW_GH_TOKEN: ${{ secrets.Trooper_DISPATCH_TOKEN }}
+          RAW_GH_TOKEN: ${{ secrets.CRABSHQ_DISPATCH_TOKEN }}
           BRIDGE_SHA: ${{ steps.sha.outputs.sha }}
           TRIGGER_EVENT: ${{ github.event_name }}
         run: |
           GH_TOKEN="$(printf '%s' "${RAW_GH_TOKEN:-}" | tr -d '\r\n[:space:]')"
           if [ -z "$GH_TOKEN" ]; then
-            echo "::warning::Trooper_DISPATCH_TOKEN not set — skipping dispatch"
+            echo "::warning::CRABSHQ_DISPATCH_TOKEN not set — skipping dispatch"
             exit 0
           fi
           curl -fsSL -X POST \
