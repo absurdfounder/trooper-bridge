@@ -7681,13 +7681,25 @@ app.post('/skills/:slug/install', async (req, res) => {
 
 	  let materialized = null;
 	  if (cliError) {
-	   const availableSkills = extractAvailableSkillsFromCliOutput(cliError);
-	   return res.status(502).json({
-	    error: `skills.sh install failed: ${cliError}`,
-	    cliError,
-	    availableSkills,
-	    runtimeReady: false,
+	   materialized = await materializeSkillForRuntime({
+	    slug: resolvedSlug,
+	    sourceRepo,
+	    skillId: resolvedSkillId,
+	    sourcePath,
+	    content: req.body?.content,
+	    files: req.body?.files,
 	   });
+	   if (!materialized?.ok) {
+	    const availableSkills = extractAvailableSkillsFromCliOutput(cliError);
+	    return res.status(502).json({
+	     error: `skills.sh install failed: ${cliError}`,
+	     cliError,
+	     availableSkills,
+	     materialized,
+	     runtimeReady: false,
+	    });
+	   }
+	   console.warn(`⚠️ skills.sh install failed for "${slug}", but direct GitHub skill materialization succeeded.`);
 	  }
 	  if (runtimeSnapshot?.files && Object.keys(runtimeSnapshot.files).length > 0) {
 	   materialized = await materializeSkillForRuntime({
@@ -7731,8 +7743,12 @@ app.post('/skills/:slug/install', async (req, res) => {
 	   materialized,
 	   files: effectiveRuntimeFiles,
 	   runtimeReady: Object.keys(effectiveRuntimeFiles).length > 0,
+	   cliFallback: Boolean(cliError),
+	   cliError: cliError || null,
 	   warning: Object.keys(effectiveRuntimeFiles).length === 0
 	    ? 'skills.sh install completed but no runtime files were discovered afterward'
+	    : cliError
+	     ? 'skills.sh did not find this nested skill, so Trooper installed the GitHub SKILL.md directly into the OpenClaw runtime.'
 	    : null,
 	  });
 	 } catch (err) {
