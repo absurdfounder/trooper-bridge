@@ -46,7 +46,7 @@ import { eq, desc } from 'drizzle-orm';
 import { registerApiRoutes } from './lib/api-routes.mjs';
 import { recordTaskStart, updateTaskStatus, getTask as getCfTask, getTaskPayload as getCfTaskPayload, notifyCallback, markInFlight, clearInFlight, isInFlight } from './lib/cf-tracker.mjs';
 import { createSSESender } from './lib/sse-stream.mjs';
-import { ensureDefaultSkillPack } from './lib/default-skill-pack.mjs';
+import { ensureDefaultSkillPack, PROVISIONED_DEFAULT_SKILL_PACK } from './lib/default-skill-pack.mjs';
 import {
   EMPTY_KNOWLEDGE_MD,
   EMPTY_MEMORIES_MD,
@@ -3061,12 +3061,46 @@ function normalizeLocalProviderConfig(providerName, providerConfig, selectedMode
  return next;
 }
 
-function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/workspace') {
+const MAIN_WORKSPACE_PATH = '/opt/openclaw-data/workspace';
+const AGENT_WORKSPACE_ROOT = '/opt/openclaw-data/config/agents';
+const PROVISIONED_SKILL_SLUGS = new Set(
+  PROVISIONED_DEFAULT_SKILL_PACK
+    .map((skill) => String(skill?.slug || '').trim())
+    .filter(Boolean)
+);
+
+function isMainWorkspacePath(workspacePath = '') {
+  return path.resolve(String(workspacePath || '')) === MAIN_WORKSPACE_PATH;
+}
+
+function isSpecialistWorkspacePath(workspacePath = '') {
+  const normalized = path.resolve(String(workspacePath || ''));
+  return normalized.startsWith(`${AGENT_WORKSPACE_ROOT}/`) && normalized.endsWith('/workspace');
+}
+
+function removeProvisionedSkillPackFromWorkspace(skillRoot) {
+  for (const slug of PROVISIONED_SKILL_SLUGS) {
+    const target = path.join(skillRoot, slug);
+    try {
+      if (existsSync(target)) rmSync(target, { recursive: true, force: true });
+    } catch (err) {
+      console.warn(`[workspace] Failed to remove global skill "${slug}" from agent workspace: ${err.message}`);
+    }
+  }
+}
+
+function ensureWorkspaceBootstrapFiles(workspacePath = MAIN_WORKSPACE_PATH, options = {}) {
  try {
+  const includeProvisionedSkillPack = options.includeProvisionedSkillPack ?? isMainWorkspacePath(workspacePath);
   mkdirSync(`${workspacePath}/memory`, { recursive: true });
   mkdirSync(`${workspacePath}/skills`, { recursive: true });
   mkdirSync(`${workspacePath}/Channels`, { recursive: true });
-  ensureDefaultSkillPack(`${workspacePath}/skills`);
+  const skillsRoot = `${workspacePath}/skills`;
+  if (includeProvisionedSkillPack) {
+   ensureDefaultSkillPack(skillsRoot);
+  } else if (isSpecialistWorkspacePath(workspacePath)) {
+   removeProvisionedSkillPackFromWorkspace(skillsRoot);
+  }
   const placeholders = {
    'MEMORIES.md': EMPTY_MEMORIES_MD,
    'KNOWLEDGE.md': EMPTY_KNOWLEDGE_MD,
@@ -3076,9 +3110,10 @@ function ensureWorkspaceBootstrapFiles(workspacePath = '/opt/openclaw-data/works
    if (!existsSync(target)) writeFileSync(target, content);
   }
   const skillsReadme = `${workspacePath}/skills/README.md`;
-  if (!existsSync(skillsReadme)) {
-   writeFileSync(skillsReadme, '# Skills\n\n_No workspace skills installed yet._\n');
-  }
+  const skillsReadmeContent = includeProvisionedSkillPack
+   ? '# Skills\n\n_Global OpenClaw runtime skills are provisioned here for the org workspace._\n'
+   : '# Skills\n\n_Runtime skills are installed globally for the org. This folder is only for agent-local custom skills when explicitly created.\n\nUse SKILLS.md and TOOLS.md in this workspace for role-specific guidance on which global skills, plugins, and CLIs to reach for.\n';
+  writeTextFileIfChanged(skillsReadme, skillsReadmeContent);
   try { execSync(`chown -R 1000:1000 ${workspacePath}/memory ${workspacePath}/skills ${workspacePath}/Channels ${workspacePath}/MEMORIES.md ${workspacePath}/KNOWLEDGE.md 2>/dev/null`, { timeout: 3000 }); } catch {}
  } catch (err) {
   console.warn(`[workspace] Failed to ensure bootstrap files for ${workspacePath}: ${err.message}`);
@@ -3096,13 +3131,13 @@ function ensureManagedDefaultSkillPack(skillsRoot = '/home/node/.openclaw/.agent
 }
 
 function ensureAllAgentWorkspaceBootstrapFiles() {
- ensureWorkspaceBootstrapFiles('/opt/openclaw-data/workspace');
+ ensureWorkspaceBootstrapFiles(MAIN_WORKSPACE_PATH, { includeProvisionedSkillPack: true });
  ensureManagedDefaultSkillPack('/home/node/.openclaw/.agents/skills');
  try {
   const agentsDir = '/opt/openclaw-data/config/agents';
   const agents = readdirSync(agentsDir).filter(d => d.startsWith('spc-'));
   for (const agent of agents) {
-   ensureWorkspaceBootstrapFiles(`${agentsDir}/${agent}/workspace`);
+   ensureWorkspaceBootstrapFiles(`${agentsDir}/${agent}/workspace`, { includeProvisionedSkillPack: false });
   }
  } catch {}
 }
