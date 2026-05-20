@@ -307,9 +307,9 @@ function getSslipDomain() {
 function getVNCLiveViewUrl() {
  const orgId = process.env.ORG_ID || '';
  if (!orgId) return null;
- // Prefer trooper.so (CF-proxied, reliable SSL) over sslip.io (LE rate limits)
+ // Prefer crabhq.com (CF-proxied, reliable SSL) over sslip.io (LE rate limits)
  const orgShort = orgId.toLowerCase().substring(0, 12);
- const domain = `org-${orgShort}.trooper.so`;
+ const domain = `org-${orgShort}.crabhq.com`;
  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
 }
 

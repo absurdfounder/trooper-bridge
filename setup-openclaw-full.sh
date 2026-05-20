@@ -382,9 +382,9 @@ if [ -z "$SERVER_PUBLIC_IP" ]; then
 fi
 
 # Derive hostname from ORG_ID (lowercase, first 12 chars)
-# DNS is created by provision.js (Render-side) — VPS always uses trooper.so domain
+# DNS is created by provision.js (Render-side) — VPS always uses crabhq.com domain
 ORG_SHORT=$(echo "${ORG_ID}" | tr '[:upper:]' '[:lower:]' | head -c 12)
-HTTPS_DOMAIN="org-${ORG_SHORT}.trooper.so"
+HTTPS_DOMAIN="org-${ORG_SHORT}.crabhq.com"
 echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS created by provision.js)"
 
 if [ -n "$SERVER_PUBLIC_IP" ]; then
@@ -395,11 +395,11 @@ if [ -n "$SERVER_PUBLIC_IP" ]; then
  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
    -keyout /etc/caddy/certs/cf-origin.key \
    -out /etc/caddy/certs/cf-origin.crt \
-   -subj "/CN=*.trooper.so" 2>/dev/null
+   -subj "/CN=*.crabhq.com" 2>/dev/null
  chown caddy:caddy /etc/caddy/certs/cf-origin.key /etc/caddy/certs/cf-origin.crt
  chmod 600 /etc/caddy/certs/cf-origin.key
 
- # Caddyfile: CF-proxied trooper.so domain (primary) + sslip.io fallback
+ # Caddyfile: CF-proxied crabhq.com domain (primary) + sslip.io fallback
  cat > /etc/caddy/Caddyfile << CADDYFILE
 # Primary: CF-proxied domain (self-signed cert — CF terminates external SSL)
 ${HTTPS_DOMAIN} {

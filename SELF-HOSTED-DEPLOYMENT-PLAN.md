@@ -71,7 +71,7 @@ CORS is enabled broadly. When the frontend connects directly, we need explicit o
 
 ```js
 const ALLOWED_ORIGINS = [
-  /\.trooper\.com$/,           // org-xxx.trooper.so (same-origin, but just in case)
+  /\.crabhq\.com$/,           // org-xxx.crabhq.com (same-origin, but just in case)
   /\.netlify\.app$/,          // app.trooper.so (frontend)
   /^https?:\/\/localhost/,    // dev
   /^https?:\/\/127\.0\.0\.1/, // dev
@@ -296,7 +296,7 @@ The WebSocket server (`lib/ws-server.mjs`) already:
 - Handles chat messages, agent responses, typing indicators
 - Streams agent execution in real-time
 
-The frontend just needs to point its WebSocket connection to `wss://org-xxx.trooper.so/ws` instead of the Render WebSocket.
+The frontend just needs to point its WebSocket connection to `wss://org-xxx.crabhq.com/ws` instead of the Render WebSocket.
 
 ---
 
