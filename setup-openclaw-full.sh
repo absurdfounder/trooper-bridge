@@ -2665,7 +2665,11 @@ else
   if [ -n "${TROOPER_RUNTIME_TARBALL_URL:-}" ] && [ "${TROOPER_RUNTIME_TARBALL_URL}" != "{{TROOPER_RUNTIME_TARBALL_URL}}" ]; then
     dlog "Downloading Trooper org runtime bundle..."
     echo "[setup] Runtime bundle URL: ${TROOPER_RUNTIME_TARBALL_URL}"
-    curl -fsSL "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
+    if [[ "$TROOPER_RUNTIME_TARBALL_URL" == https://api.github.com/repos/*/releases/assets/* ]]; then
+      curl -fsSL -H "Accept: application/octet-stream" "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
+    else
+      curl -fsSL "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
+    fi
     tar -xzf /tmp/trooper-org-runtime.tar.gz -C /opt/trooper-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
     dlog "Trooper org runtime installed from bundle"
   elif git clone --depth 1 https://github.com/absurdfounder/Trooper.git /tmp/trooper-clone 2>/dev/null; then
