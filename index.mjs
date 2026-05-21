@@ -2967,6 +2967,90 @@ function getCodexOAuthRef(profile) {
  return ref;
 }
 
+function parseAuthProfileExpiryMs(expires) {
+ if (expires === undefined || expires === null || expires === '') return null;
+ if (typeof expires === 'number' && Number.isFinite(expires)) {
+  return expires < 10_000_000_000 ? expires * 1000 : expires;
+ }
+ const text = String(expires || '').trim();
+ if (!text) return null;
+ if (/^\d+$/.test(text)) {
+  const numeric = Number(text);
+  return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+ }
+ const parsed = Date.parse(text);
+ return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getStoredCodexOAuthProfileStatus() {
+ try {
+  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  const profiles = Object.entries(auth.profiles || {})
+   .filter(([, profile]) => isUsableCodexOAuthProfile(profile));
+  if (!profiles.length) return { usable: false, fresh: false, reason: 'missing' };
+  const now = Date.now();
+  const staleWindowMs = 5 * 60 * 1000;
+  for (const [id, profile] of profiles) {
+   const expiresMs = parseAuthProfileExpiryMs(profile.expires);
+   if (expiresMs === null || expiresMs - now > staleWindowMs) {
+    return { usable: true, fresh: true, id, expiresMs };
+   }
+  }
+  return {
+   usable: true,
+   fresh: false,
+   reason: 'expired_or_near_expiry',
+   id: profiles[0]?.[0] || null,
+   expiresMs: parseAuthProfileExpiryMs(profiles[0]?.[1]?.expires),
+  };
+ } catch {
+  return { usable: false, fresh: false, reason: 'unreadable' };
+ }
+}
+
+function hasRuntimeProviderCredential(provider) {
+ if (provider === 'openai-codex') return getStoredCodexOAuthProfileStatus().fresh;
+ const envNames = {
+  openai: ['OPENAI_API_KEY'],
+  anthropic: ['ANTHROPIC_API_KEY'],
+  gemini: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  google: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+  openrouter: ['OPENROUTER_API_KEY'],
+  mistral: ['MISTRAL_API_KEY'],
+ };
+ if ((envNames[provider] || []).some((name) => readEnvValue(name))) return true;
+ try {
+  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
+  const authProvider = provider === 'gemini' ? 'google' : provider;
+  const preferredId = auth.lastGood?.[authProvider];
+  const preferred = preferredId ? auth.profiles?.[preferredId] : null;
+  const candidate = preferred || Object.values(auth.profiles || {}).find((profile) => profile?.provider === authProvider);
+  return Boolean(candidate?.key || candidate?.token || candidate?.access);
+ } catch {
+  return false;
+ }
+}
+
+function pickNonCodexRuntimeFallbackModel() {
+ if (hasRuntimeProviderCredential('openai')) return 'openai/gpt-5.2';
+ if (hasRuntimeProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
+ if (hasRuntimeProviderCredential('gemini') || hasRuntimeProviderCredential('google')) return 'google/gemini-2.5-pro';
+ if (hasRuntimeProviderCredential('openrouter')) return 'openrouter/openai/gpt-5-mini';
+ return null;
+}
+
+function resolveRuntimeCodexRefreshBypass(requestedModel) {
+ const normalized = requestedModel ? normalizeGatewayModelId(requestedModel) : normalizeGatewayModelId(readConfiguredDefaultModelId() || '');
+ if (normalized !== 'openai/gpt-5.4') return null;
+ const codexStatus = getStoredCodexOAuthProfileStatus();
+ if (!codexStatus.usable || codexStatus.fresh) return null;
+ return {
+  reason: codexStatus.reason || 'stale_codex_oauth',
+  fallbackModel: pickNonCodexRuntimeFallbackModel(),
+  expiresMs: codexStatus.expiresMs || null,
+ };
+}
+
 function writeCodexOAuthSidecar(profileId, profile) {
  const ref = getCodexOAuthRef(profile);
  if (!ref || !profile?.access) return false;
@@ -3862,10 +3946,19 @@ async function handleIncomingTask(req, res) {
  const folderRule = buildChannelWorkspaceOrganizationRule(nonStreamChannelFolder);
  nonStreamSystemPrompt = nonStreamSystemPrompt ? `${nonStreamSystemPrompt}\n\n${folderRule}` : folderRule;
  }
+ const nonStreamModelSelection = resolveGatewayModelSelection(model);
+ const nonStreamCodexBypass = resolveRuntimeCodexRefreshBypass(nonStreamModelSelection.explicitModel || nonStreamModelSelection.effectiveModel);
+ if (nonStreamCodexBypass && !nonStreamCodexBypass.fallbackModel) {
+  throw new Error('Codex / ChatGPT sign-in needs to be reconnected before GPT-5.4 can run. No non-Codex fallback provider is configured.');
+ }
+ const nonStreamModel = nonStreamCodexBypass?.fallbackModel || nonStreamModelSelection.explicitModel || undefined;
+ if (nonStreamCodexBypass?.fallbackModel) {
+  console.warn(`[${id}] Bypassing stale Codex OAuth profile (${nonStreamCodexBypass.reason}); using ${nonStreamCodexBypass.fallbackModel}`);
+ }
  const runOpts = {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
- model: resolveExplicitGatewayModel(model) || undefined,
+ model: nonStreamModel,
  extraSystemPrompt: nonStreamSystemPrompt,
  timeoutMs: isTaskWork ? 600000 : 180000,
  };
@@ -4084,6 +4177,30 @@ const emitViewportScreenshotFrame = ({
 	 const isTaskWork = !!(context?.taskId);
 	 const inactivityMs = isTaskWork ? 600000 : 180000;
 	 ({ explicitModel: streamingExplicitModel, effectiveModel: streamingEffectiveModel } = resolveGatewayModelSelection(model));
+	 const codexBypass = resolveRuntimeCodexRefreshBypass(streamingExplicitModel || streamingEffectiveModel);
+	 if (codexBypass?.fallbackModel) {
+	  streamingExplicitModel = codexBypass.fallbackModel;
+	  streamingEffectiveModel = codexBypass.fallbackModel;
+	  console.warn(`[${id}] Bypassing stale Codex OAuth profile (${codexBypass.reason}); using ${codexBypass.fallbackModel}`);
+	  sendSSE('model_fallback', {
+	   decision: 'stale_codex_oauth_bypass',
+	   from: 'openai/gpt-5.4',
+	   to: codexBypass.fallbackModel,
+	   reason: codexBypass.reason,
+	   expiresMs: codexBypass.expiresMs || undefined,
+	  });
+	 } else if (codexBypass) {
+	  const message = 'Codex / ChatGPT sign-in needs to be reconnected before GPT-5.4 can run. No non-Codex fallback provider is configured.';
+	  console.warn(`[${id}] ${message}`);
+	  sendSSE('error', {
+	   message,
+	   requestId: id,
+	   provider: 'openai-codex',
+	   model: 'openai/gpt-5.4',
+	   reason: codexBypass.reason,
+	  });
+	  return;
+	 }
 
 	 let response, toolLog, gatewayRunId, resolvedSessionKey;
 	 let abortedForPlanMode = false;
@@ -8734,17 +8851,12 @@ function normalizeModelId(model) {
  return provider ? `${provider}/${bare}` : bare;
 }
 
-const hasStoredCodexOAuthProfile = () => {
- try {
-  const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
-  return Object.values(auth.profiles || {}).some((profile) => isUsableCodexOAuthProfile(profile));
- } catch {
-  return false;
- }
+const hasFreshStoredCodexOAuthProfile = () => {
+ return getStoredCodexOAuthProfileStatus().fresh;
 };
 
 const hasConfiguredProviderCredential = (provider) => {
- if (provider === 'openai-codex') return hasStoredCodexOAuthProfile();
+ if (provider === 'openai-codex') return hasFreshStoredCodexOAuthProfile();
  if (readProviderEnvValue(envContent, provider)) return true;
  try {
   const auth = JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'));
@@ -8756,17 +8868,18 @@ const hasConfiguredProviderCredential = (provider) => {
 };
 
 const pickCredentialBackedDefaultModel = () => {
- if (hasConfiguredProviderCredential('openai-codex')) return 'openai/gpt-5.4';
- if (hasConfiguredProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
  if (hasConfiguredProviderCredential('openai')) return 'openai/gpt-5.2';
+ if (hasConfiguredProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
  if (hasConfiguredProviderCredential('gemini')) return 'google/gemini-2.5-pro';
  if (hasConfiguredProviderCredential('openrouter')) return 'openrouter/openai/gpt-5-mini';
+ if (hasConfiguredProviderCredential('openai-codex')) return 'openai/gpt-5.4';
  return null;
 };
 
 function ensureCodexRuntimeModelMapping(config) {
  const primary = normalizeModelId(config?.agents?.defaults?.model?.primary || '');
  if (primary !== 'openai/gpt-5.4' || !hasConfiguredProviderCredential('openai-codex')) return false;
+ if (hasConfiguredProviderCredential('openai')) return false;
  if (!config.agents) config.agents = {};
  if (!config.agents.defaults) config.agents.defaults = {};
  if (!config.agents.defaults.models || typeof config.agents.defaults.models !== 'object') {
@@ -8877,7 +8990,7 @@ const _syncWarnings = [];
        console.warn(`[bridge] ${msg}`);
        _syncWarnings.push(msg);
      }
-   } else if (normalizedModel?.startsWith?.('openai-codex/') && !openaiCodexAuthProfile?.access && !hasStoredCodexOAuthProfile()) {
+   } else if (normalizedModel?.startsWith?.('openai-codex/') && !openaiCodexAuthProfile?.access && !hasFreshStoredCodexOAuthProfile()) {
      const msg = `Skipped default model update to ${normalizedModel}: Codex OAuth profile is missing`;
      console.warn(`[bridge] ${msg}`);
      _syncWarnings.push(msg);
@@ -9014,7 +9127,7 @@ const _syncWarnings = [];
  { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
  { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (OR)', contextWindow: 1000000 },
  ] }},
- 'openai-codex': { key: (openaiCodexAuthProfile?.access || hasStoredCodexOAuthProfile()) ? 'oauth' : undefined, config: buildOpenAiCodexProviderConfig() },
+ 'openai-codex': { key: (openaiCodexAuthProfile?.access || hasFreshStoredCodexOAuthProfile()) ? 'oauth' : undefined, config: buildOpenAiCodexProviderConfig() },
  mistral: { key: mistralKey, config: {
  baseUrl: 'https://api.mistral.ai/v1', api: 'openai-completions',
  models: [
