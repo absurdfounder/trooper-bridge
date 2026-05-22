@@ -526,6 +526,15 @@ function readOpenClawConfig() {
  }
 }
 
+function normalizeOpenClawAgentsList(config) {
+ if (!Array.isArray(config?.agents?.list)) return config;
+ config.agents.list = config.agents.list
+  .filter((entry) => entry && typeof entry === 'object' && String(entry.id || '').trim())
+  .map((entry) => ({ ...entry, id: String(entry.id).trim() }))
+  .sort((left, right) => String(left.id).localeCompare(String(right.id)));
+ return config;
+}
+
 function redactDiagnosticValue(value) {
  if (typeof value === 'string') return redactDiagnosticText(value);
  if (Array.isArray(value)) return value.map(redactDiagnosticValue);
@@ -577,6 +586,7 @@ function readWorkspaceTextFile(fileName, maxChars = 50000) {
 }
 
 function writeOpenClawConfig(config) {
+ normalizeOpenClawAgentsList(config);
  const result = writeJsonFileIfChanged(OPENCLAW_CONFIG_PATH, config);
  if (result.written) {
   try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
@@ -772,6 +782,12 @@ class OpenClawGateway {
  this._lastAuthRepairMs = 0;
  this.lastAuthError = null;
  this.lastAuthAt = null;
+ this._historyInflight = new Map();
+ this._historyCache = new Map();
+ this._historyActive = 0;
+ this._historyQueue = [];
+ this._historyMaxConcurrent = Math.max(1, Number(process.env.OPENCLAW_HISTORY_MAX_CONCURRENT || 3));
+ this._historyCacheTtlMs = Math.max(250, Number(process.env.OPENCLAW_HISTORY_CACHE_TTL_MS || 2000));
  this.connect();
  }
 
@@ -808,6 +824,9 @@ class OpenClawGateway {
  }
  this._pendingRequests.clear();
  this._eventListeners.clear();
+ this._historyInflight.clear();
+ this._historyCache.clear();
+ this._historyQueue.splice(0);
  if (this.ws) {
    try {
     this.ws.removeAllListeners('close');
@@ -916,6 +935,9 @@ class OpenClawGateway {
  }
  this._pendingRequests.clear();
  this._eventListeners.clear();
+ this._historyInflight.clear();
+ this._historyCache.clear();
+ this._historyQueue.splice(0);
  this._reconnectTimer = setTimeout(() => this.connect(), this._reconnectDelay);
  this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, 30000);
  });
@@ -1353,9 +1375,46 @@ class OpenClawGateway {
 
 
  // Fetch session history from gateway — returns tool calls and messages
+ _scheduleHistoryFetch(task) {
+  return new Promise((resolve, reject) => {
+   const run = async () => {
+    this._historyActive++;
+    try {
+     resolve(await task());
+    } catch (err) {
+     reject(err);
+    } finally {
+     this._historyActive = Math.max(0, this._historyActive - 1);
+     const next = this._historyQueue.shift();
+     if (next) next();
+    }
+   };
+   if (this._historyActive < this._historyMaxConcurrent) {
+    run();
+    return;
+   }
+   if (this._historyQueue.length >= 50) {
+    reject(new Error('History fetch backpressure'));
+    return;
+   }
+   this._historyQueue.push(run);
+  });
+ }
+
  async fetchSessionHistory(sessionKey, limit = 50, { timeoutMs = 10000 } = {}) {
   if (!this.connected) return null;
-  const id = randomUUID();
+  const normalizedSessionKey = String(sessionKey || '').trim();
+  if (!normalizedSessionKey) return null;
+  const normalizedLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 50;
+  const cacheKey = `${normalizedSessionKey}\0${normalizedLimit}`;
+  const cached = this._historyCache.get(cacheKey);
+  if (cached && Date.now() - cached.at <= this._historyCacheTtlMs) return cached.messages;
+  const existing = this._historyInflight.get(cacheKey);
+  if (existing) return existing;
+  let id = null;
+  const request = this._scheduleHistoryFetch(async () => {
+   if (!this.connected) return null;
+   id = randomUUID();
   try {
    const result = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -1368,15 +1427,31 @@ class OpenClawGateway {
     });
     this.ws.send(JSON.stringify({
      type: 'req', id, method: 'chat.history',
-     params: { sessionKey, limit },
+     params: { sessionKey: normalizedSessionKey, limit: normalizedLimit },
     }));
    });
-   return result?.messages || [];
+   const messages = result?.messages || [];
+   if (Array.isArray(messages)) this._historyCache.set(cacheKey, { at: Date.now(), messages });
+   return messages;
   } catch (err) {
    console.error('[OpenClaw] fetchSessionHistory error:', err.message);
    return null;
   } finally {
-   this._pendingRequests.delete(id);
+   if (id) this._pendingRequests.delete(id);
+  }
+  });
+  this._historyInflight.set(cacheKey, request);
+  try {
+   return await request;
+  } finally {
+   this._historyInflight.delete(cacheKey);
+   const maxCacheEntries = 200;
+   if (this._historyCache.size > maxCacheEntries) {
+    const staleEntries = [...this._historyCache.entries()]
+     .sort((left, right) => left[1].at - right[1].at)
+     .slice(0, this._historyCache.size - maxCacheEntries);
+    for (const [key] of staleEntries) this._historyCache.delete(key);
+   }
   }
  }
 
