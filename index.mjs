@@ -8065,10 +8065,13 @@ app.post('/gateway/restart', (req, res) => {
 
 app.get('/gateway/status', (req, res) => {
  try {
- const status = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 10000 }).toString().trim();
+ const status = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 2500 }).toString().trim();
  const [state, running, restarts] = status.split(':');
  let logs = '';
- try { logs = execSync('docker logs --tail 20 openclaw-openclaw-gateway-1 2>&1', { timeout: 10000 }).toString(); } catch {}
+ const includeLogs = req.query.logs === '1' || req.query.logs === 'true';
+ if (includeLogs) {
+  try { logs = execSync('docker logs --tail 20 openclaw-openclaw-gateway-1 2>&1', { timeout: 2500 }).toString(); } catch {}
+ }
  res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, websocketConnected: gateway.isReady, connected: gateway.isReady, paired: gateway.isReady, authError: gateway.lastAuthError, authAt: gateway.lastAuthAt, recentLogs: logs });
  } catch (err) {
  res.status(500).json({ error: 'Failed to get gateway status', details: err.message });
