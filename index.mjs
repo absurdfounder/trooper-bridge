@@ -518,6 +518,116 @@ function cloneJson(value) {
  return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {};
 }
 
+function finiteUsageNumber(value) {
+ const numeric = Number(value);
+ return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+function roundUsageCost(value) {
+ const numeric = finiteUsageNumber(value);
+ return numeric > 0 ? Math.round(numeric * 10000) / 10000 : 0;
+}
+
+function firstPositiveUsageNumber(...values) {
+ for (const value of values) {
+  const numeric = finiteUsageNumber(value);
+  if (numeric > 0) return Math.round(numeric);
+ }
+ return 0;
+}
+
+function usageCostFromPayload(usage = {}) {
+ return roundUsageCost(
+  usage?.costUsd
+  ?? usage?.cost_usd
+  ?? usage?.totalCost
+  ?? usage?.total_cost
+  ?? usage?.cost?.total
+  ?? usage?.cost?.totalUsd
+  ?? usage?.cost?.total_usd
+ );
+}
+
+function normalizeHistoryUsageMessage(entry = {}) {
+ const message = entry?.message && typeof entry.message === 'object' ? entry.message : entry;
+ const usage = message?.usage && typeof message.usage === 'object' ? message.usage : null;
+ if (!usage) return null;
+ const role = String(message.role || entry.role || '').toLowerCase();
+ if (role && role !== 'assistant') return null;
+ const inputTokens = firstPositiveUsageNumber(
+  usage.inputTokens,
+  usage.input_tokens,
+  usage.promptTokens,
+  usage.prompt_tokens,
+  usage.input,
+ );
+ const outputTokens = firstPositiveUsageNumber(
+  usage.outputTokens,
+  usage.output_tokens,
+  usage.completionTokens,
+  usage.completion_tokens,
+  usage.output,
+ );
+ const cacheReadTokens = firstPositiveUsageNumber(usage.cacheRead, usage.cache_read, usage.cachedTokens, usage.cached_tokens);
+ const cacheWriteTokens = firstPositiveUsageNumber(usage.cacheWrite, usage.cache_write);
+ const totalTokens = firstPositiveUsageNumber(
+  usage.totalTokens,
+  usage.total_tokens,
+  usage.total,
+  inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+ );
+ const costUsd = usageCostFromPayload(usage);
+ if (!inputTokens && !outputTokens && !cacheReadTokens && !cacheWriteTokens && !totalTokens && !costUsd) return null;
+ const timestamp = entry.timestamp || message.timestamp || null;
+ return {
+  model: message.model || entry.model || null,
+  provider: message.provider || entry.provider || null,
+  inputTokens,
+  outputTokens,
+  totalTokens,
+  cacheReadTokens,
+  cacheWriteTokens,
+  costUsd,
+  source: 'session_history',
+  ...(timestamp ? { at: timestamp } : {}),
+  ...(message.responseId ? { responseId: message.responseId } : {}),
+  ...(message.stopReason ? { stopReason: message.stopReason } : {}),
+ };
+}
+
+function summarizeHistoryUsage(messages = [], { sinceMs = 0 } = {}) {
+ const rows = [];
+ const cutoff = Number.isFinite(Number(sinceMs)) ? Number(sinceMs) : 0;
+ for (const entry of Array.isArray(messages) ? messages : []) {
+  const timestamp = new Date(entry?.timestamp || entry?.message?.timestamp || 0).getTime();
+  if (cutoff > 0 && timestamp && timestamp < cutoff) continue;
+  const row = normalizeHistoryUsageMessage(entry);
+  if (row) rows.push(row);
+ }
+ if (!rows.length) return null;
+ const totals = rows.reduce((acc, row) => {
+  acc.inputTokens += row.inputTokens || 0;
+  acc.outputTokens += row.outputTokens || 0;
+  acc.totalTokens += row.totalTokens || ((row.inputTokens || 0) + (row.outputTokens || 0) + (row.cacheReadTokens || 0) + (row.cacheWriteTokens || 0));
+  acc.cacheReadTokens += row.cacheReadTokens || 0;
+  acc.cacheWriteTokens += row.cacheWriteTokens || 0;
+  acc.costUsd = roundUsageCost(acc.costUsd + (row.costUsd || 0));
+  return acc;
+ }, { inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 });
+ return {
+  input_tokens: totals.inputTokens,
+  output_tokens: totals.outputTokens,
+  total_tokens: totals.totalTokens,
+  costUsd: totals.costUsd,
+  cache_read_tokens: totals.cacheReadTokens || undefined,
+  cache_write_tokens: totals.cacheWriteTokens || undefined,
+  estimated: false,
+  source: 'session_history',
+  callCount: rows.length,
+  modelBreakdown: rows,
+ };
+}
+
 function readOpenClawConfig() {
  try {
  return JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
@@ -1453,6 +1563,21 @@ class OpenClawGateway {
     for (const [key] of staleEntries) this._historyCache.delete(key);
    }
   }
+ }
+
+ async fetchRunUsageFromHistory(sessionKey, { sinceMs = 0, limit = 250, timeoutMs = 5000, attempts = 3 } = {}) {
+  if (!sessionKey) return null;
+  const tries = Math.max(1, Math.min(5, Number(attempts) || 3));
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+   this._historyCache.delete(`${String(sessionKey || '').trim()}\0${Math.max(1, Number(limit) || 250)}`);
+   const messages = await this.fetchSessionHistory(sessionKey, limit, { timeoutMs });
+   const usage = summarizeHistoryUsage(messages, { sinceMs });
+   if (usage?.modelBreakdown?.length) return usage;
+   if (attempt < tries - 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+   }
+  }
+  return null;
  }
 
  async abortSession(sessionKey, opts = {}) {
@@ -2435,8 +2560,23 @@ const formattedToolLog = toolLog.map(t => ({
  textBefore: t.textBefore || undefined,
  }));
 
+ let runUsage = null;
+ try {
+  runUsage = await this.fetchRunUsageFromHistory(sessionKey, {
+   sinceMs: runStartedAt - 5000,
+   limit: 300,
+   timeoutMs: 5000,
+   attempts: 3,
+  });
+  if (runUsage?.modelBreakdown?.length) {
+   console.log(`[usage] Session history usage for ${sessionKey}: ${runUsage.modelBreakdown.length} provider call(s), $${runUsage.costUsd || 0}`);
+  }
+ } catch (usageErr) {
+  console.warn(`[usage] Failed to read session history usage for ${sessionKey}: ${usageErr.message}`);
+ }
+
  if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
- return { response, toolLog: formattedToolLog, runId: mainRunId || null, sessionKey };
+ return { response, toolLog: formattedToolLog, runId: mainRunId || null, sessionKey, usage: runUsage || null };
  } finally {
  if (historyPoller) clearInterval(historyPoller);
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
@@ -4279,7 +4419,7 @@ const emitViewportScreenshotFrame = ({
 	  return;
 	 }
 
-	 let response, toolLog, gatewayRunId, resolvedSessionKey;
+	 let response, toolLog, gatewayRunId, resolvedSessionKey, gatewayRunUsage;
 	 let abortedForPlanMode = false;
 	 const streamingCallback = (event, data) => {
 	 // Forward each event to SSE as it arrives
@@ -4362,7 +4502,7 @@ const emitViewportScreenshotFrame = ({
   }
  }
  };
- ({ response, toolLog, runId: gatewayRunId, sessionKey: resolvedSessionKey } = await gateway.runAgentStreaming(fullTask, {
+ ({ response, toolLog, runId: gatewayRunId, sessionKey: resolvedSessionKey, usage: gatewayRunUsage } = await gateway.runAgentStreaming(fullTask, {
  agentId, agentName: agentName || 'default', sessionKey,
  thinking: thinking || undefined,
  model: streamingExplicitModel || undefined,
@@ -4402,7 +4542,7 @@ if (endSession) {
  // Add per-tool overhead (~200 tokens per tool call for function definition + wrapping)
  const toolOverhead = toolLog.length * 200;
  const estimatedUsage = { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true };
- let finalUsage = estimatedUsage;
+ let finalUsage = gatewayRunUsage?.modelBreakdown?.length ? gatewayRunUsage : estimatedUsage;
  try {
   const usageSessionKey = resolvedSessionKey || sessionKey;
   const snapshot = usageSessionKey
@@ -4435,7 +4575,7 @@ if (endSession) {
    responseUsage.completionTokens,
    estimatedOutputTokens,
   );
-  if (actualInputTokens > 0 || actualOutputTokens > 0) {
+  if (!gatewayRunUsage?.modelBreakdown?.length && (actualInputTokens > 0 || actualOutputTokens > 0)) {
    finalUsage = {
     input_tokens: actualInputTokens,
     output_tokens: actualOutputTokens,
