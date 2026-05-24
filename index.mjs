@@ -1551,11 +1551,11 @@ class OpenClawGateway {
    if (!row) return null;
    const totalTokens = toNumber(row.totalTokens);
    const contextTokens = toNumber(row.contextTokens);
-   const percentUsed = toNumber(row.percentUsed) ?? (
-    totalTokens !== null && contextTokens
-     ? Math.min(999, Math.round((totalTokens / contextTokens) * 1000) / 10)
-     : null
-   );
+   const computedPercentUsed = totalTokens !== null && contextTokens
+    ? Math.min(999, Math.round((totalTokens / contextTokens) * 1000) / 10)
+    : null;
+   const reportedPercentUsed = toNumber(row.percentUsed);
+   const percentUsed = computedPercentUsed ?? reportedPercentUsed;
    const remainingTokens = toNumber(row.remainingTokens) ?? (
     totalTokens !== null && contextTokens
      ? Math.max(0, contextTokens - totalTokens)
@@ -1572,6 +1572,7 @@ class OpenClawGateway {
     contextTokens,
     remainingTokens,
     percentUsed,
+    reportedPercentUsed,
     modelProvider: row.modelProvider || null,
     model: row.model || null,
     responseUsage: row.responseUsage || null,
@@ -4400,6 +4401,54 @@ if (endSession) {
  const estimatedInputTokens = Math.ceil(((fullTask || '').length + toolOutputChars) / charsPerToken);
  // Add per-tool overhead (~200 tokens per tool call for function definition + wrapping)
  const toolOverhead = toolLog.length * 200;
+ const estimatedUsage = { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true };
+ let finalUsage = estimatedUsage;
+ try {
+  const usageSessionKey = resolvedSessionKey || sessionKey;
+  const snapshot = usageSessionKey
+   ? await Promise.race([
+    gateway.fetchSessionSnapshot(usageSessionKey),
+    new Promise((resolve) => setTimeout(() => resolve(null), 1500)),
+   ])
+   : null;
+  const responseUsage = snapshot?.responseUsage && typeof snapshot.responseUsage === 'object'
+   ? snapshot.responseUsage
+   : {};
+  const toUsageNumber = (...values) => {
+   for (const value of values) {
+    const next = Number(value);
+    if (Number.isFinite(next) && next > 0) return Math.round(next);
+   }
+   return 0;
+  };
+  const actualInputTokens = toUsageNumber(
+   responseUsage.input_tokens,
+   responseUsage.inputTokens,
+   responseUsage.prompt_tokens,
+   responseUsage.promptTokens,
+   snapshot?.totalTokens,
+  );
+  const actualOutputTokens = toUsageNumber(
+   responseUsage.output_tokens,
+   responseUsage.outputTokens,
+   responseUsage.completion_tokens,
+   responseUsage.completionTokens,
+   estimatedOutputTokens,
+  );
+  if (actualInputTokens > 0 || actualOutputTokens > 0) {
+   finalUsage = {
+    input_tokens: actualInputTokens,
+    output_tokens: actualOutputTokens,
+    total_tokens: actualInputTokens + actualOutputTokens,
+    estimated: false,
+    source: 'session_snapshot',
+    ...(snapshot?.contextTokens ? { context_window_tokens: snapshot.contextTokens } : {}),
+    ...(snapshot?.percentUsed != null ? { context_percent_used: snapshot.percentUsed } : {}),
+   };
+  }
+ } catch (usageErr) {
+  console.warn('[usage] failed to resolve session snapshot usage:', usageErr.message);
+ }
 
  // Structured outcome hint for Trooper orchestration
 const responseText = response || '';
@@ -4419,7 +4468,7 @@ sendSSE('done', {
 requestId: id, agentId,
 result: responseText,
 toolLog: toolLog.length > 0 ? toolLog : undefined,
-usage: { input_tokens: estimatedInputTokens + toolOverhead, output_tokens: estimatedOutputTokens, estimated: true },
+usage: finalUsage,
  runId: gatewayRunId || undefined,
  sessionKey: resolvedSessionKey || sessionKey,
  specialistMode,
