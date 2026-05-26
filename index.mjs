@@ -3384,7 +3384,7 @@ function pickNonCodexRuntimeFallbackModel() {
  if (hasRuntimeProviderCredential('openai')) return 'openai/gpt-5.2';
  if (hasRuntimeProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
  if (hasRuntimeProviderCredential('gemini') || hasRuntimeProviderCredential('google')) return 'google/gemini-2.5-pro';
- if (hasRuntimeProviderCredential('openrouter')) return 'openrouter/openai/gpt-5-mini';
+ if (hasRuntimeProviderCredential('openrouter')) return 'openrouter/qwen/qwen3.7-max';
  return null;
 }
 
@@ -3654,7 +3654,7 @@ try {
      if (auth.profiles['anthropic:default']) return 'anthropic/claude-sonnet-4-5';
      if (auth.profiles['openai:default']?.type === 'api_key' && auth.profiles['openai:default']?.key) return 'openai/gpt-5.2';
      if (auth.profiles['google:default']) return 'google/gemini-2.5-pro';
-     if (auth.profiles['openrouter:default']) return 'openrouter/openai/gpt-5-mini';
+     if (auth.profiles['openrouter:default']) return 'openrouter/qwen/qwen3.7-max';
      return null;
     };
     const fallbackModel = chooseFallbackModel();
@@ -9307,8 +9307,9 @@ const KNOWN_MODEL_ALIASES = {
 };
 
 const TROOPER_OPENROUTER_TIER_MODELS = [
- { id: 'openrouter/qwen/qwen3.7-max', openrouterId: 'qwen/qwen3.7-max', name: 'Trooper Auto', contextWindow: 128000 },
- { id: 'openrouter/moonshotai/kimi-k2.6', openrouterId: 'moonshotai/kimi-k2.6', name: 'Trooper Premium', contextWindow: 128000 },
+ { id: 'openrouter/deepseek/deepseek-v4-pro', openrouterId: 'deepseek/deepseek-v4-pro', name: 'Trooper Auto', contextWindow: 128000 },
+ { id: 'openrouter/qwen/qwen3.7-max', openrouterId: 'qwen/qwen3.7-max', name: 'Trooper Premium', contextWindow: 128000 },
+ { id: 'openrouter/moonshotai/kimi-k2.6', openrouterId: 'moonshotai/kimi-k2.6', name: 'Moonshot Kimi K2.6 (OR)', contextWindow: 128000 },
 ];
 
 function normalizeModelId(model) {
@@ -9381,7 +9382,7 @@ const pickCredentialBackedDefaultModel = () => {
  if (hasConfiguredProviderCredential('openai')) return 'openai/gpt-5.2';
  if (hasConfiguredProviderCredential('anthropic')) return 'anthropic/claude-sonnet-4-5';
  if (hasConfiguredProviderCredential('gemini')) return 'google/gemini-2.5-pro';
- if (hasConfiguredProviderCredential('openrouter')) return 'openrouter/openai/gpt-5-mini';
+ if (hasConfiguredProviderCredential('openrouter')) return 'openrouter/qwen/qwen3.7-max';
  if (hasConfiguredProviderCredential('openai-codex')) return 'openai/gpt-5.4';
  return null;
 };
@@ -9633,8 +9634,9 @@ const _syncWarnings = [];
  openrouter: { key: openrouterKey, config: {
  baseUrl: 'https://openrouter.ai/api/v1', api: 'openai-completions',
  models: [
- { id: 'qwen/qwen3.7-max', name: 'Trooper Auto', contextWindow: 128000 },
- { id: 'moonshotai/kimi-k2.6', name: 'Trooper Premium', contextWindow: 128000 },
+ { id: 'deepseek/deepseek-v4-pro', name: 'Trooper Auto', contextWindow: 128000 },
+ { id: 'qwen/qwen3.7-max', name: 'Trooper Premium', contextWindow: 128000 },
+ { id: 'moonshotai/kimi-k2.6', name: 'Moonshot Kimi K2.6 (OR)', contextWindow: 128000 },
  { id: 'anthropic/claude-sonnet-4-5', name: 'Claude Sonnet 4.5 (OR)', contextWindow: 200000 },
  { id: 'openai/gpt-5.2', name: 'GPT-5.2 (OR)', contextWindow: 128000 },
  { id: 'openai/gpt-5-mini', name: 'GPT-5 Mini (OR)', contextWindow: 128000 },

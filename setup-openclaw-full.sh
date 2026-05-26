@@ -728,10 +728,10 @@ resolve_primary_model() {
  elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
  echo "google/gemini-2.5-pro"
  elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
- echo "openrouter/openai/gpt-5-mini"
+ echo "openrouter/qwen/qwen3.7-max"
  else
- # Fallback — no keys found, default to cheap model
- echo "openrouter/openai/gpt-5-mini"
+ # Fallback — no keys found, preserve the Trooper Cloud default identity.
+ echo "openrouter/qwen/qwen3.7-max"
  fi
 }
 
@@ -839,9 +839,9 @@ resolve_non_codex_model() {
  elif [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_KEY__" ]; then
  echo "google/gemini-2.5-pro"
  elif [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
- echo "openrouter/openai/gpt-5-mini"
+ echo "openrouter/qwen/qwen3.7-max"
  else
- echo "openrouter/openai/gpt-5-mini"
+ echo "openrouter/qwen/qwen3.7-max"
  fi
 }
 
@@ -877,7 +877,7 @@ if [ -n "${GEMINI_API_KEY:-}" ] && [ "${GEMINI_API_KEY}" != "__UNSET_GEMINI_API_
  build_fallback "google/gemini-2.5-pro"
 fi
 if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPENROUTER_API_KEY__" ]; then
- build_fallback "openrouter/openai/gpt-5-mini"
+ build_fallback "openrouter/qwen/qwen3.7-max"
 fi
 
 # Build fallbacks JSON (may be empty)
@@ -1006,8 +1006,9 @@ if [ -n "${OPENROUTER_API_KEY:-}" ] && [ "${OPENROUTER_API_KEY}" != "__UNSET_OPE
  "baseUrl": "https://openrouter.ai/api/v1",
  "api": "openai-completions",
  "models": [
- { "id": "qwen/qwen3.7-max", "name": "Trooper Auto", "contextWindow": 128000 },
- { "id": "moonshotai/kimi-k2.6", "name": "Trooper Premium", "contextWindow": 128000 },
+ { "id": "deepseek/deepseek-v4-pro", "name": "Trooper Auto", "contextWindow": 128000 },
+ { "id": "qwen/qwen3.7-max", "name": "Trooper Premium", "contextWindow": 128000 },
+ { "id": "moonshotai/kimi-k2.6", "name": "Moonshot Kimi K2.6 (OR)", "contextWindow": 128000 },
  { "id": "anthropic/claude-sonnet-4-5", "name": "Claude Sonnet 4.5 (OR)", "contextWindow": 200000 },
  { "id": "openai/gpt-5.2", "name": "GPT-5.2 (OR)", "contextWindow": 128000 },
  { "id": "openai/gpt-5-mini", "name": "GPT-5 Mini (OR)", "contextWindow": 128000 },
@@ -1955,11 +1956,29 @@ if [ "$_gw_ready" -eq 0 ]; then
  docker compose logs --tail 40 openclaw-gateway 2>/dev/null || true
 fi
 
+# OpenClaw treats npm plugin packages under ~/.openclaw/npm as trusted only when
+# they are root-owned. Fresh Trooper hosts may write them as the node user while
+# ACLs are being aligned, which makes native plugins appear installed but blocked.
+docker compose exec -T -u 0 openclaw-gateway sh -lc '
+  if [ -d /home/node/.openclaw/npm/node_modules/@openclaw ]; then
+    chown -R root:root /home/node/.openclaw/npm/node_modules/@openclaw || true
+    find /home/node/.openclaw/npm/node_modules/@openclaw -type d -exec chmod 755 {} \; 2>/dev/null || true
+    find /home/node/.openclaw/npm/node_modules/@openclaw -type f -exec chmod 644 {} \; 2>/dev/null || true
+    echo "[setup] Native OpenClaw plugin ownership repaired"
+  fi
+' 2>/dev/null || true
+
 # Run openclaw setup/doctor (use node directly — openclaw CLI is not in PATH)
 docker compose exec -T -w /app openclaw-gateway node dist/index.js setup --workspace /home/node/.openclaw/workspace 2>/dev/null || true
 docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --repair 2>/dev/null \
   || docker compose exec -T -w /app openclaw-gateway node dist/index.js doctor --fix 2>/dev/null \
   || true
+docker compose exec -T -u 0 openclaw-gateway sh -lc '
+  if [ -d /home/node/.openclaw/npm/node_modules/@openclaw ]; then
+    chown -R root:root /home/node/.openclaw/npm/node_modules/@openclaw || true
+    echo "[setup] Native OpenClaw plugin ownership verified after doctor"
+  fi
+' 2>/dev/null || true
 restore_codex_oauth_sidecars
 
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
