@@ -781,6 +781,15 @@ function prepareOpenClawConfigForGatewayStart(config) {
 
  if (next.tools && typeof next.tools === 'object') {
   mergeAllowAlsoAllow(next.tools, repairs);
+  const search = next.tools?.web?.search;
+  if (search && typeof search === 'object' && !Array.isArray(search)) {
+   const provider = typeof search.provider === 'string' ? search.provider.trim().toLowerCase() : '';
+   if (provider === 'brave') {
+    delete search.provider;
+    delete search.apiKey;
+    repairs.push('tools.web.search.provider: removed unavailable brave provider');
+   }
+  }
  }
 
  return { config: next, repairs };
@@ -9208,15 +9217,18 @@ app.post('/config/api-keys', async (req, res) => {
 	 if (braveKey !== undefined) {
 	 try {
 	 const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
- // Ensure tools.web.search section exists (create if missing)
+ // Store Brave for bridge-side research without forcing OpenClaw's plugin-backed
+ // web_search provider to "brave"; current gateway builds reject that provider
+ // unless a separate brave plugin is installed and enabled.
  if (!config.tools) config.tools = {};
  if (!config.tools.web) config.tools.web = {};
- if (!config.tools.web.search) config.tools.web.search = { enabled: true, provider: 'brave', maxResults: 5, cacheTtlMinutes: 15 };
- config.tools.web.search.apiKey = braveKey;
- // Ensure web_search is in the tools.allow list
- if (Array.isArray(config.tools.allow) && !config.tools.allow.includes('web_search')) {
- config.tools.allow.push('web_search');
+ if (!config.tools.web.search || typeof config.tools.web.search !== 'object') {
+ config.tools.web.search = {};
  }
+ if (String(config.tools.web.search.provider || '').toLowerCase() === 'brave') {
+ delete config.tools.web.search.provider;
+ }
+ delete config.tools.web.search.apiKey;
 	 writeOpenClawConfig(config);
 	 } catch (e) { console.error('Failed to update openclaw.json:', e.message); }
 	 }
