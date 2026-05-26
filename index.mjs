@@ -32,7 +32,7 @@ import { migrate } from './db/migrate.mjs';
 // Run DB migrations on startup
 migrate(sqlite);
 import os from 'os';
-import { randomUUID, generateKeyPairSync, createHash, createPrivateKey, createPublicKey, sign } from 'crypto';
+import { randomUUID, randomBytes, generateKeyPairSync, createHash, createPrivateKey, createPublicKey, sign } from 'crypto';
 import path from 'path';
 const { dirname } = path;
 import WebSocket from 'ws';
@@ -134,11 +134,43 @@ function resolvePairedDisplayName(entry = {}, deviceId = '') {
  return 'OpenClaw Device';
 }
 
+function generateDevicePairingToken() {
+ return randomBytes(32).toString('base64url');
+}
+
+function coerceDeviceTokenMap(tokens) {
+ if (!tokens || typeof tokens !== 'object') return {};
+ if (!Array.isArray(tokens)) return { ...tokens };
+ const out = {};
+ for (const token of tokens) {
+  if (!token || typeof token !== 'object') continue;
+  const role = String(token.role || '').trim();
+  if (!role) continue;
+  out[role] = { ...token };
+ }
+ return out;
+}
+
+function buildActiveOperatorDeviceToken(existingToken, scopes, now = Date.now()) {
+ const token = existingToken && typeof existingToken === 'object' ? { ...existingToken } : {};
+ const existingTokenValue = typeof token.token === 'string' && token.token.trim() ? token.token.trim() : '';
+ return {
+  ...token,
+  token: existingTokenValue || generateDevicePairingToken(),
+  role: 'operator',
+  scopes,
+  createdAtMs: Number.isFinite(token.createdAtMs) ? token.createdAtMs : now,
+  ...(Number.isFinite(token.rotatedAtMs) ? { rotatedAtMs: token.rotatedAtMs } : {}),
+  ...(Number.isFinite(token.lastUsedAtMs) ? { lastUsedAtMs: token.lastUsedAtMs } : {}),
+ };
+}
+
 function normalizePairedDeviceMap(paired = {}) {
  let changed = false;
  const next = {};
  for (const [key, value] of Object.entries(paired || {})) {
   const entry = value && typeof value === 'object' ? { ...value } : {};
+  const now = Date.now();
   const deviceId = String(entry.deviceId || key || '').trim();
   if (deviceId && entry.deviceId !== deviceId) {
    entry.deviceId = deviceId;
@@ -175,19 +207,25 @@ function normalizePairedDeviceMap(paired = {}) {
     entry.approvedScopes = mergedScopes;
     changed = true;
    }
-   if (Array.isArray(entry.tokens)) {
-    const nextTokens = entry.tokens.map((token) => {
-     if (!token || typeof token !== 'object') return token;
-     if (String(token.role || entry.role || '').toLowerCase() !== 'operator') return token;
-     const tokenScopes = Array.from(new Set([
-      ...(Array.isArray(token.scopes) ? token.scopes : []),
-      ...mergedScopes,
-     ].map(scope => String(scope || '').trim()).filter(Boolean)));
-     if (JSON.stringify(token.scopes || []) === JSON.stringify(tokenScopes)) return token;
-     changed = true;
-     return { ...token, scopes: tokenScopes };
-    });
-    entry.tokens = nextTokens;
+   const tokenMap = coerceDeviceTokenMap(entry.tokens);
+   const existingOperatorToken = tokenMap.operator;
+   const nextOperatorToken = buildActiveOperatorDeviceToken(existingOperatorToken, mergedScopes, now);
+   delete nextOperatorToken.revokedAtMs;
+   if (JSON.stringify(existingOperatorToken || null) !== JSON.stringify(nextOperatorToken)) {
+    tokenMap.operator = nextOperatorToken;
+    entry.tokens = tokenMap;
+    changed = true;
+   } else if (Array.isArray(entry.tokens)) {
+    entry.tokens = tokenMap;
+    changed = true;
+   }
+   if (!Number.isFinite(entry.createdAtMs)) {
+    entry.createdAtMs = Number.isFinite(entry.approvedAt) ? entry.approvedAt : now;
+    changed = true;
+   }
+   if (!Number.isFinite(entry.approvedAtMs)) {
+    entry.approvedAtMs = Number.isFinite(entry.approvedAt) ? entry.approvedAt : now;
+    changed = true;
    }
   }
   next[key] = entry;
@@ -753,6 +791,9 @@ const OPENCLAW_PAIRED_JSON_PATH = `${OPENCLAW_DEVICES_DIR}/paired.json`;
 function buildBridgePairedDeviceEntry(existing = {}) {
  const now = Date.now();
  const publicKey = getDevicePublicKeyBase64Url(deviceIdentity);
+ const tokens = coerceDeviceTokenMap(existing.tokens);
+ tokens.operator = buildActiveOperatorDeviceToken(tokens.operator, OPERATOR_SCOPES, now);
+ delete tokens.operator.revokedAtMs;
  return {
   ...existing,
   deviceId: deviceIdentity.deviceId,
@@ -763,8 +804,11 @@ function buildBridgePairedDeviceEntry(existing = {}) {
   roles: ['operator'],
   scopes: OPERATOR_SCOPES,
   approvedScopes: OPERATOR_SCOPES,
+  tokens,
   clientId: 'gateway-client',
   clientMode: 'backend',
+  createdAtMs: existing.createdAtMs || existing.approvedAt || now,
+  approvedAtMs: now,
   approvedAt: existing.approvedAt || now,
   approved: true,
   ts: now,
@@ -790,6 +834,12 @@ function bridgePairedDeviceNeedsRewrite(existing = {}, desired = {}) {
  if (JSON.stringify(existingScopes) !== JSON.stringify(desiredScopes)) return true;
  const existingApprovedScopes = Array.isArray(existing.approvedScopes) ? existing.approvedScopes.map(String).sort() : [];
  if (JSON.stringify(existingApprovedScopes) !== JSON.stringify(desiredScopes)) return true;
+ const operatorToken = existing.tokens?.operator;
+ if (!operatorToken || typeof operatorToken.token !== 'string' || !operatorToken.token.trim()) return true;
+ if (operatorToken.revokedAtMs) return true;
+ const existingTokenScopes = Array.isArray(operatorToken.scopes) ? operatorToken.scopes.map(String).sort() : [];
+ if (JSON.stringify(existingTokenScopes) !== JSON.stringify(desiredScopes)) return true;
+ if (!Number.isFinite(existing.createdAtMs) || !Number.isFinite(existing.approvedAtMs)) return true;
  return false;
 }
 

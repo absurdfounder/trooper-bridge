@@ -1476,8 +1476,10 @@ const skills = [
   { slug: 'blogwatcher', name: 'Blogwatcher', category: 'Research', cli: 'blogwatcher', description: 'Monitor blogs and RSS/Atom feeds for updates using the blogwatcher CLI.' },
   { slug: 'blucli', name: 'BluOS CLI', category: 'Home & media', cli: 'blu', description: 'BluOS CLI for discovery, playback, grouping, and volume control.' },
   { slug: 'camsnap', name: 'Camsnap', category: 'Media', cli: 'camsnap', description: 'Capture frames or clips from RTSP/ONVIF cameras.' },
+  { slug: 'canvas', name: 'Canvas', category: 'Display', cli: 'canvas', description: 'Present HTML on connected OpenClaw node canvases, navigate, evaluate, snapshot, and debug canvas host URLs.' },
   { slug: 'clawhub', name: 'ClawHub', category: 'Skills', cli: 'clawhub', description: 'Search, install, update, sync, or publish agent skills with the ClawHub CLI and registry.' },
   { slug: 'coding-agent', name: 'Coding Agent', category: 'Coding', cli: 'coding-agent', description: 'Delegate coding work to Codex, Claude Code, OpenCode, or Pi as background workers.' },
+  { slug: 'diagram-maker', name: 'Diagram Maker', category: 'Design', cli: 'diagram-maker', description: 'Create SVG, HTML, or Excalidraw diagrams for concepts, architecture, flows, and whiteboards.' },
   { slug: 'discord', name: 'Discord', category: 'Messaging', cli: 'discord', description: 'Discord message operations: send, read, edit, delete, react, poll, pin, thread, search, presence, media, and components.' },
   { slug: 'eightctl', name: 'Eight Sleep', category: 'Home & health', cli: 'eightctl', description: 'Control Eight Sleep pods including status, temperature, alarms, and schedules.' },
   { slug: 'gemini', name: 'Gemini CLI', category: 'AI', cli: 'gemini', description: 'Gemini CLI one-shot prompts, summaries, generation, skills, hooks, MCP, or Gemma routing.' },
@@ -1486,31 +1488,43 @@ const skills = [
   { slug: 'github', name: 'GitHub', category: 'Coding', cli: 'gh', description: 'GitHub CLI for issues, PRs, CI logs, comments, reviews, releases, repositories, and gh api queries.' },
   { slug: 'gog', name: 'Google Workspace', category: 'Productivity', cli: 'gog', description: 'Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, and Docs.' },
   { slug: 'goplaces', name: 'Google Places', category: 'Research', cli: 'goplaces', description: 'Query Google Places for text search, place details, resolve, reviews, or scriptable JSON via goplaces.' },
+  { slug: 'healthcheck', name: 'Healthcheck', category: 'Operations', cli: 'healthcheck', description: 'Audit and harden OpenClaw hosts: SSH, firewall, updates, exposure, backups, disk encryption, and gateway security.' },
   { slug: 'himalaya', name: 'Himalaya', category: 'Messaging', cli: 'himalaya', description: 'Himalaya CLI for IMAP/SMTP mail: list, read, search, compose, reply, forward, copy, move, and delete.' },
   { slug: 'imsg', name: 'iMessage', category: 'Messaging', cli: 'imsg', description: 'iMessage and SMS CLI for listing chats, history, and sending messages via Messages.app.' },
   { slug: 'mcporter', name: 'MCP Porter', category: 'Automation', cli: 'mcporter', description: 'List, configure, authenticate, call, and inspect MCP servers/tools with mcporter over HTTP or stdio.' },
+  { slug: 'meme-maker', name: 'Meme Maker', category: 'Media', cli: 'meme-maker', description: 'Search meme templates, suggest formats, and generate local or hosted image memes.' },
   { slug: 'model-usage', name: 'Model Usage', category: 'Observability', cli: 'model-usage', description: 'Summarize local model cost logs by model for Codex or Claude, including current or full breakdowns.' },
   { slug: 'nano-pdf', name: 'Nano PDF', category: 'Documents', cli: 'nano-pdf', description: 'Edit PDFs with natural-language instructions using the nano-pdf CLI.' },
+  { slug: 'node-connect', name: 'Node Connect', category: 'Operations', cli: 'node-connect', description: 'Diagnose OpenClaw Android, iOS, or macOS node pairing, QR/setup code, route, auth, and connection failures.' },
+  { slug: 'node-inspect-debugger', name: 'Node Inspect Debugger', category: 'Coding', cli: 'node', description: 'Debug Node.js with node inspect, --inspect, breakpoints, CDP, heap, and CPU profiles.' },
+  { slug: 'notion', name: 'Notion', category: 'Productivity', cli: 'notion', description: 'Notion CLI/API for pages, Markdown content, data sources, files, comments, search, Workers, and raw API calls.' },
   { slug: 'obsidian', name: 'Obsidian', category: 'Productivity', cli: 'obsidian', description: 'Work with Obsidian vaults using the official Obsidian CLI: read, search, create, edit notes, tasks, links, properties, and plugins.' },
   { slug: 'openai-whisper', name: 'OpenAI Whisper', category: 'Audio', cli: 'whisper', description: 'Local speech-to-text with the Whisper CLI without an API key.' },
+  { slug: 'openai-whisper-api', name: 'OpenAI Whisper API', category: 'Audio', cli: 'curl', description: 'OpenAI Audio Transcriptions API via curl; gpt-4o-transcribe, mini, diarize, or whisper-1.' },
   { slug: 'openhue', name: 'OpenHue', category: 'Home & media', cli: 'openhue', description: 'Control Philips Hue lights and scenes via the OpenHue CLI.' },
   { slug: 'oracle', name: 'Oracle', category: 'AI', cli: 'oracle', description: 'Second-model review, debug, refactor, or design with selected files, dry-run token checks, API, or browser engine.' },
   { slug: 'ordercli', name: 'Order CLI', category: 'Lifestyle', cli: 'ordercli', description: 'Foodora-only CLI for checking past orders and active order status.' },
   { slug: 'peekaboo', name: 'Peekaboo', category: 'Automation', cli: 'peekaboo', description: 'Capture and automate macOS UI with the Peekaboo CLI.' },
+  { slug: 'python-debugpy', name: 'Python Debugpy', category: 'Coding', cli: 'python', description: 'Debug Python with pdb, breakpoint(), post-mortem inspection, and debugpy remote attach.' },
   { slug: 'sag', name: 'Sag', category: 'Audio', cli: 'sag', description: 'ElevenLabs text-to-speech with mac-style say UX.' },
   { slug: 'session-logs', name: 'Session Logs', category: 'Observability', cli: 'jq', description: 'Search and analyze local session logs and older or parent conversations using jq.' },
   { slug: 'sherpa-onnx-tts', name: 'Sherpa ONNX TTS', category: 'Audio', cli: 'sherpa-onnx-tts', description: 'Local text-to-speech via sherpa-onnx, offline and no cloud required.' },
+  { slug: 'skill-creator', name: 'Skill Creator', category: 'Skills', cli: 'skill-creator', description: 'Create, edit, audit, tidy, validate, or restructure AgentSkills and SKILL.md files.' },
   { slug: 'slack', name: 'Slack', category: 'Messaging', cli: 'slack', description: 'Slack actions: send, read, edit, delete messages, react, pin and unpin, list pins/reactions/emoji, and member info.' },
   { slug: 'songsee', name: 'Songsee', category: 'Audio', cli: 'songsee', description: 'Generate spectrograms and feature-panel visualizations from audio with the songsee CLI.' },
   { slug: 'sonoscli', name: 'Sonos CLI', category: 'Home & media', cli: 'sonoscli', description: 'Control Sonos speakers including discovery, status, play, volume, and grouping.' },
+  { slug: 'spike', name: 'Spike', category: 'Research', cli: 'spike', description: 'Run throwaway prototypes to validate feasibility, compare approaches, and report a verdict.' },
   { slug: 'spotify-player', name: 'Spotify Player', category: 'Home & media', cli: 'spogo', description: 'Terminal Spotify playback and search via spogo or spotify_player.' },
   { slug: 'summarize', name: 'Summarize', category: 'Research', cli: 'summarize', description: 'Summarize or transcribe URLs, YouTube videos, podcasts, articles, transcripts, PDFs, and local files.' },
+  { slug: 'taskflow', name: 'TaskFlow', category: 'Automation', cli: 'taskflow', description: 'Coordinate multi-step detached tasks as one durable TaskFlow job with owner context, state, waits, and child tasks.' },
+  { slug: 'taskflow-inbox-triage', name: 'TaskFlow Inbox Triage', category: 'Automation', cli: 'taskflow', description: 'Example TaskFlow pattern for inbox triage, intent routing, waiting on replies, and later summaries.' },
   { slug: 'things-mac', name: 'Things Mac', category: 'Productivity', cli: 'things', description: 'Add, update, list, search, or inspect Things 3 todos, inbox, today, projects, areas, and tags on macOS.' },
   { slug: 'tmux', name: 'Tmux', category: 'Automation', cli: 'tmux', description: 'Control tmux sessions and panes for interactive CLIs: list, capture output, send keys, paste text, and monitor prompts.' },
   { slug: 'trello', name: 'Trello', category: 'Project Management', cli: 'trello', description: 'Manage Trello boards, lists, and cards via the Trello REST API.' },
   { slug: 'video-frames', name: 'Video Frames', category: 'Media', cli: 'ffmpeg', description: 'Extract frames or short clips from videos using ffmpeg.' },
   { slug: 'voice-call', name: 'Voice Call', category: 'Voice', cli: 'voice-call', description: 'Start voice calls via the OpenClaw voice-call plugin.' },
   { slug: 'wacli', name: 'WhatsApp CLI', category: 'Messaging', cli: 'wacli', description: 'Send third-party WhatsApp messages or sync/search WhatsApp history via wacli.' },
+  { slug: 'weather', name: 'Weather', category: 'Research', cli: 'curl', description: 'Current weather and forecasts with wttr.in via curl for locations, rain, temperature, and travel planning.' },
   { slug: 'xurl', name: 'X URL', category: 'Social Media', cli: 'xurl', description: 'xurl CLI for authenticated X posts, replies, reads/search, DMs, media upload, followers, auth status, or raw v2 API calls.' },
 ];
 
@@ -2909,20 +2923,36 @@ fs.mkdirSync('/opt/openclaw-data/config/identity', { recursive: true });
 fs.writeFileSync('/opt/openclaw-data/config/identity/device.json', JSON.stringify(gwIdentity, null, 2));
 console.log('Gateway identity: ' + gwDeviceId.substring(0, 12) + '...');
 
+const operatorScopes = [
+ 'operator.admin',
+ 'operator.read',
+ 'operator.write',
+ 'operator.pairing',
+ 'operator.approvals',
+ 'operator.talk.secrets',
+];
+const makeOperatorToken = () => ({
+ token: crypto.randomBytes(32).toString('base64url'),
+ role: 'operator',
+ scopes: operatorScopes,
+ createdAtMs: Date.now()
+});
 const paired = {};
 paired[deviceId] = {
  deviceId, publicKey: pubB64,
  displayName: 'Trooper Bridge', platform: 'linux',
- role: 'operator', roles: ['operator'], scopes: ['operator.admin'],
+ role: 'operator', roles: ['operator'], scopes: operatorScopes, approvedScopes: operatorScopes,
+ tokens: { operator: makeOperatorToken() },
  clientId: 'gateway-client', clientMode: 'backend',
- approvedAt: Date.now(), approved: true, ts: Date.now()
+ createdAtMs: Date.now(), approvedAtMs: Date.now(), approvedAt: Date.now(), approved: true, ts: Date.now()
 };
 paired[gwDeviceId] = {
  deviceId: gwDeviceId, publicKey: gwPubB64,
  displayName: 'Gateway Internal', platform: 'linux',
- role: 'operator', roles: ['operator'], scopes: ['operator.admin'],
+ role: 'operator', roles: ['operator'], scopes: operatorScopes, approvedScopes: operatorScopes,
+ tokens: { operator: makeOperatorToken() },
  clientId: 'gateway-internal', clientMode: 'backend',
- approvedAt: Date.now(), approved: true, ts: Date.now()
+ createdAtMs: Date.now(), approvedAtMs: Date.now(), approvedAt: Date.now(), approved: true, ts: Date.now()
 };
 fs.writeFileSync('/opt/openclaw-data/config/devices/paired.json', JSON.stringify(paired, null, 2));
 fs.writeFileSync('/opt/openclaw-data/config/devices/pending.json', '{}');
