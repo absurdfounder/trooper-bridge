@@ -767,10 +767,31 @@ function mergeAllowAlsoAllow(scope, repairs, path = 'tools') {
  }
 }
 
+function sanitizeBravePluginConfigForGatewayStart(config, repairs) {
+ const entry = config?.plugins?.entries?.brave;
+ if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+ const rawConfig = entry.config && typeof entry.config === 'object' && !Array.isArray(entry.config)
+  ? entry.config
+  : {};
+ const rawWebSearch = rawConfig.webSearch && typeof rawConfig.webSearch === 'object' && !Array.isArray(rawConfig.webSearch)
+  ? rawConfig.webSearch
+  : {};
+ const webSearch = {};
+ for (const key of ['apiKey', 'mode', 'baseUrl']) {
+  if (rawWebSearch[key] !== undefined) webSearch[key] = rawWebSearch[key];
+ }
+ const nextConfig = Object.keys(webSearch).length ? { webSearch } : {};
+ if (JSON.stringify(rawConfig) !== JSON.stringify(nextConfig)) {
+  entry.config = nextConfig;
+  repairs.push('plugins.entries.brave.config: removed schema-invalid fields');
+ }
+}
+
 function prepareOpenClawConfigForGatewayStart(config) {
  const next = cloneJson(config);
  const repairs = [];
  normalizeOpenClawAgentsList(next);
+ sanitizeBravePluginConfigForGatewayStart(next, repairs);
 
  const providers = next?.models?.providers;
  if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
@@ -9238,21 +9259,19 @@ app.post('/config/api-keys', async (req, res) => {
  const existingBraveConfig = existingBrave.config && typeof existingBrave.config === 'object'
   ? existingBrave.config
   : {};
+ const existingBraveWebSearch = existingBraveConfig.webSearch && typeof existingBraveConfig.webSearch === 'object'
+  ? existingBraveConfig.webSearch
+  : {};
  if (braveKey) {
+  const webSearch = {};
+  for (const key of ['mode', 'baseUrl']) {
+   if (existingBraveWebSearch[key] !== undefined) webSearch[key] = existingBraveWebSearch[key];
+  }
+  webSearch.apiKey = braveKey;
   config.plugins.entries.brave = {
    ...existingBrave,
    enabled: true,
-   config: {
-    ...existingBraveConfig,
-    webSearch: {
-     ...(existingBraveConfig.webSearch && typeof existingBraveConfig.webSearch === 'object' ? existingBraveConfig.webSearch : {}),
-     apiKey: braveKey,
-    },
-    webFetch: {
-     ...(existingBraveConfig.webFetch && typeof existingBraveConfig.webFetch === 'object' ? existingBraveConfig.webFetch : {}),
-     apiKey: braveKey,
-    },
-   },
+   config: { webSearch },
   };
   if (!config.plugins.allow || !Array.isArray(config.plugins.allow)) config.plugins.allow = [];
   if (!config.plugins.allow.includes('brave')) config.plugins.allow.push('brave');
