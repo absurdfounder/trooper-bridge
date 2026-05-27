@@ -1039,6 +1039,17 @@ class OpenClawGateway {
  this._lastAuthRepairMs = 0;
  this.lastAuthError = null;
  this.lastAuthAt = null;
+ this.lastConnectedAt = null;
+ this.lastDisconnectedAt = null;
+ this.lastCloseCode = null;
+ this.lastCloseReason = null;
+ this.lastError = null;
+ this.lastReconnectReason = null;
+ this.lastReconnectRequestedAt = null;
+ this.expectedReconnectUntil = 0;
+ this.lastSnapshotError = null;
+ this.lastSnapshotErrorAt = null;
+ this.snapshotTimeoutCount = 0;
  this._historyInflight = new Map();
  this._historyCache = new Map();
  this._historyActive = 0;
@@ -1081,6 +1092,9 @@ class OpenClawGateway {
  forceReconnect(delayMs = 0, reason = 'manual') {
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
  this._nextReconnectAt = Date.now() + Math.max(0, delayMs);
+ this.lastReconnectReason = reason;
+ this.lastReconnectRequestedAt = Date.now();
+ this.expectedReconnectUntil = Date.now() + Math.max(0, delayMs) + 45000;
  this.connected = false;
  this._connectPromise = null;
  this._stopPing();
@@ -1135,6 +1149,10 @@ class OpenClawGateway {
  return;
  }
  this.connected = true;
+ this.lastConnectedAt = Date.now();
+ this.lastError = null;
+ this.expectedReconnectUntil = 0;
+ this.lastReconnectReason = null;
  this._reconnectDelay = 5000;
  // Start ping/pong heartbeat to keep connection alive
  this._startPing();
@@ -1190,10 +1208,13 @@ class OpenClawGateway {
  }
  });
 
- this.ws.on('close', (code) => {
+ this.ws.on('close', (code, reason) => {
  this.connected = false;
  this._connectPromise = null;
  this._stopPing();
+ this.lastDisconnectedAt = Date.now();
+ this.lastCloseCode = code;
+ this.lastCloseReason = reason?.toString?.() || '';
  console.log('[OpenClaw] Disconnected (code=' + code + '), reconnecting in ' + (this._reconnectDelay / 1000) + 's...');
  captureLog('warn', `Gateway disconnected (code=${code}), reconnecting in ${this._reconnectDelay / 1000}s`);
  for (const [id, pending] of this._pendingRequests) {
@@ -1210,6 +1231,7 @@ class OpenClawGateway {
  });
 
  this.ws.on('error', (err) => {
+ this.lastError = err.message;
  console.error('[OpenClaw] WebSocket error:', err.message);
  captureLog('error', `Gateway WebSocket error: ${err.message}`, { stack: err.stack });
  });
@@ -1806,7 +1828,7 @@ class OpenClawGateway {
     const timeout = setTimeout(() => {
      this._pendingRequests.delete(id);
      reject(new Error('Session snapshot timeout'));
-    }, 10000);
+    }, 20000);
     this._pendingRequests.set(id, {
      resolve: (payload) => { clearTimeout(timeout); resolve(payload); },
      reject: (err) => { clearTimeout(timeout); reject(err); },
@@ -1861,7 +1883,11 @@ class OpenClawGateway {
     compactionCount: toNumber(row.compactionCount),
    };
   } catch (err) {
-   console.error('[OpenClaw] fetchSessionSnapshot error:', err.message);
+   this.lastSnapshotError = err.message;
+   this.lastSnapshotErrorAt = Date.now();
+   if (/timeout/i.test(err.message)) this.snapshotTimeoutCount += 1;
+   const log = /timeout/i.test(err.message) ? console.warn : console.error;
+   log('[OpenClaw] fetchSessionSnapshot error:', err.message);
    return null;
   } finally {
    this._pendingRequests.delete(id);
@@ -5316,6 +5342,101 @@ app.get('/deploy-logs-raw', (req, res) => {
  }
 });
 
+function readGatewayContainerStatus({ includeLogs = false } = {}) {
+ const result = {
+  status: 'unknown',
+  running: false,
+  restartCount: 0,
+  recentLogs: '',
+  inspectError: null,
+ };
+ try {
+  const raw = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 2500 }).toString().trim();
+  const [state, running, restarts] = raw.split(':');
+  result.status = state || 'unknown';
+  result.running = running === 'true';
+  result.restartCount = parseInt(restarts, 10) || 0;
+ } catch (err) {
+  result.status = 'missing';
+  result.inspectError = err.message;
+ }
+ if (includeLogs) {
+  try {
+   result.recentLogs = execSync('docker logs --tail 80 openclaw-openclaw-gateway-1 2>&1', { timeout: 3500 }).toString();
+  } catch (err) {
+   result.recentLogs = result.inspectError || err.message || '';
+  }
+ }
+ return result;
+}
+
+function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
+ const container = readGatewayContainerStatus({ includeLogs });
+ const now = Date.now();
+ const wsReady = !!gateway.isReady;
+ const recentAuthError = gateway.lastAuthError && gateway.lastAuthAt && now - gateway.lastAuthAt < 5 * 60 * 1000;
+ const recentSnapshotError = gateway.lastSnapshotErrorAt && now - gateway.lastSnapshotErrorAt < 2 * 60 * 1000;
+ const recentSnapshotTimeout = recentSnapshotError && /timeout/i.test(gateway.lastSnapshotError || '');
+ const expectedRestart = gateway.expectedReconnectUntil && now < gateway.expectedReconnectUntil;
+ let runtimeState = 'ok';
+ let stateReason = null;
+ let transient = false;
+
+ if (!container.running) {
+  runtimeState = 'gateway_down';
+  stateReason = container.inspectError || 'container_not_running';
+ } else if (recentAuthError && !wsReady) {
+  runtimeState = 'auth_error';
+  stateReason = 'gateway_auth_or_pairing_failed';
+ } else if (wsReady && recentSnapshotTimeout) {
+  runtimeState = 'gateway_busy';
+  stateReason = 'session_snapshot_timeout';
+  transient = true;
+ } else if (wsReady) {
+  runtimeState = 'ok';
+ } else if (expectedRestart) {
+  runtimeState = 'restarting';
+  stateReason = gateway.lastReconnectReason || 'gateway_restart_pending';
+  transient = true;
+ } else if (recentSnapshotTimeout) {
+  runtimeState = 'gateway_busy';
+  stateReason = 'session_snapshot_timeout';
+  transient = true;
+ } else {
+  runtimeState = 'connecting';
+  stateReason = gateway.lastError ? 'websocket_reconnecting' : 'waiting_for_gateway_websocket';
+  transient = true;
+ }
+
+ return {
+  ...container,
+  status: runtimeState,
+  containerStatus: container.status,
+  state: runtimeState,
+  stateReason,
+  transient,
+  websocketConnected: wsReady,
+  connected: wsReady,
+  paired: wsReady,
+  wsReadyState: gateway.ws?.readyState ?? null,
+  authError: gateway.lastAuthError,
+  authAt: gateway.lastAuthAt,
+  lastError: gateway.lastError,
+  lastConnectedAt: gateway.lastConnectedAt,
+  lastDisconnectedAt: gateway.lastDisconnectedAt,
+  lastCloseCode: gateway.lastCloseCode,
+  lastCloseReason: gateway.lastCloseReason,
+  lastReconnectReason: gateway.lastReconnectReason,
+  lastReconnectRequestedAt: gateway.lastReconnectRequestedAt,
+  expectedReconnectUntil: gateway.expectedReconnectUntil || 0,
+  nextReconnectAt: gateway._nextReconnectAt || 0,
+  reconnectDelayMs: gateway._reconnectDelay,
+  lastSnapshotError: gateway.lastSnapshotError,
+  lastSnapshotErrorAt: gateway.lastSnapshotErrorAt,
+  snapshotTimeoutCount: gateway.snapshotTimeoutCount,
+ };
+}
+
 app.get('/health', async (req, res) => {
  // During initial provisioning, return 'installing' so provision.js keeps polling
  // and streaming raw logs. The marker file is created at the end of setup-openclaw-full.sh.
@@ -5345,22 +5466,21 @@ app.get('/health', async (req, res) => {
    browserError = error.message;
  }
 
- const gatewayHealthy = !!gateway.isReady;
- const healthStatus = !setupDone ? 'installing' : gatewayHealthy ? 'ok' : 'degraded';
+ const gatewayStatus = buildGatewayRuntimeStatus();
+ const gatewayHealthy = gatewayStatus.connected === true;
+ const healthStatus = !setupDone
+   ? 'installing'
+   : gatewayHealthy
+     ? 'ok'
+     : gatewayStatus.transient
+       ? 'recovering'
+       : 'degraded';
 
  res.json({
  status: healthStatus,
  service: 'openclaw-bridge',
- reason: healthStatus === 'degraded' ? 'gateway_unpaired' : null,
-	 gateway: {
-	   status: gatewayHealthy ? 'ok' : 'degraded',
-	   connected: gatewayHealthy,
-	   paired: gatewayHealthy,
-	   wsReadyState: gateway.ws?.readyState ?? null,
-	   authError: gateway.lastAuthError,
-	   authAt: gateway.lastAuthAt,
-	   reconnectDelayMs: gateway._reconnectDelay,
-	 },
+	 reason: healthStatus === 'ok' || healthStatus === 'installing' ? null : gatewayStatus.stateReason,
+	 gateway: gatewayStatus,
  browser: {
    available: browserAvailable,
    responsive: browserResponsive,
@@ -5374,9 +5494,9 @@ app.get('/health', async (req, res) => {
  },
  agents: {
    count: pendingRequests.size,
-   main: gatewayHealthy ? 'connected' : 'disconnected',
- },
- mode: gatewayHealthy ? 'websocket' : 'poller-fallback',
+	   main: gatewayHealthy ? 'connected' : gatewayStatus.transient ? gatewayStatus.state : 'disconnected',
+	 },
+	 mode: gatewayHealthy ? 'websocket' : gatewayStatus.transient ? 'gateway-recovering' : 'poller-fallback',
  pending: pendingRequests.size, skills: skillRegistry.size,
  version: readBridgeVersion(),
  uptime: Math.floor(process.uptime()),
@@ -8556,18 +8676,12 @@ app.post('/gateway/exec', (req, res) => {
 });
 
 app.get('/gateway/status', (req, res) => {
- try {
- const status = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" openclaw-openclaw-gateway-1 2>&1', { timeout: 2500 }).toString().trim();
- const [state, running, restarts] = status.split(':');
- let logs = '';
- const includeLogs = req.query.logs === '1' || req.query.logs === 'true';
- if (includeLogs) {
-  try { logs = execSync('docker logs --tail 20 openclaw-openclaw-gateway-1 2>&1', { timeout: 2500 }).toString(); } catch {}
- }
- res.json({ status: state, running: running === 'true', restartCount: parseInt(restarts) || 0, websocketConnected: gateway.isReady, connected: gateway.isReady, paired: gateway.isReady, authError: gateway.lastAuthError, authAt: gateway.lastAuthAt, recentLogs: logs });
- } catch (err) {
- res.status(500).json({ error: 'Failed to get gateway status', details: err.message });
- }
+	 try {
+	 const includeLogs = req.query.logs === '1' || req.query.logs === 'true';
+	 res.json(buildGatewayRuntimeStatus({ includeLogs }));
+	 } catch (err) {
+	 res.status(500).json({ error: 'Failed to get gateway status', details: err.message });
+	 }
 });
 
 app.get('/gateway/config', (req, res) => {
