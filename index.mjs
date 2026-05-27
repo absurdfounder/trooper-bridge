@@ -4120,6 +4120,9 @@ function buildTaskMessage(body) {
  if (context?.taskId) taskParts.push(`\n[Task ID: ${context.taskId}]`);
  if (context?.taskTitle) taskParts.push(`[Task Title: ${context.taskTitle}]`);
  if (context?.checklist) taskParts.push(`[Checklist: ${JSON.stringify(context.checklist)}]`);
+ if (String(context?.executionLane || '').toLowerCase() === 'media') {
+  taskParts.push('[Execution Lane: media-first native generation; do not substitute HTML/canvas/frontend output for plain media requests.]');
+ }
  return taskParts.join('\n');
 }
 
@@ -9336,6 +9339,7 @@ app.post('/config/api-keys', async (req, res) => {
  keysUpdateInProgress = true;
  try {
  const body = req.body || {};
+ const { modelRouting: inModelRouting, providerModels: inProviderModels, modelRoutingFallbacks: inFallbacks, selectedModel, provider: settingsProvider } = body;
  const {
   anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, qwenKey,
   deepseekKey, xaiKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey,
@@ -9397,6 +9401,11 @@ app.post('/config/api-keys', async (req, res) => {
   removeLocalProvider,
   ollamaProvider,
   removeOllamaProvider,
+  inModelRouting,
+  inProviderModels,
+  inFallbacks,
+  selectedModel,
+  settingsProvider,
  ].some(k => k !== undefined);
  if (!hasAnyKey) {
  keysUpdateInProgress = false;
@@ -9454,7 +9463,6 @@ app.post('/config/api-keys', async (req, res) => {
  }
 
  // Save provider settings if included in payload
- const { modelRouting: inModelRouting, providerModels: inProviderModels, modelRoutingFallbacks: inFallbacks, selectedModel, provider: settingsProvider } = body;
  if (inModelRouting !== undefined) writeConfigKey('modelRouting', inModelRouting);
  if (inProviderModels !== undefined) writeConfigKey('providerModels', inProviderModels);
  if (inFallbacks !== undefined) writeConfigKey('modelRoutingFallbacks', inFallbacks);
@@ -9702,8 +9710,13 @@ const _syncWarnings = [];
  }
  }
 
+ const mediaRouting = inModelRouting && typeof inModelRouting === 'object' ? inModelRouting : {};
+ const mediaFallbacks = inFallbacks && typeof inFallbacks === 'object' ? inFallbacks : {};
+ const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key);
+ const hasGenerationModelRouting = ['image_gen', 'video_gen', 'music_gen'].some((slot) => hasOwn(mediaRouting, slot) || hasOwn(mediaFallbacks, slot));
+
  // Update default/native models in openclaw.json
- if (defaultModel !== undefined || defaultFallbacks !== undefined || imageModel !== undefined || pdfModel !== undefined) {
+ if (defaultModel !== undefined || defaultFallbacks !== undefined || imageModel !== undefined || pdfModel !== undefined || hasGenerationModelRouting) {
  try {
  const config = JSON.parse(readFileSync('/opt/openclaw-data/config/openclaw.json', 'utf8'));
  if (!config.agents) config.agents = {};
@@ -9765,6 +9778,23 @@ const _syncWarnings = [];
    config.agents.defaults.pdfModel = pdfModel ? normalizeModelId(pdfModel) : undefined;
    console.log(`[bridge] Updating pdf model to: ${config.agents.defaults.pdfModel || '(none)'}`);
  }
+ const setGenerationModel = (slot, field) => {
+   if (!hasOwn(mediaRouting, slot) && !hasOwn(mediaFallbacks, slot)) return;
+   const primary = mediaRouting[slot] ? normalizeModelId(mediaRouting[slot]) : '';
+   const fallbacks = Array.isArray(mediaFallbacks[slot])
+     ? mediaFallbacks[slot].filter(Boolean).map(normalizeModelId).filter(Boolean)
+     : [];
+   if (!primary) {
+     delete config.agents.defaults[field];
+     console.log(`[bridge] Clearing ${field}`);
+     return;
+   }
+   config.agents.defaults[field] = fallbacks.length ? { primary, fallbacks } : primary;
+   console.log(`[bridge] Updating ${field} to: ${primary}${fallbacks.length ? ` (+${fallbacks.length} fallback)` : ''}`);
+ };
+ setGenerationModel('image_gen', 'imageGenerationModel');
+ setGenerationModel('video_gen', 'videoGenerationModel');
+ setGenerationModel('music_gen', 'musicGenerationModel');
 	 writeOpenClawConfig(config);
  } catch (e) { console.error('Failed to update native models in openclaw.json:', e.message); _syncWarnings.push(`Native model update failed: ${e.message}`); }
  }

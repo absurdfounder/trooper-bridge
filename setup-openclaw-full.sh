@@ -1705,8 +1705,9 @@ General conversation, task execution, code generation. This is the default model
 
 ### 🎨 Image Generation (`image_gen`)
 Create images from text prompts.
-- **OpenAI DALL-E**: `curl -X POST https://api.openai.com/v1/images/generations -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{"model":"dall-e-3","prompt":"...","size":"1024x1024"}'`
-- **OpenRouter (if available)**: route through OpenRouter with image model
+- Use the native image generation tool/capability or the configured `agents.defaults.imageGenerationModel` first.
+- Do not substitute HTML, SVG, canvas, screenshots, or a frontend mockup for a plain image-generation request.
+- If no native image tool/model is available, report that `image_gen` is not configured instead of using frontend-design.
 - Use for: SPC social media posts needing visuals, marketing assets, product mockups
 
 ### 🎬 Video Generation (`video_gen`)
