@@ -1116,9 +1116,10 @@ class OpenClawGateway {
  this._pingInterval = null;
  this._lastSelfApproveMs = 0; // cooldown: don't restart gateway more than once per 5 min
  this._lastAuthRepairMs = 0;
- this._resetErrorWindowStartedAt = 0;
- this._resetErrorCount = 0;
- this._lastResetRecoveryMs = 0;
+	 this._resetErrorWindowStartedAt = 0;
+	 this._resetErrorCount = 0;
+	 this._lastResetRecoveryMs = 0;
+	 this._gatewayHttpReadySince = 0;
  this.lastAuthError = null;
  this.lastAuthAt = null;
  this.lastConnectedAt = null;
@@ -1138,11 +1139,45 @@ class OpenClawGateway {
  this._historyQueue = [];
  this._historyMaxConcurrent = Math.max(1, Number(process.env.OPENCLAW_HISTORY_MAX_CONCURRENT || 3));
  this._historyCacheTtlMs = Math.max(250, Number(process.env.OPENCLAW_HISTORY_CACHE_TTL_MS || 2000));
- this.connect();
- }
+	 this.connect();
+	 }
 
- // Attempt reconnect if not connected; returns true if ready
- async ensureConnected() {
+	 async _probeGatewayHttpReady() {
+	 const baseUrl = this.url.replace(/^ws/i, 'http').replace(/\/$/, '');
+	 const healthUrl = `${baseUrl}/healthz`;
+	 const stableMs = Math.max(0, Number(process.env.OPENCLAW_WS_HEALTH_STABLE_MS || 8000));
+	 try {
+	   const res = await fetch(healthUrl, { signal: AbortSignal.timeout(2000) });
+	   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+	   const now = Date.now();
+	   if (!this._gatewayHttpReadySince) this._gatewayHttpReadySince = now;
+	   const ageMs = now - this._gatewayHttpReadySince;
+	   if (ageMs < stableMs) {
+	     return { ready: false, delayMs: Math.max(1000, stableMs - ageMs), reason: 'gateway_http_settling' };
+	   }
+	   return { ready: true };
+	 } catch (err) {
+	   this._gatewayHttpReadySince = 0;
+	   return { ready: false, delayMs: 5000, reason: `gateway_http_not_ready:${err.message}` };
+	 }
+	 }
+
+	 _scheduleConnectRetry(delayMs, reason) {
+	 const delay = Math.max(1000, Number(delayMs || this._reconnectDelay || 5000));
+	 if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+	 this._connectPromise = null;
+	 this._nextReconnectAt = Date.now() + delay;
+	 this.lastReconnectReason = reason;
+	 this.lastReconnectRequestedAt = Date.now();
+	 this.lastError = reason;
+	 console.log(`[OpenClaw] Gateway not ready for websocket (${reason}); retrying in ${Math.ceil(delay / 1000)}s`);
+	 this._reconnectTimer = setTimeout(() => this.connect(), delay);
+	 this._reconnectDelay = Math.min(Math.max(this._reconnectDelay, delay) * 1.5, 30000);
+	 return false;
+	 }
+
+	 // Attempt reconnect if not connected; returns true if ready
+	 async ensureConnected() {
  if (this.isReady) return true;
  const now = Date.now();
  if (this._nextReconnectAt && now < this._nextReconnectAt) {
@@ -1236,8 +1271,11 @@ class OpenClawGateway {
  return true;
  }
 
- _doConnect() {
- return new Promise((resolve) => {
+	 _doConnect() {
+	 return (async () => {
+	 const readiness = await this._probeGatewayHttpReady();
+	 if (!readiness.ready) return this._scheduleConnectRetry(readiness.delayMs, readiness.reason);
+	 return new Promise((resolve) => {
  // Clear any pending reconnect timer to prevent close→reconnect→close loops
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
  this._nextReconnectAt = 0;
@@ -1362,8 +1400,9 @@ class OpenClawGateway {
  setTimeout(() => {
  if (!this.connected) { this._connectPromise = null; resolve(false); }
  }, 15000);
- });
- }
+	 });
+	 })();
+	 }
 
  _startPing() {
  this._stopPing();
@@ -5601,9 +5640,11 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
  const now = Date.now();
  const wsReady = !!gateway.isReady;
  const recentAuthError = gateway.lastAuthError && gateway.lastAuthAt && now - gateway.lastAuthAt < 5 * 60 * 1000;
- const recentSnapshotError = gateway.lastSnapshotErrorAt && now - gateway.lastSnapshotErrorAt < 2 * 60 * 1000;
- const recentSnapshotTimeout = recentSnapshotError && /timeout/i.test(gateway.lastSnapshotError || '');
- const expectedRestart = gateway.expectedReconnectUntil && now < gateway.expectedReconnectUntil;
+	 const recentSnapshotError = gateway.lastSnapshotErrorAt && now - gateway.lastSnapshotErrorAt < 2 * 60 * 1000;
+	 const recentSnapshotTimeout = recentSnapshotError && /timeout/i.test(gateway.lastSnapshotError || '');
+	 const expectedRestart = gateway.expectedReconnectUntil && now < gateway.expectedReconnectUntil;
+	 const reconnectReason = gateway.lastReconnectReason || '';
+	 const reconnectIsRestart = /restart|patch-auth|auth-token-repair|pairing-required|gateway-restart|api-keys-update|auth-profiles-update/i.test(reconnectReason);
  let runtimeState = 'ok';
  let stateReason = null;
  let transient = false;
@@ -5620,10 +5661,10 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
   transient = true;
  } else if (wsReady) {
   runtimeState = 'ok';
- } else if (expectedRestart) {
-  runtimeState = 'restarting';
-  stateReason = gateway.lastReconnectReason || 'gateway_restart_pending';
-  transient = true;
+	 } else if (expectedRestart && reconnectIsRestart) {
+	  runtimeState = 'restarting';
+	  stateReason = reconnectReason || 'gateway_restart_pending';
+	  transient = true;
  } else if (recentSnapshotTimeout) {
   runtimeState = 'gateway_busy';
   stateReason = 'session_snapshot_timeout';
@@ -8940,10 +8981,10 @@ app.get('/gateway/config', (req, res) => {
 });
 
 app.put('/gateway/config', (req, res) => {
- try {
- const restart = !(req.query.restart === 'false' || req.query.restart === '0' || req.body?.restart === false);
- const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
- const configRepair = repairOpenClawConfigForGatewayStart('config-update');
+	 try {
+	 const restart = req.query.restart === 'true' || req.query.restart === '1' || req.body?.restart === true;
+	 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
+	 const configRepair = repairOpenClawConfigForGatewayStart('config-update');
  if (!changed && !configRepair.updated) {
   return res.json({
     success: true,
@@ -8955,12 +8996,12 @@ app.put('/gateway/config', (req, res) => {
  upsertBridgePairedDevice({ force: true, reason: 'config-update' });
  gateway.token = getDesiredGatewayToken() || gateway.token;
  if (!restart) {
-  return res.json({
-    success: true,
-    message: 'Config updated; gateway restart suppressed by request',
-    changed,
-    configRepair,
-    reload: 'deferred',
+	  return res.json({
+	    success: true,
+	    message: 'Config updated; gateway restart deferred',
+	    changed,
+	    configRepair,
+	    reload: 'deferred',
   });
  }
  let applyOutput = '';
@@ -11717,23 +11758,24 @@ app.get('/config/openclaw', (req, res) => {
 });
 
 app.put('/config/openclaw', (req, res) => {
- try {
- const data = req.body;
- if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
- // Backup existing
- try {
- const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
- writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
- } catch {}
-	 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
-	 if (changed) {
-	  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
-	  gateway.forceReconnect(30000, 'config-openclaw-update');
+	 try {
+	 const data = req.body;
+	 if (!data || typeof data !== 'object') return res.status(400).json({ error: 'Invalid JSON body' });
+	 const restart = req.query.restart === 'true' || req.query.restart === '1' || req.body?.restart === true;
+	 // Backup existing
+	 try {
+	 const existing = readFileSync(OPENCLAW_CONFIG_PATH, 'utf8');
+	 writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
+	 } catch {}
+		 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
+		 if (changed && restart) {
+		  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+		  gateway.forceReconnect(30000, 'config-openclaw-update');
+		 }
+	 res.json({ success: true, changed, reload: changed && restart ? 'restart' : 'deferred' });
+	 } catch (err) {
+	 res.status(500).json({ error: err.message });
 	 }
- res.json({ success: true });
- } catch (err) {
- res.status(500).json({ error: err.message });
- }
 });
 
 // ── Auth Profiles (read/write OpenClaw auth-profiles.json) ───────────
