@@ -1239,11 +1239,16 @@ class OpenClawGateway {
  if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
  this._nextReconnectAt = 0;
  if (this.ws) {
-   // Remove listeners before closing to prevent on('close') from scheduling another reconnect
+   // Remove listeners before closing to prevent on('close') from scheduling another reconnect.
+   // Keep a no-op error listener because ws can emit after close/terminate while CONNECTING.
    this.ws.removeAllListeners('close');
    this.ws.removeAllListeners('error');
    this.ws.removeAllListeners('message');
-   try { this.ws.close(); } catch {}
+   this.ws.on('error', () => {});
+   try {
+    if (typeof this.ws.terminate === 'function') this.ws.terminate();
+    else this.ws.close();
+   } catch {}
  }
 
  console.log('[OpenClaw] Connecting to ' + this.url + '...');
@@ -1945,7 +1950,7 @@ class OpenClawGateway {
  async fetchSessionSnapshot(sessionKey) {
   if (!sessionKey) return null;
   if (!this.connected) {
-   const ok = await this.connect();
+   const ok = await this.ensureConnected();
    if (!ok) return null;
   }
   const id = randomUUID();
@@ -8933,6 +8938,7 @@ app.get('/gateway/config', (req, res) => {
 
 app.put('/gateway/config', (req, res) => {
  try {
+ const restart = !(req.query.restart === 'false' || req.query.restart === '0' || req.body?.restart === false);
  const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(req.body));
  const configRepair = repairOpenClawConfigForGatewayStart('config-update');
  if (!changed && !configRepair.updated) {
@@ -8945,6 +8951,15 @@ app.put('/gateway/config', (req, res) => {
  }
  upsertBridgePairedDevice({ force: true, reason: 'config-update' });
  gateway.token = getDesiredGatewayToken() || gateway.token;
+ if (!restart) {
+  return res.json({
+    success: true,
+    message: 'Config updated; gateway restart suppressed by request',
+    changed,
+    configRepair,
+    reload: 'deferred',
+  });
+ }
  let applyOutput = '';
  console.log('Gateway config updated, restarting...');
  applyOutput = execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 }).toString();

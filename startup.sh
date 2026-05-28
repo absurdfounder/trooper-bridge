@@ -36,8 +36,9 @@ chmod 644 /home/node/.openclaw/identity/*.json 2>/dev/null || true
 
 # Startup optimizations (recommended by openclaw doctor)
 export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
-mkdir -p /var/tmp/openclaw-compile-cache 2>/dev/null || true
-chown 1000:1000 /var/tmp/openclaw-compile-cache 2>/dev/null || true
+export JITI_CACHE_DIR=/var/tmp/jiti
+mkdir -p /var/tmp/openclaw-compile-cache /var/tmp/jiti 2>/dev/null || true
+chown 1000:1000 /var/tmp/openclaw-compile-cache /var/tmp/jiti 2>/dev/null || true
 export OPENCLAW_NO_RESPAWN=1
 
 # Auto-repair config after upgrades (prevents crash loops from schema changes).
@@ -56,7 +57,7 @@ run_as_node "node dist/index.js doctor --repair" 2>&1 \
 
 # Start gateway as node user
 if [ "$(id -u)" = "0" ]; then
-  exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+  exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
 else
-  exec bash -lc "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+  exec bash -lc "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
 fi
