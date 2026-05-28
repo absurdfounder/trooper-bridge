@@ -1162,6 +1162,7 @@ class OpenClawGateway {
  const msg = String(err?.message || err || '');
  if (!/(socket hang up|ECONNRESET)/i.test(msg)) return;
  const now = Date.now();
+ if (this.expectedReconnectUntil && now < this.expectedReconnectUntil) return;
  if (!this._resetErrorWindowStartedAt || now - this._resetErrorWindowStartedAt > 90000) {
    this._resetErrorWindowStartedAt = now;
    this._resetErrorCount = 0;
@@ -1180,7 +1181,7 @@ class OpenClawGateway {
     console.warn(`[OpenClaw] Config repaired before reset recovery: ${configRepair.repairs.join('; ')}`);
    }
    execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
-   this.forceReconnect(15000, 'connect-reset-recovery');
+   this.forceReconnect(30000, 'connect-reset-recovery');
  } catch (recoveryErr) {
    console.error('[OpenClaw] Gateway reset recovery failed:', recoveryErr.message);
    captureLog('error', `Gateway reset recovery failed: ${recoveryErr.message}`, { stack: recoveryErr.stack });
@@ -4239,11 +4240,7 @@ function updateOpenClawConfig(callback) {
  const configPath = '/opt/openclaw-data/config/openclaw.json';
  const config = JSON.parse(readFileSync(configPath, 'utf8'));
  callback(config);
- const changed = writeOpenClawConfig(config);
- // Hot reload — OpenClaw watches config changes in hybrid mode
- if (changed) {
- try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
- }
+ writeOpenClawConfig(config);
 }
 
 // ── Shared: build task message from request body ─────────────────────
@@ -4474,8 +4471,6 @@ function ensureSkillCredentials(skillCredentials) {
  if (changed) {
 	   writeTextFileIfChanged('/opt/openclaw/.env', envContent);
  console.log(`[skills] Updated ${entries.length} skill credential(s) in .env`);
- // Signal gateway to reload config
- try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
  }
  } catch (err) {
  console.warn(`[skills] Failed to write skill credentials: ${err.message}`);
@@ -8668,9 +8663,6 @@ app.post('/skills/:slug/install', async (req, res) => {
 	   });
 	  }
 
-	  // Signal OpenClaw to reload (SIGUSR1)
-	  try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
-
 	  const effectiveRuntimeFiles = materialized?.files || runtimeSnapshot?.files || {};
 
 	  res.json({
@@ -8715,8 +8707,6 @@ app.delete('/skills/:slug', async (req, res) => {
  // Also remove from local registry if present
  skillRegistry.delete(slug);
  skillRegistry.delete(skillId);
-
- try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1', { timeout: 5000 }); } catch {}
 
  res.json({ success: true, slug, output: output.trim() });
  } catch (err) {
@@ -8932,36 +8922,18 @@ app.put('/gateway/config', (req, res) => {
     configRepair,
   });
  }
- const hotReloadRequested = req.query?.hotReload === 'true'
-  || req.query?.reload === 'hot'
-  || req.body?.hotReloadGateway === true
-  || req.body?.hotReload === true;
- const restartRequested = !hotReloadRequested
-  || req.query?.restart === 'true'
-  || req.body?.restartGateway === true
-  || req.body?.restart === true;
  upsertBridgePairedDevice({ force: true, reason: 'config-update' });
  gateway.token = getDesiredGatewayToken() || gateway.token;
  let applyOutput = '';
- if (restartRequested) {
-  console.log('Gateway config updated, restarting...');
-  applyOutput = execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 }).toString();
-  gateway.forceReconnect(15000, 'config-update');
- } else {
-  console.log('Gateway config updated, requesting hot reload...');
-  try {
-   applyOutput = execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>&1', { timeout: 5000 }).toString();
-   gateway.forceReconnect(5000, 'config-hot-reload');
-  } catch (reloadErr) {
-   applyOutput = reloadErr.message;
-  }
- }
+ console.log('Gateway config updated, restarting...');
+ applyOutput = execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 }).toString();
+ gateway.forceReconnect(30000, 'config-update');
  res.json({
    success: true,
-   message: restartRequested ? 'Config updated and gateway restart scheduled' : 'Config updated and hot reload requested',
+   message: 'Config updated and gateway restart scheduled',
    changed,
    configRepair,
-   reload: restartRequested ? 'restart' : 'hot',
+   reload: 'restart',
    applyOutput: String(applyOutput || '').trim().slice(-2000),
  });
  } catch (err) { res.status(500).json({ error: 'Failed to update config', details: err.stderr?.toString() || err.message }); }
@@ -10137,13 +10109,15 @@ const _syncWarnings = [];
  }
  };
 
- // Newer OpenClaw builds can reload secrets explicitly; older builds still accept USR1.
+ // Newer OpenClaw builds can reload secrets explicitly. Do not signal PID 1:
+ // in the gateway container that can terminate the startup process and create
+ // a restart loop during fresh provisioning.
  await optionalStep('secrets.apply', 'docker exec openclaw-openclaw-gateway-1 openclaw secrets apply 2>/dev/null', 20000);
  await optionalStep('secrets.reload', 'docker exec openclaw-openclaw-gateway-1 openclaw secrets reload 2>/dev/null', 15000);
- const signaled = await optionalStep('signal.reload', 'docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', 5000);
- if (signaled) console.log(`[keys] Hot reload requested (${steps.join(', ')})`);
- else console.warn(`[keys] Hot reload signal failed: ${errors.join(' | ')}`);
- return { ok: signaled, steps, errors };
+ const ok = steps.length > 0;
+ if (ok) console.log(`[keys] Hot reload requested (${steps.join(', ')})`);
+ else console.warn(`[keys] Hot reload failed: ${errors.join(' | ')}`);
+ return { ok, steps, errors };
  };
 
  const hotReloadRequested = req.body?.hotReloadGateway === true || req.body?.hotReload === true;
@@ -10165,14 +10139,14 @@ const _syncWarnings = [];
  }
 
  if (restartOk) {
-  hotReloadResult = await runHotReload();
+  hotReloadResult = { ok: true, steps: ['container.restart'], errors: [] };
   try {
    await run(`docker exec openclaw-openclaw-gateway-1 openclaw devices approve ${deviceIdentity.deviceId} 2>/dev/null || docker exec openclaw-openclaw-gateway-1 openclaw device approve ${deviceIdentity.deviceId} 2>/dev/null; docker exec openclaw-openclaw-gateway-1 chown -R 1000:1000 /home/node/.openclaw/identity 2>/dev/null`, { timeout: 15000 });
    console.log('[keys] Bridge device re-approved after restart');
   } catch (e) { console.warn('[keys] Device auto-approve failed (will retry on connect):', e.message); }
  upsertBridgePairedDevice({ force: true, reason: 'api-keys-update' });
  gateway.token = getDesiredGatewayToken() || gateway.token;
- gateway.forceReconnect(15000, 'api-keys-update');
+ gateway.forceReconnect(30000, 'api-keys-update');
  }
  } else {
  hotReloadResult = await runHotReload();
@@ -11704,9 +11678,9 @@ app.put('/config/openclaw', (req, res) => {
  writeFileSync(OPENCLAW_CONFIG_PATH + '.bak', existing);
  } catch {}
 	 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(data));
-	 // Restart OpenClaw gateway to pick up changes
 	 if (changed) {
-	 try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+	  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+	  gateway.forceReconnect(30000, 'config-openclaw-update');
 	 }
  res.json({ success: true });
  } catch (err) {
@@ -11743,8 +11717,8 @@ app.put('/config/auth-profiles', (req, res) => {
   }
  }
  writeMirroredAuthProfiles(data, { backup: true });
- // Restart OpenClaw gateway to pick up changes
- try { execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>/dev/null', { timeout: 5000 }); } catch {}
+ execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
+ gateway.forceReconnect(30000, 'auth-profiles-update');
  res.json({ success: true });
  } catch (err) {
  res.status(500).json({ error: err.message });
