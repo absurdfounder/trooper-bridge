@@ -1,6 +1,11 @@
 #!/bin/bash
 # Simplified startup — Chrome + TigerVNC are pre-installed in the image
 GATEWAY_PORT="${1:-18789}"
+GATEWAY_PORT="$(printf '%s' "$GATEWAY_PORT" | tr -cd '0-9')"
+if [ -z "$GATEWAY_PORT" ] || [ "$GATEWAY_PORT" -lt 1 ] || [ "$GATEWAY_PORT" -gt 65535 ]; then
+  echo "[startup] Invalid gateway port '${1:-}', falling back to 18789"
+  GATEWAY_PORT=18789
+fi
 
 # Start Xvnc on :99 for live browser view
 if command -v Xvnc &>/dev/null; then
@@ -57,7 +62,7 @@ run_as_node "node dist/index.js doctor --repair" 2>&1 \
 
 # Start gateway as node user
 if [ "$(id -u)" = "0" ]; then
-  exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+  exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
 else
-  exec bash -lc "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+  exec bash -lc "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
 fi

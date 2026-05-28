@@ -1275,6 +1275,11 @@ OVERRIDE
 cat > /opt/openclaw-data/startup.sh << 'STARTUP'
 #!/bin/bash
 GATEWAY_PORT="${1:-18789}"
+GATEWAY_PORT="$(printf '%s' "$GATEWAY_PORT" | tr -cd '0-9')"
+if [ -z "$GATEWAY_PORT" ] || [ "$GATEWAY_PORT" -lt 1 ] || [ "$GATEWAY_PORT" -gt 65535 ]; then
+  echo "[startup] Invalid gateway port '${1:-}', falling back to 18789"
+  GATEWAY_PORT=18789
+fi
 
 # Start Xvnc on :99 for live browser view
 if command -v Xvnc &>/dev/null && ! pgrep -f "Xvnc :99" >/dev/null 2>&1; then
@@ -1300,7 +1305,7 @@ pkill -9 -u 1000 node 2>/dev/null || true
 rm -rf /tmp/jiti /tmp/node-* 2>/dev/null || true
 mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
 # Also set JITI_CACHE_DIR to a node-owned location as fallback
-export JITI_CACHE_DIR="/home/node/.cache/jiti"
+export JITI_CACHE_DIR="/var/tmp/jiti"
 mkdir -p "$JITI_CACHE_DIR" && chown 1000:1000 "$JITI_CACHE_DIR" && chmod 755 "$JITI_CACHE_DIR"
 
 # Fix devices dir permissions so bridge (host process) can write paired.json
@@ -1309,9 +1314,9 @@ chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Drop back to node user for the gateway process when running as root.
 if [ "$(id -u)" = "0" ]; then
-  exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/home/node/.cache/jiti node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+  exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
 else
-  exec bash -lc "DISPLAY=:99 JITI_CACHE_DIR=/home/node/.cache/jiti node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+  exec bash -lc "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port '$GATEWAY_PORT'"
 fi
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh

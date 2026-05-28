@@ -10156,8 +10156,9 @@ const _syncWarnings = [];
  return { ok, steps, errors };
  };
 
- const hotReloadRequested = req.body?.hotReloadGateway === true || req.body?.hotReload === true;
- const restartRequested = !hotReloadRequested || req.body?.restartGateway === true || req.body?.restart === true || req.body?.restartContainers === true;
+ const restartRequested = req.body?.restartGateway === true || req.body?.restart === true || req.body?.restartContainers === true;
+ const hotReloadRequested = !restartRequested && req.body?.hotReloadGateway !== false && req.body?.hotReload !== false;
+ const restartOnHotReloadFailure = req.body?.restartOnHotReloadFailure === true || req.body?.fallbackRestart === true;
  let reloadMode = 'hot';
  let restartOk = true;
  let hotReloadResult = null;
@@ -10186,7 +10187,7 @@ const _syncWarnings = [];
  }
  } else {
  hotReloadResult = await runHotReload();
- if (!hotReloadResult.ok) {
+ if (!hotReloadResult.ok && restartOnHotReloadFailure) {
  console.warn('[keys] Hot reload failed; falling back to controlled gateway restart');
  try {
   await run('cd /opt/openclaw && docker compose down && docker compose up -d', { timeout: 60000 });
@@ -10200,6 +10201,9 @@ const _syncWarnings = [];
   warnings.push(`Gateway restart failed: ${restartErr.message}`);
   console.error('[keys] Controlled restart fallback failed:', restartErr.message);
  }
+ } else if (!hotReloadResult.ok) {
+  reloadMode = 'manual_restart_required';
+  warnings.push('Hot reload failed; gateway restart was not requested.');
  }
  }
 
@@ -11605,7 +11609,12 @@ else
  echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
 fi
 GATEWAY_PORT="\${1:-18789}"
-exec node dist/index.js gateway --allow-unconfigured --bind lan --port "$GATEWAY_PORT"
+GATEWAY_PORT="\$(printf '%s' "\$GATEWAY_PORT" | tr -cd '0-9')"
+if [ -z "\$GATEWAY_PORT" ] || [ "\$GATEWAY_PORT" -lt 1 ] || [ "\$GATEWAY_PORT" -gt 65535 ]; then
+ echo "[startup] Invalid gateway port '\${1:-}', falling back to 18789"
+ GATEWAY_PORT=18789
+fi
+exec node dist/index.js gateway --allow-unconfigured --bind lan --port "\$GATEWAY_PORT"
 `;
  fs.writeFileSync('/opt/openclaw-data/startup.sh', startupScript, { mode: 0o755 });
  console.log('Startup script written to /opt/openclaw-data/startup.sh');
