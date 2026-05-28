@@ -185,15 +185,14 @@ function normalizePairedDeviceMap(paired = {}) {
   const clientId = String(entry.clientId || '').toLowerCase();
   const clientMode = String(entry.clientMode || '').toLowerCase();
   const shouldCarryOperatorScopes = String(entry.role || '').toLowerCase() === 'operator'
-   && (
-    deviceId === deviceIdentity?.deviceId
-    || clientId === 'gateway-client'
-    || clientId === 'cli'
-    || clientMode === 'backend'
-    || clientMode === 'cli'
-    || clientMode === 'probe'
-    || String(entry.displayName || '').toLowerCase() === 'agent'
-   );
+   || (Array.isArray(entry.roles) && entry.roles.map((role) => String(role || '').toLowerCase()).includes('operator'))
+   || clientId === 'gateway-client'
+   || clientId === 'gateway-internal'
+   || clientId === 'cli'
+   || clientMode === 'backend'
+   || clientMode === 'cli'
+   || clientMode === 'probe'
+   || String(entry.displayName || '').toLowerCase() === 'agent';
   if (shouldCarryOperatorScopes) {
    const mergedScopes = Array.from(new Set([
     ...(Array.isArray(entry.scopes) ? entry.scopes : []),
