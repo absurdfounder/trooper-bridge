@@ -1307,8 +1307,12 @@ mkdir -p "$JITI_CACHE_DIR" && chown 1000:1000 "$JITI_CACHE_DIR" && chmod 755 "$J
 chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
 chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
-# Drop back to node user for the gateway process
-exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/home/node/.cache/jiti node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+# Drop back to node user for the gateway process when running as root.
+if [ "$(id -u)" = "0" ]; then
+  exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/home/node/.cache/jiti node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+else
+  exec bash -lc "DISPLAY=:99 JITI_CACHE_DIR=/home/node/.cache/jiti node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+fi
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh
 

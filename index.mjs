@@ -1355,7 +1355,10 @@ class OpenClawGateway {
  if (this._authReject) this._authReject(new Error('Auth timeout'));
  }, 15000);
 
- authPromise.finally(() => clearTimeout(authTimeout));
+ authPromise.then(
+ () => clearTimeout(authTimeout),
+ () => clearTimeout(authTimeout),
+ );
 
  // The bridge is a local backend gateway client. Upstream OpenClaw allows this
  // loopback + shared-token path to connect without device pairing, which avoids
@@ -1429,6 +1432,18 @@ class OpenClawGateway {
 	 this.lastAuthError = `${errMsg}${details}`;
 	 this.lastAuthAt = Date.now();
 	 }
+ if (frame.id === this._authRequestId && /gateway starting|retry shortly|starting up|temporarily unavailable/i.test(errMsg)) {
+ this._pendingRequests.delete(frame.id);
+ this._reconnectDelay = Math.max(this._reconnectDelay, 10000);
+ console.log(`[OpenClaw] Gateway is still starting; retrying in ${Math.round(this._reconnectDelay / 1000)}s`);
+ if (this._authResolve) {
+ const res = this._authResolve;
+ this._authReject = null;
+ this._authResolve = null;
+ res(null);
+ }
+ return;
+ }
  // If auth drifted after a reinstall/config restore, repair openclaw.json to the bridge's
  // live token and restart the gateway so the next reconnect uses a consistent token.
  if (frame.id === this._authRequestId && /token mismatch|token missing|unauthorized/i.test(errMsg)) {
@@ -8882,17 +8897,29 @@ app.put('/gateway/config', (req, res) => {
     configRepair,
   });
  }
- console.log('Gateway config updated, restarting...');
+ const restartRequested = req.query?.restart === 'true' || req.body?.restartGateway === true || req.body?.restart === true;
  upsertBridgePairedDevice({ force: true, reason: 'config-update' });
- const restartOutput = execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 }).toString();
  gateway.token = getDesiredGatewayToken() || gateway.token;
- gateway.forceReconnect(15000, 'config-update');
+ let applyOutput = '';
+ if (restartRequested) {
+  console.log('Gateway config updated, restarting...');
+  applyOutput = execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 }).toString();
+  gateway.forceReconnect(15000, 'config-update');
+ } else {
+  console.log('Gateway config updated, requesting hot reload...');
+  try {
+   applyOutput = execSync('docker exec openclaw-openclaw-gateway-1 kill -USR1 1 2>&1', { timeout: 5000 }).toString();
+  } catch (reloadErr) {
+   applyOutput = reloadErr.message;
+  }
+ }
  res.json({
    success: true,
-   message: 'Config updated and gateway restart scheduled',
+   message: restartRequested ? 'Config updated and gateway restart scheduled' : 'Config updated and hot reload requested',
    changed,
    configRepair,
-   restartOutput: restartOutput.trim().slice(-2000),
+   reload: restartRequested ? 'restart' : 'hot',
+   applyOutput: String(applyOutput || '').trim().slice(-2000),
  });
  } catch (err) { res.status(500).json({ error: 'Failed to update config', details: err.stderr?.toString() || err.message }); }
 });
@@ -10209,15 +10236,10 @@ app.get('/config/provider-settings', (req, res) => {
    }
   } catch {}
 
-  // Settings from SQLite
+ // Settings from SQLite
  const modelRouting = readConfigKey('modelRouting') || {};
  const providerModels = readConfigKey('providerModels') || {};
  const modelRoutingFallbacks = readConfigKey('modelRoutingFallbacks') || {};
-  try {
-   syncStoredMediaGenerationRoutingToOpenClawConfig('provider-settings-read');
-  } catch (e) {
-   console.warn(`[bridge] Media generation routing sync skipped during provider-settings read: ${e.message}`);
-  }
   const pendingBridgeApply = readConfigKey('pendingBridgeApply') || false;
   const defaultModel = modelRouting.chat || readConfigKey('defaultModel') || null;
   const composerChatModel = readConfigKey('composerChatModel') || null;

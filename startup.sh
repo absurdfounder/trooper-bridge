@@ -43,9 +43,20 @@ export OPENCLAW_NO_RESPAWN=1
 # Auto-repair config after upgrades (prevents crash loops from schema changes).
 # Newer OpenClaw releases advertise `doctor --repair`; older builds used `--fix`.
 echo "[startup] Running openclaw doctor repair (auto-heal config)..."
-su -s /bin/bash node -c "node dist/index.js doctor --repair" 2>&1 \
-  || su -s /bin/bash node -c "node dist/index.js doctor --fix" 2>&1 \
+run_as_node() {
+  if [ "$(id -u)" = "0" ]; then
+    su -s /bin/bash node -c "$1"
+  else
+    bash -lc "$1"
+  fi
+}
+run_as_node "node dist/index.js doctor --repair" 2>&1 \
+  || run_as_node "node dist/index.js doctor --fix" 2>&1 \
   || echo "[startup] WARNING: doctor repair failed (non-fatal)"
 
 # Start gateway as node user
-exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+if [ "$(id -u)" = "0" ]; then
+  exec su -s /bin/bash node -c "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+else
+  exec bash -lc "DISPLAY=:99 NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind loopback --port $GATEWAY_PORT"
+fi
