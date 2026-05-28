@@ -531,10 +531,10 @@ function getDevicePublicKeyBase64Url(identity) {
  return base64UrlEncode(spki.subarray(ED25519_SPKI_PREFIX.length));
 }
 
-function buildDeviceAuthPayload({ deviceId, clientId, clientMode, role, scopes, signedAtMs, token, nonce }) {
- const version = nonce ? 'v2' : 'v1';
+function buildDeviceAuthPayload({ deviceId, clientId, clientMode, role, scopes, signedAtMs, token, nonce, platform, deviceFamily }) {
+ const version = nonce ? 'v3' : 'v1';
  const parts = [version, deviceId, clientId, clientMode, role, scopes.join(','), String(signedAtMs), token || ''];
- if (version === 'v2') parts.push(nonce || '');
+ if (version === 'v3') parts.push(nonce || '', platform || '', deviceFamily || '');
  return parts.join('|');
 }
 
@@ -1453,10 +1453,11 @@ class OpenClawGateway {
  () => clearTimeout(authTimeout),
  );
 
- // The bridge is a local backend gateway client. Upstream OpenClaw allows this
- // loopback + shared-token path to connect without device pairing, which avoids
- // pairing deadlocks during fresh snapshot boots.
+ if (USE_GATEWAY_DEVICE_AUTH) {
+ console.log('[OpenClaw] Waiting for gateway connect challenge...');
+ } else {
  this._sendConnect();
+ }
  return authPromise;
  }
 
@@ -1477,11 +1478,14 @@ class OpenClawGateway {
  const scopes = OPERATOR_SCOPES;
  const nonce = this._connectNonce || undefined;
  const operatorDeviceToken = getBridgeOperatorDeviceToken();
- const authToken = operatorDeviceToken || this.token;
+ const signatureToken = this.token || operatorDeviceToken;
+ const auth = {};
+ if (this.token) auth.token = this.token;
+ if (operatorDeviceToken) auth.deviceToken = operatorDeviceToken;
  const params = {
  minProtocol: 1, maxProtocol: 4,
- client: { id: 'gateway-client', displayName: 'Trooper Bridge', version: '2.1.0', platform: 'linux', mode: 'backend' },
- auth: { token: authToken },
+ client: { id: 'gateway-client', displayName: 'Trooper Bridge', version: '2.1.0', platform: 'linux', mode: 'backend', deviceFamily: 'cloud' },
+ auth,
  role, scopes,
  };
 
@@ -1489,7 +1493,7 @@ class OpenClawGateway {
  const signedAtMs = Date.now();
  const payload = buildDeviceAuthPayload({
  deviceId: deviceIdentity.deviceId, clientId: 'gateway-client', clientMode: 'backend',
- role, scopes, signedAtMs, token: authToken, nonce,
+ role, scopes, signedAtMs, token: signatureToken, nonce, platform: 'linux', deviceFamily: 'cloud',
  });
  const signature = signDevicePayload(deviceIdentity.privateKeyPem, payload);
  const publicKey = getDevicePublicKeyBase64Url(deviceIdentity);
