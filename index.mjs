@@ -5665,9 +5665,49 @@ function readGatewayContainerStatus({ includeLogs = false } = {}) {
  return result;
 }
 
+let activeRuntimeOperation = null;
+
+function beginRuntimeOperation(kind, detail = {}, ttlMs = 120000) {
+ const operation = {
+  kind,
+  detail,
+  startedAt: Date.now(),
+  expiresAt: Date.now() + ttlMs,
+ };
+ activeRuntimeOperation = operation;
+ return () => {
+  if (activeRuntimeOperation === operation) {
+   activeRuntimeOperation = {
+    ...operation,
+    completedAt: Date.now(),
+    expiresAt: Date.now() + 30000,
+   };
+  }
+ };
+}
+
+function getActiveRuntimeOperation() {
+ if (!activeRuntimeOperation) return null;
+ if (activeRuntimeOperation.expiresAt && activeRuntimeOperation.expiresAt < Date.now()) {
+  activeRuntimeOperation = null;
+  return null;
+ }
+ return activeRuntimeOperation;
+}
+
+function normalizeGatewayState(runtimeState, { setupDone = true, activeOperation = null } = {}) {
+ if (!setupDone) return 'installing';
+ if (activeOperation) return 'reconciling';
+ if (runtimeState === 'ok') return 'ready';
+ if (runtimeState === 'restarting' || runtimeState === 'connecting' || runtimeState === 'gateway_busy') return 'reconnecting';
+ if (runtimeState === 'gateway_down' || runtimeState === 'auth_error') return 'down';
+ return 'reconnecting';
+}
+
 function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
  const container = readGatewayContainerStatus({ includeLogs });
  const now = Date.now();
+ const activeOperation = getActiveRuntimeOperation();
  const wsReady = !!gateway.isReady;
  const recentAuthError = gateway.lastAuthError && gateway.lastAuthAt && now - gateway.lastAuthAt < 5 * 60 * 1000;
 	 const recentSnapshotError = gateway.lastSnapshotErrorAt && now - gateway.lastSnapshotErrorAt < 2 * 60 * 1000;
@@ -5708,6 +5748,8 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
  return {
   ...container,
   status: runtimeState,
+  gateway_state: normalizeGatewayState(runtimeState, { activeOperation }),
+  currentOperation: activeOperation,
   containerStatus: container.status,
   state: runtimeState,
   stateReason,
@@ -5765,6 +5807,9 @@ app.get('/health', async (req, res) => {
 
  const gatewayStatus = buildGatewayRuntimeStatus();
  const gatewayHealthy = gatewayStatus.connected === true;
+ const gatewayState = !setupDone
+   ? 'installing'
+   : normalizeGatewayState(gatewayStatus.status, { setupDone, activeOperation: gatewayStatus.currentOperation });
  const healthStatus = !setupDone
    ? 'installing'
    : gatewayHealthy
@@ -5775,6 +5820,7 @@ app.get('/health', async (req, res) => {
 
  res.json({
  status: healthStatus,
+ gateway_state: gatewayState,
  service: 'openclaw-bridge',
 	 reason: healthStatus === 'ok' || healthStatus === 'installing' ? null : gatewayStatus.stateReason,
 	 gateway: gatewayStatus,
@@ -7463,6 +7509,7 @@ app.get('/agents/:name/workspace', (req, res) => {
 // Write workspace files for any agent (main or SPC) — used by provision.js post-deploy
 app.put('/agents/:name/workspace', (req, res) => {
  const name = req.params.name;
+ const endOperation = beginRuntimeOperation('workspace_sync', { agent: name }, 120000);
  let workspacePath;
  if (name === 'main' || name === 'Team Lead') {
  workspacePath = getAgentWorkspacePath('main');
@@ -7501,13 +7548,19 @@ app.put('/agents/:name/workspace', (req, res) => {
 	 res.json({ success: true, written, skipped, unchanged });
 	 } catch (err) {
  res.status(500).json({ error: err.message });
+ } finally {
+ endOperation();
  }
 });
 
 // Write company context to LEAD + all SPC workspaces
 app.post('/agents/company-context', (req, res) => {
+ const endOperation = beginRuntimeOperation('workspace_reconcile', { scope: 'company-context' }, 120000);
  const { companyDocs, companyName } = req.body;
- if (!companyDocs) return res.status(400).json({ error: 'companyDocs required' });
+ if (!companyDocs) {
+ endOperation();
+ return res.status(400).json({ error: 'companyDocs required' });
+ }
 
  try {
  const content = `# ${companyName || 'Company'} Context\n\n${companyDocs}`;
@@ -7537,6 +7590,8 @@ app.post('/agents/company-context', (req, res) => {
  res.json({ success: true });
  } catch (err) {
  res.status(500).json({ error: err.message });
+ } finally {
+ endOperation();
  }
 });
 
@@ -8942,6 +8997,7 @@ app.post('/gateway/restart', (req, res) => {
 });
 
 app.post('/gateway/plugins/sync', (req, res) => {
+ const endOperation = beginRuntimeOperation('plugin_sync', { pluginId: req.body?.pluginId || null }, 120000);
  try {
   const { pluginId, files, install = true } = req.body || {};
   const result = syncGatewayPlugin({
@@ -8956,10 +9012,13 @@ app.post('/gateway/plugins/sync', (req, res) => {
   res.json({ success: true, ...result });
  } catch (err) {
   res.status(/required|invalid|allowlisted|written/i.test(err.message) ? 400 : 500).json({ error: err.message });
+ } finally {
+  endOperation();
  }
 });
 
 app.post('/gateway/plugins/install', (req, res) => {
+ const endOperation = beginRuntimeOperation('plugin_install', { pluginId: req.body?.pluginId || null }, 120000);
  try {
   const pluginPath = String(req.body?.path || '').trim();
   const pluginId = req.body?.pluginId;
@@ -8968,16 +9027,21 @@ app.post('/gateway/plugins/install', (req, res) => {
   res.json({ success: true, ...result });
  } catch (err) {
   res.status(/required|invalid|allowlisted/i.test(err.message) ? 400 : 500).json({ error: err.message });
+ } finally {
+  endOperation();
  }
 });
 
 app.post('/gateway/plugins/install-package', (req, res) => {
+ const endOperation = beginRuntimeOperation('plugin_install_package', { packageName: req.body?.packageName || null }, 180000);
  try {
   const result = installOpenClawNpmPlugin({ packageName: req.body?.packageName, execSync });
   console.log(`📦 Installed OpenClaw plugin package ${result.packageName}`);
   res.json({ success: true, ...result });
  } catch (err) {
   res.status(/required|allowlisted/i.test(err.message) ? 400 : 500).json({ error: err.message });
+ } finally {
+  endOperation();
  }
 });
 
