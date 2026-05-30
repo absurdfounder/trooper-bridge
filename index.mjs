@@ -553,6 +553,11 @@ const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || '';
 const bridgeWS = new BridgeWSServer({ server, path: '/ws', bridgeAuthToken: BRIDGE_AUTH_TOKEN });
 initFirebaseAuth();
 const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.TROOPER_CALLBACK_URL || '';
+const RUNTIME_AUTH_SECRET = process.env.RUNTIME_AUTH_SECRET || '';
+const ORG_ID = process.env.ORG_ID || process.env.DEFAULT_ORG_ID || process.env.ORG_RUNTIME_ORG_ID || '';
+const OPENCLAW_QUOTA_ENFORCEMENT = process.env.OPENCLAW_QUOTA_ENFORCEMENT !== '0';
+const OPENCLAW_COMPANY_PROVIDER_KEYS = process.env.OPENCLAW_COMPANY_PROVIDER_KEYS !== '0';
+const quotaAllowanceCache = new Map();
 
 // OpenClaw gateway connection config
 const OPENCLAW_URL = process.env.OPENCLAW_URL || 'http://127.0.0.1:18789';
@@ -560,7 +565,191 @@ const OPENCLAW_CONFIG_PATH = '/opt/openclaw-data/config/openclaw.json';
 const USE_GATEWAY_DEVICE_AUTH = process.env.OPENCLAW_BRIDGE_DEVICE_AUTH === '1';
 
 function cloneJson(value) {
- return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {};
+	 return value && typeof value === 'object' ? JSON.parse(JSON.stringify(value)) : {};
+}
+
+function runtimeQuotaConfigured() {
+ return OPENCLAW_QUOTA_ENFORCEMENT && !!MISSION_CONTROL_URL && !!RUNTIME_AUTH_SECRET && !!ORG_ID;
+}
+
+function hasConfiguredProviderKey() {
+ const names = [
+  'OPENAI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'MISTRAL_API_KEY',
+ ];
+ return names.some((name) => {
+  const value = String(readEnvValue(name) || '').trim();
+  return !!value && !/^__UNSET_/i.test(value);
+ });
+}
+
+function shouldForceHostedRuntimeQuota() {
+ if (!OPENCLAW_COMPANY_PROVIDER_KEYS) return false;
+ return hasConfiguredProviderKey();
+}
+
+function hashProviderKey(key = '') {
+ return createHash('sha256').update(String(key || '')).digest('hex');
+}
+
+function normalizeProviderBillingSource(source, fallback = null) {
+ const value = String(source || '').trim().toLowerCase();
+ if (['trooper', 'company', 'platform', 'default'].includes(value)) return 'trooper';
+ if (['byo', 'user', 'customer', 'own'].includes(value)) return 'byo';
+ return fallback;
+}
+
+function providerFromModelId(model = '') {
+ const value = String(model || '').trim();
+ if (!value) return null;
+ const [provider] = value.split('/');
+ if (!provider || provider === value) return null;
+ if (provider === 'google') return 'gemini';
+ return provider;
+}
+
+function getProviderBillingSources() {
+ return readConfigKey('providerBillingSources') || {};
+}
+
+function writeProviderBillingSources(sources) {
+ writeConfigKey('providerBillingSources', sources || {});
+}
+
+function readActiveProviderKey(provider) {
+ const envContent = (() => {
+  try { return readFileSync('/opt/openclaw/.env', 'utf8'); } catch { return ''; }
+ })();
+ return readProviderEnvValue(envContent, provider);
+}
+
+function getProviderBillingSource(provider) {
+ if (!provider) return shouldForceHostedRuntimeQuota() ? 'trooper' : 'byo';
+ const sources = getProviderBillingSources();
+ const activeKey = readActiveProviderKey(provider);
+ const activeHash = activeKey ? hashProviderKey(activeKey) : null;
+ const stored = sources[provider] || {};
+ const explicit = normalizeProviderBillingSource(stored.activeSource);
+ if (explicit) return explicit;
+ if (activeHash && stored.keySources?.[activeHash]) {
+  return normalizeProviderBillingSource(stored.keySources[activeHash], shouldForceHostedRuntimeQuota() ? 'trooper' : 'byo');
+ }
+ return shouldForceHostedRuntimeQuota() ? 'trooper' : 'byo';
+}
+
+function rememberProviderKeySource(provider, key, source) {
+ if (!provider || !key) return;
+ const normalizedSource = normalizeProviderBillingSource(source, shouldForceHostedRuntimeQuota() ? 'trooper' : 'byo');
+ const sources = getProviderBillingSources();
+ const entry = sources[provider] && typeof sources[provider] === 'object' ? sources[provider] : {};
+ const keySources = entry.keySources && typeof entry.keySources === 'object' ? entry.keySources : {};
+ keySources[hashProviderKey(key)] = normalizedSource;
+ sources[provider] = { ...entry, keySources, activeSource: normalizedSource, updatedAt: Date.now() };
+ writeProviderBillingSources(sources);
+}
+
+function setActiveProviderBillingSource(provider, source) {
+ if (!provider) return;
+ const normalizedSource = normalizeProviderBillingSource(source, shouldForceHostedRuntimeQuota() ? 'trooper' : 'byo');
+ const activeKey = readActiveProviderKey(provider);
+ const sources = getProviderBillingSources();
+ const entry = sources[provider] && typeof sources[provider] === 'object' ? sources[provider] : {};
+ const keySources = entry.keySources && typeof entry.keySources === 'object' ? entry.keySources : {};
+ if (activeKey) keySources[hashProviderKey(activeKey)] = normalizedSource;
+ sources[provider] = { ...entry, keySources, activeSource: normalizedSource, updatedAt: Date.now() };
+ writeProviderBillingSources(sources);
+}
+
+function shouldForceHostedRuntimeQuotaForRun(opts = {}) {
+ const provider = opts.provider || providerFromModelId(opts.model);
+ return getProviderBillingSource(provider) === 'trooper';
+}
+
+function runtimeQuotaCacheKey(opts = {}) {
+ return [
+  ORG_ID,
+  opts.agentId || 'main',
+  opts.model || '',
+  shouldForceHostedRuntimeQuotaForRun(opts) ? 'hosted_provider' : 'runtime_provider',
+ ].join(':');
+}
+
+async function postRuntimeQuota(path, body = {}, { timeoutMs = 5000 } = {}) {
+ const controller = new AbortController();
+ const timeout = setTimeout(() => controller.abort(), timeoutMs);
+ try {
+  const url = `${MISSION_CONTROL_URL.replace(/\/+$/, '')}${path}`;
+  const res = await fetch(url, {
+   method: 'POST',
+   headers: {
+    'content-type': 'application/json',
+    'x-runtime-secret': RUNTIME_AUTH_SECRET,
+   },
+   body: JSON.stringify(body),
+   signal: controller.signal,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { message: text }; }
+  return { ok: res.ok, status: res.status, data };
+ } finally {
+  clearTimeout(timeout);
+ }
+}
+
+async function authorizeRuntimeQuota(opts = {}) {
+ if (!runtimeQuotaConfigured()) return { allowed: true, skipped: true, reason: 'runtime_quota_unconfigured' };
+ const cacheKey = runtimeQuotaCacheKey(opts);
+ const cached = quotaAllowanceCache.get(cacheKey);
+ if (cached && cached.expiresAt > Date.now()) return { allowed: true, cached: true, data: cached.data };
+
+ const forceHostedQuota = shouldForceHostedRuntimeQuotaForRun(opts);
+ const provider = opts.provider || providerFromModelId(opts.model);
+ const result = await postRuntimeQuota(`/api/runtime-quota/${encodeURIComponent(ORG_ID)}/authorize-run`, {
+  agentId: opts.agentId || null,
+  agentName: opts.agentName || null,
+  model: opts.model || null,
+  provider: provider || null,
+  sessionKey: opts.sessionKey || null,
+  providerBillingScope: forceHostedQuota ? 'hosted_provider' : 'runtime_provider',
+  forceHostedQuota,
+ }, { timeoutMs: 5000 });
+
+ if (!result.ok || result.data?.allowed === false) {
+  const message = result.data?.message || result.data?.error || `Runtime quota check failed (${result.status})`;
+  const err = new Error(message);
+  err.code = result.data?.code || result.data?.error || 'runtime_quota_denied';
+  err.status = result.status;
+  err.billing = result.data?.billing || null;
+  throw err;
+ }
+
+ const ttlMs = Math.max(5_000, Math.min(120_000, Number(result.data?.allowanceTtlMs) || 60_000));
+ quotaAllowanceCache.set(cacheKey, { expiresAt: Date.now() + ttlMs, data: result.data });
+ return { allowed: true, data: result.data, ttlMs };
+}
+
+async function reportRuntimeQuotaUsage({ usage, runId, sessionKey, opts = {} } = {}) {
+ if (!runtimeQuotaConfigured() || !usage) return null;
+ try {
+  return await postRuntimeQuota(`/api/runtime-quota/${encodeURIComponent(ORG_ID)}/record-usage`, {
+   usage,
+   runId: runId || usage?.runId || null,
+   sessionKey: sessionKey || null,
+   agentId: opts.agentId || null,
+   agentName: opts.agentName || null,
+   model: opts.model || usage?.model || null,
+   provider: usage?.provider || null,
+   source: 'openclaw-runtime',
+  }, { timeoutMs: 5000 });
+ } catch (err) {
+  console.warn(`[runtime-quota] failed to report usage: ${err.message}`);
+  return null;
+ }
 }
 
 function finiteUsageNumber(value) {
@@ -2138,10 +2327,17 @@ class OpenClawGateway {
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
- const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
- const steerMode = opts.steer === true;
- if (!steerMode) await assertLocalGatewayModelReachable(effectiveRequestedModel);
- const steerWaitTimeoutMs = Math.max(30000, Math.min(timeoutMs, Number(opts.steerTimeoutMs) || timeoutMs));
+	 const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
+	 const steerMode = opts.steer === true;
+	 if (!steerMode) await assertLocalGatewayModelReachable(effectiveRequestedModel);
+	 if (!steerMode) {
+	  await authorizeRuntimeQuota({
+	   ...opts,
+	   model: explicitModel || effectiveRequestedModel,
+	   sessionKey,
+	  });
+	 }
+	 const steerWaitTimeoutMs = Math.max(30000, Math.min(timeoutMs, Number(opts.steerTimeoutMs) || timeoutMs));
  let steerAckRunId = null;
  let steerRunComplete = false;
  let steerCompletionResolve = null;
@@ -2951,8 +3147,17 @@ const formattedToolLog = toolLog.map(t => ({
   console.warn(`[usage] Failed to read session history usage for ${sessionKey}: ${usageErr.message}`);
  }
 
- if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
- return { response, toolLog: formattedToolLog, runId: mainRunId || null, sessionKey, usage: runUsage || null };
+	 reportRuntimeQuotaUsage({
+	  usage: runUsage,
+	  runId: mainRunId || null,
+	  sessionKey,
+	  opts: {
+	   ...opts,
+	   model: explicitModel || effectiveRequestedModel,
+	  },
+	 });
+	 if (response) console.log(`[OpenClaw] Agent streaming response: ${response.length} chars (${toolLog.length} tool calls)`);
+	 return { response, toolLog: formattedToolLog, runId: mainRunId || null, sessionKey, usage: runUsage || null };
  } finally {
  if (historyPoller) clearInterval(historyPoller);
  if (subagentDrainTimer) clearTimeout(subagentDrainTimer);
@@ -9587,12 +9792,12 @@ app.get('/config/api-keys', (req, res) => {
  if (!key || key.length < 8) return key ? '****' : '';
  return key.substring(0, 4) + '****' + key.substring(key.length - 4);
  };
- const keys = {};
- for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
-  const value = readProviderEnvValue(envContent, provider);
-  keys[provider] = { present: !!value, masked: mask(value) };
- }
- res.json({ keys });
+	 const keys = {};
+	 for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
+	  const value = readProviderEnvValue(envContent, provider);
+	  keys[provider] = { present: !!value, masked: mask(value), source: getProviderBillingSource(provider) };
+	 }
+	 res.json({ keys });
  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -9630,7 +9835,7 @@ app.post('/config/api-keys', async (req, res) => {
  keysUpdateInProgress = true;
  try {
  const body = req.body || {};
- const { modelRouting: inModelRouting, providerModels: inProviderModels, modelRoutingFallbacks: inFallbacks, selectedModel, provider: settingsProvider } = body;
+	 const { modelRouting: inModelRouting, providerModels: inProviderModels, modelRoutingFallbacks: inFallbacks, selectedModel, provider: settingsProvider, providerKeySources = {}, providerKeySource } = body;
  const {
   anthropicKey, openaiKey, geminiKey, braveKey, composioKey, openrouterKey, mistralKey, qwenKey,
   deepseekKey, xaiKey, perplexityKey, exaKey, tavilyKey, serpapiKey, searchapiKey, browserbaseKey,
@@ -9706,8 +9911,14 @@ app.post('/config/api-keys', async (req, res) => {
  const { promisify } = await import('util');
  const run = promisify(exec);
 
-	 let envContent = '';
-	 try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+		 let envContent = '';
+		 try { envContent = readFileSync('/opt/openclaw/.env', 'utf8'); } catch {}
+		 const previousProviderKeys = {};
+		 const previousProviderSources = {};
+		 for (const provider of Object.keys(providerKeyPayloads)) {
+		  previousProviderKeys[provider] = readProviderEnvValue(envContent, provider);
+		  previousProviderSources[provider] = getProviderBillingSource(provider);
+		 }
 
  // Helper: update or append env var
  const setEnvVar = (name, value) => {
@@ -9719,11 +9930,11 @@ app.post('/config/api-keys', async (req, res) => {
  }
  };
 
-	 for (const [provider, keyValue] of Object.entries(providerKeyPayloads)) {
-	  const envName = PROVIDER_ENV_WRITE_NAME_MAP[provider];
-	  if (!envName) continue;
-	  const normalizedValue = provider === 'composio' ? normalizeComposioApiKey(keyValue) : keyValue;
-	  setEnvVar(envName, normalizedValue);
+		 for (const [provider, keyValue] of Object.entries(providerKeyPayloads)) {
+		  const envName = PROVIDER_ENV_WRITE_NAME_MAP[provider];
+		  if (!envName) continue;
+		  const normalizedValue = provider === 'composio' ? normalizeComposioApiKey(keyValue) : keyValue;
+		  setEnvVar(envName, normalizedValue);
 	 }
 	 for (const [envName, envValue] of Object.entries(channelEnvUpdates)) {
 	  setEnvVar(envName, envValue);
@@ -9732,7 +9943,7 @@ app.post('/config/api-keys', async (req, res) => {
 	 writeTextFileIfChanged('/opt/openclaw/.env', envContent);
 
  // Track backup keys — store each new non-empty key in the backup list
- const BACKUP_KEY_PROVIDERS = {
+	 const BACKUP_KEY_PROVIDERS = {
   anthropic: anthropicKey, openai: openaiKey, gemini: geminiKey,
   openrouter: openrouterKey, mistral: mistralKey, qwen: qwenKey,
   deepseek: deepseekKey, xai: xaiKey, perplexity: perplexityKey,
@@ -9742,16 +9953,27 @@ app.post('/config/api-keys', async (req, res) => {
   'vercel-ai-gateway': aiGatewayKey, kilocode: kilocodeKey,
   'cloudflare-ai-gateway': cloudflareAiGatewayKey, synthetic: syntheticKey,
   volcengine: volcanoEngineKey, byteplus: byteplusKey,
- };
- for (const [prov, keyVal] of Object.entries(BACKUP_KEY_PROVIDERS)) {
-  if (keyVal) {
-   const backups = readConfigKey(`backupKeys:${prov}`) || [];
-   if (!backups.includes(keyVal)) {
-    backups.push(keyVal);
-    writeConfigKey(`backupKeys:${prov}`, backups);
-   }
-  }
- }
+	 };
+	 for (const [prov, keyVal] of Object.entries(BACKUP_KEY_PROVIDERS)) {
+	  const previousKey = previousProviderKeys[prov];
+	  if (previousKey && previousKey !== keyVal) {
+	   const backups = readConfigKey(`backupKeys:${prov}`) || [];
+	   if (!backups.includes(previousKey)) {
+	    backups.push(previousKey);
+	    writeConfigKey(`backupKeys:${prov}`, backups);
+	   }
+	   rememberProviderKeySource(prov, previousKey, previousProviderSources[prov]);
+	  }
+	  if (keyVal) {
+	   const backups = readConfigKey(`backupKeys:${prov}`) || [];
+	   if (!backups.includes(keyVal)) {
+	    backups.push(keyVal);
+	    writeConfigKey(`backupKeys:${prov}`, backups);
+	   }
+	   const source = normalizeProviderBillingSource(providerKeySources[prov] || providerKeySource, 'byo');
+	   rememberProviderKeySource(prov, keyVal, source);
+	  }
+	 }
 
  // Save provider settings if included in payload
  if (inModelRouting !== undefined) writeConfigKey('modelRouting', inModelRouting);
@@ -10407,11 +10629,11 @@ app.get('/config/provider-settings', (req, res) => {
    return key.substring(0, 4) + '****' + key.substring(key.length - 4);
   };
 
-  const providers = {};
-  for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
-   const value = readProviderEnvValue(envContent, provider);
-   providers[provider] = { present: !!value, masked: mask(value) };
-  }
+	  const providers = {};
+	  for (const provider of Object.keys(PROVIDER_ENV_NAME_MAP)) {
+	   const value = readProviderEnvValue(envContent, provider);
+	   providers[provider] = { present: !!value, masked: mask(value), source: getProviderBillingSource(provider) };
+	  }
 
   // OpenAI Codex auth profile
   let openaiCodexAuthProfile = null;
@@ -10622,14 +10844,20 @@ app.get('/config/provider-keys/:provider', (req, res) => {
     if (match) activeKey = match[1].trim();
    } catch {}
   }
-  const mask = (k) => {
-   if (!k || k.length < 8) return k ? '****' : '';
-   return k.substring(0, 4) + '****' + k.substring(k.length - 4);
-  };
-  res.json({
-   keys: backupKeys.map((k, i) => ({ index: i, masked: mask(k), active: k === activeKey })),
-   activeKeyMasked: mask(activeKey),
-  });
+	  const mask = (k) => {
+	   if (!k || k.length < 8) return k ? '****' : '';
+	   return k.substring(0, 4) + '****' + k.substring(k.length - 4);
+	  };
+	  const sources = getProviderBillingSources();
+	  const sourceForKey = (key) => normalizeProviderBillingSource(
+	   sources?.[req.params.provider]?.keySources?.[hashProviderKey(key)],
+	   getProviderBillingSource(req.params.provider),
+	  );
+	  res.json({
+	   keys: backupKeys.map((k, i) => ({ index: i, masked: mask(k), active: k === activeKey, source: sourceForKey(k) })),
+	   activeKeyMasked: mask(activeKey),
+	   activeSource: getProviderBillingSource(req.params.provider),
+	  });
  } catch (err) {
   res.status(500).json({ error: err.message });
  }
@@ -10658,14 +10886,31 @@ app.post('/config/provider-keys/:provider/switch', (req, res) => {
   } else {
    envContent += `\n${envName}=${newKey}\n`;
   }
-	   writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	  writeTextFileIfChanged('/opt/openclaw/.env', envContent);
+	  const sources = getProviderBillingSources();
+	  const source = normalizeProviderBillingSource(
+	   sources?.[req.params.provider]?.keySources?.[hashProviderKey(newKey)],
+	   getProviderBillingSource(req.params.provider),
+	  );
+	  setActiveProviderBillingSource(req.params.provider, source);
 
-  writeConfigKey('pendingBridgeApply', true);
-  res.json({ ok: true, pendingBridgeApply: true });
- } catch (err) {
-  res.status(500).json({ error: err.message });
- }
-});
+	  writeConfigKey('pendingBridgeApply', true);
+	  res.json({ ok: true, pendingBridgeApply: true, source });
+	 } catch (err) {
+	  res.status(500).json({ error: err.message });
+	 }
+	});
+
+	app.post('/config/provider-keys/:provider/source', (req, res) => {
+	 try {
+	  const source = normalizeProviderBillingSource(req.body?.source);
+	  if (!source) return res.status(400).json({ error: 'Invalid source. Use "trooper" or "byo".' });
+	  setActiveProviderBillingSource(req.params.provider, source);
+	  res.json({ ok: true, provider: req.params.provider, source });
+	 } catch (err) {
+	  res.status(500).json({ error: err.message });
+	 }
+	});
 
 app.delete('/config/provider-keys/:provider/:index', (req, res) => {
  try {
@@ -11854,7 +12099,6 @@ app.post('/callback/result', async (req, res) => {
 // Browsers connect directly to the bridge WS instead of going through Render.
 // Auth via Firebase ID tokens. Chat processing deferred to Phase 4.
 // (server, bridgeWS, and initFirebaseAuth() are initialized near the top of the file)
-const ORG_ID = process.env.ORG_ID || '';
 
 // ── OpenClaw Config (read/write openclaw.json) ──────────────────────
 app.get('/config/openclaw', (req, res) => {
