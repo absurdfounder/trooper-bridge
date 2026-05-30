@@ -2043,7 +2043,7 @@ class OpenClawGateway {
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
- const timeoutMs = opts.timeoutMs || 600000;
+ const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : 600000;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
  const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
  await assertLocalGatewayModelReachable(effectiveRequestedModel);
@@ -2071,6 +2071,7 @@ class OpenClawGateway {
  // Inactivity timeout — resets on each gateway event
  let timeout;
  const resetTimeout = () => {
+  if (timeoutMs <= 0) return;
   if (timeout) clearTimeout(timeout);
   timeout = setTimeout(() => {
    this._pendingRequests.delete(id);
@@ -2430,7 +2431,7 @@ class OpenClawGateway {
  // Session key in canonical format: agent:{agentId}:{rest}
  const _agentId2 = opts.agentId || 'main';
  const sessionKey = opts.sessionKey || `agent:${_agentId2}:hook:trooper:${(opts.agentName || 'default').toLowerCase().replace(/\s+/g, '-')}`;
- const timeoutMs = opts.timeoutMs || 600000;
+ const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : 600000;
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
@@ -3062,6 +3063,7 @@ function extractPatchFilePaths(patchText = '') {
  // Inactivity timeout — resets every time the gateway sends an event
  let timeout;
  const resetTimeout = () => {
+  if (timeoutMs <= 0) return;
   if (timeout) clearTimeout(timeout);
   timeout = setTimeout(() => {
    this._pendingRequests.delete(id);
@@ -4944,7 +4946,7 @@ async function handleIncomingTask(req, res) {
  thinking: thinking || undefined,
  model: nonStreamModel,
  extraSystemPrompt: nonStreamSystemPrompt,
- timeoutMs: 600000,
+ timeoutMs: 0,
  };
  let result;
  try {
@@ -5159,10 +5161,10 @@ const emitViewportScreenshotFrame = ({
 	 let streamingEffectiveModel = null;
 	 try {
 	 console.log(`[${id}] SSE streaming to OpenClaw agent:${agentId} for ${agentName || 'default'}${context?.executionLane ? ` [lane:${context.executionLane}]` : isBrowserTask ? ' [browser task]' : ''}...`);
-	 // Chat and task work both need a long inactivity window because OpenClaw can
-	 // stay alive while a connector/tool is resolving quietly.
+	 // Chat and task work should finish when OpenClaw emits done/fail/abort,
+	 // not when a connector/tool stays quiet for a while.
 	 const isTaskWork = !!(context?.taskId);
-	 const inactivityMs = 600000;
+	 const inactivityMs = 0;
 	 ({ explicitModel: streamingExplicitModel, effectiveModel: streamingEffectiveModel } = resolveGatewayModelSelection(model));
 	 const codexBypass = resolveRuntimeCodexRefreshBypass(streamingExplicitModel || streamingEffectiveModel);
 	 if (codexBypass?.fallbackModel) {
