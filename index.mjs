@@ -3548,7 +3548,7 @@ try {
  if (hardenedActiveMemory.changed) {
  config = hardenedActiveMemory.config;
  changed = true;
- console.log('[bridge] Migrated: hardened active-memory hook for Trooper runtime');
+ console.log('[bridge] Migrated: disabled active-memory hook for Trooper runtime');
  }
  // Startup migration: remove diffs plugin — @pierre/diffs module not available
  if (config.plugins?.entries?.diffs) {
