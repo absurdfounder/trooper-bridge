@@ -8905,6 +8905,7 @@ async function materializeSkillForRuntime({ slug, sourceRepo, skillId, sourcePat
 app.post('/skills/:slug/install', async (req, res) => {
  const slug = req.params.slug;
  if (!slug) return res.status(400).json({ error: 'Skill slug required' });
+ const endOperation = beginRuntimeOperation('skill_install', { slug }, 180000);
 
 	 try {
 	  const parsed = parseSkillsMarketplaceSlug(slug);
@@ -8920,6 +8921,44 @@ app.post('/skills/:slug/install', async (req, res) => {
 	  console.log(`📦 Installing skill "${slug}" via skills.sh...`);
 	  let output = '';
 	  let cliError = '';
+	  let materialized = null;
+	  let runtimeSnapshot = null;
+	  const hasDirectSkillPayload = Boolean(
+	   req.body?.content
+	   || (req.body?.files && typeof req.body.files === 'object' && Object.keys(req.body.files).length > 0)
+	   || sourcePath
+	  );
+	  if (hasDirectSkillPayload) {
+	   materialized = await materializeSkillForRuntime({
+	    slug: resolvedSlug,
+	    sourceRepo,
+	    skillId: resolvedSkillId,
+	    sourcePath,
+	    content: req.body?.content,
+	    files: req.body?.files,
+	   });
+	   if (materialized?.ok) {
+	    const effectiveRuntimeFiles = materialized.files || {};
+	    return res.json({
+	     success: true,
+	     slug,
+	     requestedSkillId: skillId,
+	     resolvedSlug,
+	     resolvedSkillId,
+	     output: '',
+	     materialized,
+	     files: effectiveRuntimeFiles,
+	     runtimeReady: Object.keys(effectiveRuntimeFiles).length > 0,
+	     directMaterialized: true,
+	     cliFallback: false,
+	     cliError: null,
+	     warning: materialized.containerWrites === 0
+	      ? 'Skill files were written to the host runtime while the gateway container was unavailable; they will be visible after the gateway settles.'
+	      : null,
+	    });
+	   }
+	   console.warn(`[skills] Direct materialization for "${slug}" did not find SKILL.md; falling back to skills.sh.`);
+	  }
 	  try {
 	   output = runSkillsCliInstall(sourceRepo, resolvedSkillId);
 	   console.log(`✅ Skill "${slug}" installed: ${output.trim().split('\n').pop()}`);
@@ -8928,7 +8967,6 @@ app.post('/skills/:slug/install', async (req, res) => {
 	   console.error(`❌ skills.sh install failed for "${slug}":`, cliError);
 	  }
 
-	  let runtimeSnapshot = null;
 	  if (!cliError) {
 	   runtimeSnapshot = readRuntimeSkillFiles(resolvedSlug)
 	    || readRuntimeSkillFiles(resolvedSkillId)
@@ -8936,7 +8974,6 @@ app.post('/skills/:slug/install', async (req, res) => {
 	    || readRuntimeSkillFiles(skillId);
 	  }
 
-	  let materialized = null;
 	  if (cliError) {
 	   materialized = await materializeSkillForRuntime({
 	    slug: resolvedSlug,
@@ -9009,6 +9046,8 @@ app.post('/skills/:slug/install', async (req, res) => {
  const stderr = err.stderr?.toString() || err.stdout?.toString() || err.message;
  console.error(`❌ Failed to install skill "${slug}":`, stderr);
  res.status(500).json({ error: `Install failed: ${stderr}` });
+ } finally {
+ endOperation();
  }
 });
 
