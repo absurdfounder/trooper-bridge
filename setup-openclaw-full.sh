@@ -397,8 +397,8 @@ if [ -z "$SERVER_PUBLIC_IP" ]; then
 fi
 
 # Derive hostname from ORG_ID (lowercase, first 12 chars)
-# DNS is created by the Trooper API after Cloudflare confirms the record. The
-# sslip.io host remains the working fallback while DNS is unavailable.
+# DNS is created/repaired by the Trooper API. sslip.io remains configured only
+# as a diagnostic fallback; product routes should use org-*.crabhq.com.
 ORG_SHORT=$(echo "${ORG_ID}" | tr '[:upper:]' '[:lower:]' | head -c 12)
 HTTPS_DOMAIN="org-${ORG_SHORT}.crabhq.com"
 echo "HTTPS domain: ${HTTPS_DOMAIN} (DNS managed by Trooper API)"

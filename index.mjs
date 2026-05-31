@@ -349,7 +349,6 @@ function isBrowserTool(tool) {
 // instead of polling screenshots. Caddy proxies /vnc/* → websockify:6080.
 // Cache the sslip.io domain derived from the Caddyfile (set once at startup or first use)
 let _sslipDomain = null;
-const _gatewayDomainReachabilityCache = new Map();
 function getSslipDomain() {
  if (_sslipDomain !== null) return _sslipDomain || null;
  try {
@@ -359,19 +358,6 @@ function getSslipDomain() {
  } catch {}
  _sslipDomain = ''; // empty string = not found, won't retry
  return null;
-}
-
-function canResolveGatewayDomain(domain) {
- const cached = _gatewayDomainReachabilityCache.get(domain);
- if (cached && Date.now() - cached.checkedAt < 300000) return cached.ok;
- try {
-   execFileSync('getent', ['hosts', domain], { stdio: 'ignore', timeout: 1500 });
-   _gatewayDomainReachabilityCache.set(domain, { ok: true, checkedAt: Date.now() });
-   return true;
- } catch {
-   _gatewayDomainReachabilityCache.set(domain, { ok: false, checkedAt: Date.now() });
-   return false;
- }
 }
 
 function getVNCLiveViewUrl() {
@@ -386,9 +372,7 @@ function getVNCLiveViewUrl() {
    return `https://${sslipDomain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
  }
  const orgShort = orgId.toLowerCase().substring(0, 12);
- const canonicalDomain = `org-${orgShort}.crabhq.com`;
- const domain = canResolveGatewayDomain(canonicalDomain) ? canonicalDomain : sslipDomain;
- if (!domain) return null;
+ const domain = `org-${orgShort}.crabhq.com`;
  return `https://${domain}/vnc/vnc.html?autoconnect=true&resize=scale&path=vnc/websockify&reconnect=true&reconnect_delay=3000`;
 }
 
