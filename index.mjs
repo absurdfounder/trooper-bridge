@@ -12350,23 +12350,159 @@ function getComposioKey() {
  return m ? normalizeComposioApiKey(m[1]) : '';
  } catch { return ''; }
 }
+
+function firstNonEmpty(...values) {
+ for (const value of values) {
+  const text = value == null ? '' : String(value).trim();
+  if (text) return text;
+ }
+ return '';
+}
+
+function composioConnectionItems(data) {
+ if (Array.isArray(data)) return data;
+ if (Array.isArray(data?.items)) return data.items;
+ if (Array.isArray(data?.connected_accounts)) return data.connected_accounts;
+ if (Array.isArray(data?.connections)) return data.connections;
+ return [];
+}
+
+function getComposioConnectionToolkitSlug(connection = {}) {
+ return firstNonEmpty(
+  connection?.toolkit?.slug,
+  connection?.toolkit_slug,
+  connection?.toolkitSlug,
+  connection?.toolkit,
+ ).toLowerCase();
+}
+
+function getComposioConnectionId(connection = {}) {
+ return firstNonEmpty(
+  connection?.connected_account_id,
+  connection?.connectedAccountId,
+  connection?.id,
+  connection?.uuid,
+ );
+}
+
+function getComposioConnectionEntityId(connection = {}) {
+ return firstNonEmpty(
+  connection?.entity_id,
+  connection?.entityId,
+  connection?.user_id,
+  connection?.userId,
+ );
+}
+
+function getComposioConnectionEmail(connection = {}) {
+ return firstNonEmpty(
+  connection?.email,
+  connection?.account_email,
+  connection?.accountEmail,
+  connection?.connected_account_email,
+  connection?.connectedAccountEmail,
+  connection?.data?.email,
+  connection?.data?.account_email,
+  connection?.data?.accountEmail,
+  connection?.data?.val?.email,
+  connection?.data?.val?.account_email,
+  connection?.state?.val?.email,
+  connection?.state?.val?.account_email,
+  connection?.profile?.email,
+  connection?.metadata?.email,
+ );
+}
+
+function isActiveComposioConnection(connection = {}) {
+ const status = firstNonEmpty(connection?.status, connection?.data?.status, connection?.state?.val?.status).toLowerCase();
+ if (!status) return true;
+ return ['active', 'connected', 'enabled', 'complete', 'success', 'ok'].includes(status);
+}
+
+function summarizeComposioAccount(connection = {}, index = 0) {
+ const connectedAccountId = getComposioConnectionId(connection);
+ const entityId = getComposioConnectionEntityId(connection);
+ const email = getComposioConnectionEmail(connection);
+ const alias = firstNonEmpty(connection?.alias, connection?.name, connection?.display_name, connection?.displayName);
+ const wordId = firstNonEmpty(connection?.word_id, connection?.wordId);
+ const label = firstNonEmpty(email, alias, wordId, connectedAccountId, `Account ${index + 1}`);
+ return {
+  index: index + 1,
+  label,
+  email: email || null,
+  alias: alias || null,
+  word_id: wordId || null,
+  connected_account_id: connectedAccountId || null,
+  entity_id: entityId || null,
+  user_id: entityId || null,
+  toolkit_slug: getComposioConnectionToolkitSlug(connection) || null,
+  status: firstNonEmpty(connection?.status, connection?.data?.status, connection?.state?.val?.status) || null,
+  created_at: connection?.created_at || connection?.createdAt || null,
+  updated_at: connection?.updated_at || connection?.updatedAt || null,
+ };
+}
+
+function filterComposioConnections(items, filters = {}) {
+ const toolkit = firstNonEmpty(filters.toolkit_slug, filters.toolkitSlug, filters.toolkit).toLowerCase();
+ const entityId = firstNonEmpty(filters.entity_id, filters.entityId, filters.user_id, filters.userId);
+ const connectedAccountId = firstNonEmpty(
+  filters.connected_account_id,
+  filters.connectedAccountId,
+  filters.connection_id,
+  filters.connectionId,
+  filters.account_id,
+  filters.accountId,
+ );
+ return items.filter((item) => {
+  if (toolkit && getComposioConnectionToolkitSlug(item) !== toolkit) return false;
+  if (entityId && getComposioConnectionEntityId(item) !== entityId) return false;
+  if (connectedAccountId && getComposioConnectionId(item) !== connectedAccountId) return false;
+  return true;
+ });
+}
+
+async function fetchComposioConnections(composioKey) {
+ const resp = await fetch('https://backend.composio.dev/api/v3/connected_accounts?limit=50', {
+  headers: { 'x-api-key': composioKey },
+  signal: AbortSignal.timeout(10000),
+ });
+ if (!resp.ok) {
+  const errText = await resp.text();
+  const error = new Error(errText || 'Composio API error');
+  error.status = resp.status;
+  throw error;
+ }
+ return resp.json();
+}
+
+function accountSelectionPayload(toolkitSlug, choices, reason = 'multiple_accounts') {
+ const toolkitName = toolkitSlug || 'requested toolkit';
+ return {
+  status: 'needs_account_selection',
+  account_selection_required: true,
+  toolkit_slug: toolkitSlug || null,
+  error: `Multiple ${toolkitName} accounts are connected. Ask the user which account to use.`,
+  reason,
+  account_choices: choices,
+  next_step: 'Show these account_choices to the user and ask which account to use. Re-run with connected_account_id and entity_id from the chosen account as top-level fields.',
+ };
+}
+
 app.get('/composio/connections', async (req, res) => {
  try {
  const composioKey = getComposioKey();
  if (!composioKey) return res.status(400).json({ error: 'Composio API key not configured' });
- const resp = await fetch('https://backend.composio.dev/api/v3/connected_accounts?limit=50', {
- headers: { 'x-api-key': composioKey },
- signal: AbortSignal.timeout(10000),
+ const data = await fetchComposioConnections(composioKey);
+ const items = filterComposioConnections(composioConnectionItems(data), req.query || {});
+ res.json({
+  items,
+  connections: items,
+  account_choices: items.map((item, index) => summarizeComposioAccount(item, index)),
+  cursor: data.next_cursor || data.cursor,
  });
- if (!resp.ok) {
- const errText = await resp.text();
- return res.status(resp.status).json({ error: errText || 'Composio API error' });
- }
- const data = await resp.json();
- res.json({ items: data.items || data.connected_accounts || [], cursor: data.next_cursor || data.cursor });
  } catch (err) {
  console.error('Composio connections error:', err.message);
- res.status(500).json({ error: err.message });
+ res.status(err.status || 500).json({ error: err.message });
  }
 });
 
@@ -12435,22 +12571,12 @@ app.post('/composio/tools/execute/:toolSlug', async (req, res) => {
  const toolSlug = String(req.params.toolSlug || '').trim();
  if (!toolSlug) return res.status(400).json({ error: 'Missing Composio tool slug' });
  const body = req.body || {};
- const inferredPluginId = String(body.pluginId || body.toolkitSlug || body.toolkit_slug || toolSlug.split('_')[0] || '').toLowerCase();
- const decision = checkIntegrationPermission({
-  agentId: body.agentId || body.agent_id || req.query.agentId,
-  pluginId: inferredPluginId,
-  connectionId: body.connectionId || body.connectedAccountId || body.connected_account_id,
-  accountId: body.accountId || body.account_id || body.connectedAccountId || body.connected_account_id,
-  action: toolSlug,
- });
- if (!decision.allowed) {
-  return res.status(403).json({ error: 'Integration permission denied', decision });
- }
+ const inferredPluginId = String(body.pluginId || body.plugin_id || body.composioSlug || body.composio_slug || body.toolkitSlug || body.toolkit_slug || toolSlug.split('_')[0] || '').toLowerCase();
  const args = body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments)
   ? body.arguments
   : {};
- const entityId = String(body.entity_id || body.entityId || body.user_id || body.userId || args.entity_id || args.entityId || '').trim();
- const connectedAccountId = String(
+ let entityId = String(body.entity_id || body.entityId || body.user_id || body.userId || args.entity_id || args.entityId || '').trim();
+ let connectedAccountId = String(
   body.connected_account_id
   || body.connectedAccountId
   || body.connection_id
@@ -12465,6 +12591,29 @@ app.post('/composio/tools/execute/:toolSlug', async (req, res) => {
   || args.accountId
   || ''
  ).trim();
+ if ((!entityId || !connectedAccountId) && inferredPluginId) {
+  const connectionData = await fetchComposioConnections(composioKey);
+  const activeChoices = filterComposioConnections(composioConnectionItems(connectionData), { toolkit_slug: inferredPluginId })
+   .filter(isActiveComposioConnection)
+   .map((item, index) => summarizeComposioAccount(item, index));
+  if (activeChoices.length > 1 && (!entityId || !connectedAccountId)) {
+   return res.status(409).json(accountSelectionPayload(inferredPluginId, activeChoices));
+  }
+  if (activeChoices.length === 1) {
+   entityId = entityId || activeChoices[0].entity_id || '';
+   connectedAccountId = connectedAccountId || activeChoices[0].connected_account_id || '';
+  }
+ }
+ const decision = checkIntegrationPermission({
+  agentId: body.agentId || body.agent_id || req.query.agentId,
+  pluginId: inferredPluginId,
+  connectionId: connectedAccountId,
+  accountId: connectedAccountId,
+  action: toolSlug,
+ });
+ if (!decision.allowed) {
+  return res.status(403).json({ error: 'Integration permission denied', decision });
+ }
  const forwardBody = { ...body };
  delete forwardBody.agentId;
  delete forwardBody.agent_id;
@@ -12511,7 +12660,26 @@ app.post('/composio/tools/execute/:toolSlug', async (req, res) => {
  const text = await resp.text();
  let data = {};
  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
- if (!resp.ok) return res.status(resp.status).json(data);
+ if (!resp.ok) {
+  const upstreamSlug = String(data?.slug || data?.code || data?.error || data?.message || '').toLowerCase();
+  if (
+   resp.status === 400
+   && inferredPluginId
+   && (upstreamSlug.includes('connectedaccountentityidrequired') || upstreamSlug.includes('user id is required'))
+  ) {
+   const connectionData = await fetchComposioConnections(composioKey);
+   const activeChoices = filterComposioConnections(composioConnectionItems(connectionData), { toolkit_slug: inferredPluginId })
+    .filter(isActiveComposioConnection)
+    .map((item, index) => summarizeComposioAccount(item, index));
+   if (activeChoices.length > 0) {
+    return res.status(409).json({
+     ...accountSelectionPayload(inferredPluginId, activeChoices, 'composio_requires_account_routing'),
+     upstream_error: data,
+    });
+   }
+  }
+  return res.status(resp.status).json(data);
+ }
  res.json({ ...data, permission: decision });
  } catch (err) {
  console.error('Composio execute error:', err.message);
