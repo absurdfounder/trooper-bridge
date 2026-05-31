@@ -1142,10 +1142,18 @@ function prepareOpenClawConfigForGatewayStart(config) {
 
 function writePreparedOpenClawConfig(prepared) {
  const result = writeJsonFileIfChanged(OPENCLAW_CONFIG_PATH, prepared.config);
- if (result.written) {
-  try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
- }
+ ensureOpenClawConfigOwnership();
  return result.written;
+}
+
+function ensureOpenClawConfigOwnership() {
+ try {
+  if (existsSync(OPENCLAW_CONFIG_PATH)) {
+   execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 });
+  }
+ } catch (err) {
+  console.warn(`[bridge] Failed to repair OpenClaw config ownership: ${err.message}`);
+ }
 }
 
 function writeOpenClawConfig(config) {
@@ -5992,12 +6000,100 @@ function readGatewayContainerStatus({ includeLogs = false } = {}) {
  }
  if (includeLogs) {
   try {
-   result.recentLogs = execSync('docker logs --tail 80 openclaw-openclaw-gateway-1 2>&1', { timeout: 3500 }).toString();
+   result.recentLogs = execSync('docker logs --tail 80 --timestamps openclaw-openclaw-gateway-1 2>&1', { timeout: 3500 }).toString();
   } catch (err) {
    result.recentLogs = result.inspectError || err.message || '';
   }
  }
  return result;
+}
+
+let gatewayOutageState = {
+ active: false,
+ startedAt: 0,
+ reason: null,
+ lastEndedAt: 0,
+ lastDurationMs: 0,
+ lastReason: null,
+};
+
+function formatDurationMs(durationMs = 0) {
+ const totalSeconds = Math.max(0, Math.round(Number(durationMs || 0) / 1000));
+ const minutes = Math.floor(totalSeconds / 60);
+ const seconds = totalSeconds % 60;
+ if (minutes <= 0) return `${seconds}s`;
+ const hours = Math.floor(minutes / 60);
+ const mins = minutes % 60;
+ if (hours <= 0) return `${minutes}m ${seconds}s`;
+ return `${hours}h ${mins}m ${seconds}s`;
+}
+
+function recordGatewayOutageTransition(event, payload = {}) {
+ const meta = {
+  event,
+  ...payload,
+ };
+ appendDiagnosticEvent(event === 'started' ? 'warn' : 'info', `Gateway outage ${event}`, meta);
+ try {
+  writeFileSync(diagnosticsPath('logs', 'gateway-outages.jsonl'), `${JSON.stringify({ ts: new Date().toISOString(), ...meta })}\n`, { flag: 'a', mode: 0o600 });
+ } catch {}
+ const details = payload.durationMs != null
+  ? ` duration=${formatDurationMs(payload.durationMs)}`
+  : '';
+ console.warn(`[gateway-outage] ${event}${details} reason=${payload.reason || 'unknown'}`);
+}
+
+function updateGatewayOutageState(status) {
+ const now = Date.now();
+ const isOut = status.state !== 'ok' || !status.running || !status.websocketConnected;
+ const reason = status.stateReason || status.state || status.containerStatus || 'not_ready';
+ if (isOut && !gatewayOutageState.active) {
+  gatewayOutageState = {
+   ...gatewayOutageState,
+   active: true,
+   startedAt: now,
+   reason,
+  };
+  recordGatewayOutageTransition('started', {
+   startedAt: new Date(now).toISOString(),
+   reason,
+   state: status.state,
+   containerStatus: status.containerStatus,
+   websocketConnected: status.websocketConnected,
+  });
+ } else if (isOut && gatewayOutageState.active) {
+  gatewayOutageState.reason = reason;
+ } else if (!isOut && gatewayOutageState.active) {
+  const startedAt = gatewayOutageState.startedAt || now;
+  const durationMs = now - startedAt;
+  const lastReason = gatewayOutageState.reason || reason;
+  gatewayOutageState = {
+   active: false,
+   startedAt: 0,
+   reason: null,
+   lastEndedAt: now,
+   lastDurationMs: durationMs,
+   lastReason,
+  };
+  recordGatewayOutageTransition('ended', {
+   startedAt: new Date(startedAt).toISOString(),
+   endedAt: new Date(now).toISOString(),
+   durationMs,
+   duration: formatDurationMs(durationMs),
+   reason: lastReason,
+  });
+ }
+ const startedAt = gatewayOutageState.active ? gatewayOutageState.startedAt : 0;
+ return {
+  active: gatewayOutageState.active,
+  startedAt: startedAt ? new Date(startedAt).toISOString() : null,
+  durationMs: startedAt ? now - startedAt : 0,
+  reason: gatewayOutageState.reason,
+  lastEndedAt: gatewayOutageState.lastEndedAt ? new Date(gatewayOutageState.lastEndedAt).toISOString() : null,
+  lastDurationMs: gatewayOutageState.lastDurationMs || 0,
+  lastDuration: gatewayOutageState.lastDurationMs ? formatDurationMs(gatewayOutageState.lastDurationMs) : null,
+  lastReason: gatewayOutageState.lastReason,
+ };
 }
 
 let activeRuntimeOperation = null;
@@ -6080,7 +6176,7 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
   transient = true;
  }
 
- return {
+ const status = {
   ...container,
   status: runtimeState,
   gateway_state: normalizeGatewayState(runtimeState, { activeOperation }),
@@ -6109,6 +6205,8 @@ function buildGatewayRuntimeStatus({ includeLogs = false } = {}) {
   lastSnapshotErrorAt: gateway.lastSnapshotErrorAt,
   snapshotTimeoutCount: gateway.snapshotTimeoutCount,
  };
+ status.outage = updateGatewayOutageState(status);
+ return status;
 }
 
 let lastAutomaticDiagnosticSnapshotAt = 0;
@@ -7118,7 +7216,7 @@ app.get('/admin/raw-logs/bridge', (req, res) => {
    // Try journald first (systemd), then pm2
    let output;
    try {
-     output = execSync(`journalctl -u openclaw-bridge --no-pager -n ${lines} --output=cat 2>/dev/null`, { timeout: 5000 }).toString();
+     output = execSync(`journalctl -u openclaw-bridge --no-pager -n ${lines} --output=short-iso 2>/dev/null`, { timeout: 5000 }).toString();
    } catch {
      try {
        output = execSync(`pm2 logs openclaw-bridge --nostream --lines ${lines} 2>/dev/null`, { timeout: 5000 }).toString();
@@ -7145,7 +7243,7 @@ app.get('/admin/raw-logs/gateway', (req, res) => {
  const lines = parseInt(req.query.lines) || 200;
  const search = req.query.search || '';
  try {
-   let output = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${lines} 2>&1`, { timeout: 10000 }).toString();
+   let output = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${lines} --timestamps 2>&1`, { timeout: 10000 }).toString();
    // Strip ANSI color codes for clean display
    output = output.replace(/\x1b\[[0-9;]*m/g, '');
    if (search) {
@@ -9885,7 +9983,7 @@ app.get('/logs', (req, res) => {
  const logs = {};
  const collectAllForLocalModels = service === 'local-models';
  if (service === 'all' || service === 'openclaw' || collectAllForLocalModels) {
- try { logs.openclaw = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${safeLines} 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.openclaw = e.stdout?.toString() || e.message; }
+ try { logs.openclaw = execSync(`docker logs openclaw-openclaw-gateway-1 --tail ${safeLines} --timestamps 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.openclaw = e.stdout?.toString() || e.message; }
  }
  if (service === 'all' || service === 'poller' || collectAllForLocalModels) {
  try { logs.poller = execSync(`journalctl -u openclaw-poller --no-pager -n ${safeLines} --output=short-iso 2>&1`, { timeout: 5000 }).toString(); } catch (e) { logs.poller = e.message; }
