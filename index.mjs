@@ -6586,13 +6586,17 @@ app.post('/admin/restart-services', async (req, res) => {
      maybeCaptureGatewayProblemSnapshot('admin-restart-services-start-failed');
    }
 
-   // Restart bridge service (if under systemd)
-   try {
-     execSync('systemctl restart openclaw-bridge 2>/dev/null', { timeout: 10000 });
-     results.push({ service: 'openclaw-bridge', action: 'restarted' });
-   } catch {
-     results.push({ service: 'openclaw-bridge', action: 'not-under-systemd' });
-   }
+   // Restart bridge service after the HTTP response is sent. Restarting this
+   // process inline can abort the repair request and make the app report a
+   // failure even though the gateway restart already ran.
+   results.push({ service: 'openclaw-bridge', action: 'restart-scheduled' });
+   setTimeout(() => {
+     try {
+       execSync('systemctl restart openclaw-bridge 2>/dev/null', { timeout: 10000 });
+     } catch (e) {
+       console.warn('[admin/restart-services] bridge restart skipped/failed:', e.message);
+     }
+   }, 750).unref?.();
 
    // Restart Caddy
    try {
@@ -9700,6 +9704,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  execSync('chown node:node /opt/openclaw-bridge/device-identity.json 2>/dev/null || chown 1000:1000 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
  execSync('chmod 600 /opt/openclaw-bridge/device-identity.json 2>/dev/null || true', { timeout: 5000 });
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'patch-auth' });
+ const composeRepair = ensureOpenClawComposeOverride({ reason: 'patch-auth' });
  gateway.token = getDesiredGatewayToken() || gateway.token;
  const alreadySettling = gateway.expectedReconnectUntil && Date.now() < gateway.expectedReconnectUntil;
  if (alreadySettling && req.body?.force !== true) {
@@ -9709,6 +9714,7 @@ app.post('/gateway/patch-auth', (req, res) => {
    message: 'Identity fixed and paired.json repaired; gateway restart already settling',
    authRepair: repair,
    pairedRepair,
+   composeRepair,
    expectedReconnectUntil: gateway.expectedReconnectUntil,
   });
  }
@@ -9716,7 +9722,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  // external repair loops do not restart it again before the websocket re-pairs.
  execSync('docker restart openclaw-openclaw-gateway-1 2>&1', { timeout: 30000 });
  gateway.forceReconnect(30000, 'patch-auth');
- res.json({ success: true, message: 'Identity fixed, gateway auth synced, paired.json repaired, and gateway restarted', authRepair: repair, pairedRepair });
+ res.json({ success: true, message: 'Identity fixed, gateway auth synced, paired.json repaired, compose/startup checked, and gateway restarted', authRepair: repair, pairedRepair, composeRepair });
  } catch (err) {
  res.status(500).json({ error: 'Patch failed', details: err.message });
  }
