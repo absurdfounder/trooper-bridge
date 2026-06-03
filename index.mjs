@@ -9989,6 +9989,7 @@ app.post('/upgrade', async (req, res) => {
  const { scope = 'all' } = req.body || {}; // 'all' | 'gateway' | 'bridge'
  const log = [];
  const step = (msg) => { log.push({ t: Date.now(), msg }); console.log(`[upgrade] ${msg}`); };
+ let bridgeRestartNeeded = false;
 
  try {
    step('Starting upgrade...');
@@ -10053,16 +10054,8 @@ app.post('/upgrade', async (req, res) => {
          execSync('npm install --production 2>&1', { timeout: 60000, cwd: '/opt/openclaw-bridge' });
          step('Dependencies installed');
 
-         // Restart bridge service (this will kill the current process — the response is sent first)
-         step('Restarting bridge service...');
-         // Use spawn to restart after a short delay so the response can be sent
-         setTimeout(() => {
-           try {
-             execSync('systemctl restart openclaw-bridge', { timeout: 10000 });
-           } catch (e) {
-             console.error('[upgrade] Bridge restart failed:', e.message);
-           }
-         }, 1000);
+         bridgeRestartNeeded = true;
+         step('Bridge restart scheduled after response');
        }
      } catch (e) {
        step(`❌ Bridge upgrade failed: ${e.message}`);
@@ -10082,6 +10075,15 @@ app.post('/upgrade', async (req, res) => {
 
    step('Upgrade complete');
    res.json({ success: true, log });
+   if (bridgeRestartNeeded) {
+     setTimeout(() => {
+       try {
+         execSync('systemctl restart openclaw-bridge', { timeout: 10000 });
+       } catch (e) {
+         console.error('[upgrade] Bridge restart failed:', e.message);
+       }
+     }, 1000).unref?.();
+   }
  } catch (err) {
    step(`❌ Upgrade failed: ${err.message}`);
    res.status(500).json({ success: false, error: err.message, log });
