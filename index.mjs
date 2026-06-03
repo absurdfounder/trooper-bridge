@@ -6819,10 +6819,11 @@ function mergeNodeInventoryRows(...groups) {
  return merged;
 }
 
-// GET /admin/devices — list all paired devices
-app.get('/admin/devices', (req, res) => {
+// GET /admin/devices — list all pending and paired OpenClaw device identities
+app.get('/admin/devices', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  try {
+   const devicePairsResult = await gatewayRequestResult('device.pair.list', {}, { timeoutMs: 10000 });
    let paired = {};
    try { paired = JSON.parse(readFileSync(PAIRED_JSON_PATH_ADMIN, 'utf8')); } catch {}
    const normalized = normalizePairedDeviceMap(paired);
@@ -6833,7 +6834,7 @@ app.get('/admin/devices', (req, res) => {
      try { execSync(`chown -R 1000:1000 ${DEVICES_DIR_ADMIN} 2>/dev/null || true`, { timeout: 5000 }); } catch {}
    }
 
-   const devices = Object.values(paired).map(d => ({
+   const localPaired = Object.values(paired).map(d => ({
      deviceId: d.deviceId,
      displayName: d.displayName || 'Unknown',
      platform: d.platform || 'unknown',
@@ -6843,10 +6844,76 @@ app.get('/admin/devices', (req, res) => {
      approved: d.approved !== false,
      approvedAt: d.approvedAt || d.ts || null,
    }));
+   const rawDevicePairs = devicePairsResult.ok ? (devicePairsResult.value || {}) : {};
+   const pending = arrayFromPayload(rawDevicePairs, ['pending', 'requests'])
+    .map((entry) => normalizeNodeRecord(entry, { source: 'device-pending' }));
+   const pairedFromGateway = arrayFromPayload(rawDevicePairs, ['paired', 'devices', 'items'])
+    .map((entry) => normalizeNodeRecord(entry, { source: 'device-paired' }));
+   const devices = pairedFromGateway.length ? pairedFromGateway : localPaired;
 
-   res.json({ devices, total: devices.length });
+   res.json({
+    ok: devicePairsResult.ok || devices.length > 0 || pending.length > 0,
+    source: devicePairsResult.ok ? 'openclaw-gateway' : 'paired-json',
+    method: 'device.pair.list',
+    pending,
+    paired: devices,
+    devices,
+    total: devices.length,
+    counts: {
+     pending: pending.length,
+     paired: devices.length,
+    },
+    errors: devicePairsResult.ok ? {} : { devicePairs: devicePairsResult.error },
+    raw: {
+     devicePairs: devicePairsResult.ok ? devicePairsResult.value : null,
+    },
+   });
  } catch (err) {
    res.status(500).json({ error: err.message });
+ }
+});
+
+async function approveOpenClawDevicePairingRequest(requestId) {
+ const safeRequestId = String(requestId || '').trim();
+ if (!safeRequestId) throw new Error('requestId is required');
+ const attempts = [
+  { method: 'device.pair.approve', params: { requestId: safeRequestId } },
+  { method: 'device.pair.approve', params: { id: safeRequestId } },
+  { method: 'node.pair.approve', params: { requestId: safeRequestId } },
+  { method: 'node.pair.approve', params: { id: safeRequestId } },
+ ];
+ const errors = [];
+ for (const attempt of attempts) {
+  const result = await gatewayRequestResult(attempt.method, attempt.params, { timeoutMs: 15000 });
+  if (result.ok) {
+   return {
+    ok: true,
+    requestId: safeRequestId,
+    usedMethod: attempt.method,
+    result: result.value || null,
+    attempts: [...errors, { method: attempt.method, ok: true }],
+   };
+  }
+  errors.push({ method: attempt.method, params: attempt.params, ok: false, error: result.error });
+ }
+ const error = new Error(errors.map(item => `${item.method}: ${item.error}`).join('; ') || 'OpenClaw device approval failed');
+ error.attempts = errors;
+ throw error;
+}
+
+// POST /admin/devices/:requestId/approve — approve a pending device/node pairing request
+app.post('/admin/devices/:requestId/approve', express.json(), async (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ try {
+  const result = await approveOpenClawDevicePairingRequest(req.params.requestId);
+  res.json(result);
+ } catch (err) {
+  res.status(502).json({
+   ok: false,
+   error: err.message,
+   requestId: req.params.requestId,
+   attempts: err.attempts || [],
+  });
  }
 });
 
