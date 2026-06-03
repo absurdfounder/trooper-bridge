@@ -1319,6 +1319,61 @@ function isGatewayPairingError(message = '') {
  return /pairing required|not paired|unpaired|device.*pair|pair.*device|approval required|device.*approval/i.test(String(message || ''));
 }
 
+function ensureOpenClawStartupScript({ reason = 'repair' } = {}) {
+ const startupPath = '/opt/openclaw-data/startup.sh';
+ if (!existsSync('/opt/openclaw-data')) return { changed: false, skipped: true, reason: 'missing-openclaw-data-dir' };
+ const next = `#!/bin/bash
+set -e
+GATEWAY_PORT="\${1:-18789}"
+GATEWAY_PORT="\$(printf '%s' "\$GATEWAY_PORT" | tr -cd '0-9')"
+if [ -z "\$GATEWAY_PORT" ] || [ "\$GATEWAY_PORT" -lt 1 ] || [ "\$GATEWAY_PORT" -gt 65535 ]; then
+  echo "[startup] Invalid gateway port '\${1:-}', falling back to 18789"
+  GATEWAY_PORT=18789
+fi
+
+export NODE_COMPILE_CACHE=/var/tmp/openclaw-compile-cache
+export JITI_CACHE_DIR=/var/tmp/jiti
+export OPENCLAW_TMPDIR=/home/node/.cache/openclaw/tmp
+export OPENCLAW_NATIVE_HOOK_RELAY_DIR=/home/node/.cache/openclaw/native-hook-relays
+export TMPDIR="$OPENCLAW_TMPDIR"
+export TMP="$OPENCLAW_TMPDIR"
+export TEMP="$OPENCLAW_TMPDIR"
+export OPENCLAW_NO_RESPAWN=1
+
+mkdir -p "$NODE_COMPILE_CACHE" "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR" 2>/dev/null || true
+chown -R 1000:1000 "$NODE_COMPILE_CACHE" "$JITI_CACHE_DIR" /home/node/.cache/openclaw 2>/dev/null || true
+chmod 755 "$NODE_COMPILE_CACHE" "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR" 2>/dev/null || true
+
+run_as_node() {
+  if [ "$(id -u)" = "0" ]; then
+    su -s /bin/bash node -c "$1"
+  else
+    bash -lc "$1"
+  fi
+}
+
+echo "[startup] Running openclaw doctor repair (auto-heal config)..."
+run_as_node "TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js doctor --repair" 2>&1 \\
+  || run_as_node "TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js doctor --fix" 2>&1 \\
+  || echo "[startup] WARNING: doctor repair failed (non-fatal)"
+
+if [ "$(id -u)" = "0" ]; then
+  exec su -s /bin/bash node -c "DISPLAY=:99 TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
+else
+  exec bash -lc "DISPLAY=:99 TMPDIR=$TMPDIR TMP=$TMP TEMP=$TEMP OPENCLAW_TMPDIR=$OPENCLAW_TMPDIR OPENCLAW_NATIVE_HOOK_RELAY_DIR=$OPENCLAW_NATIVE_HOOK_RELAY_DIR JITI_CACHE_DIR=$JITI_CACHE_DIR NODE_COMPILE_CACHE=$NODE_COMPILE_CACHE OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
+fi
+`;
+ let current = '';
+ try { current = readFileSync(startupPath, 'utf8'); } catch {}
+ if (current === next) return { changed: false, path: startupPath, reason };
+ try {
+  if (current) writeFileSync(`${startupPath}.bak.${Date.now()}`, current);
+ } catch {}
+ writeFileSync(startupPath, next, { mode: 0o755 });
+ console.log(`[OpenClaw] startup script repaired (${reason})`);
+ return { changed: true, path: startupPath, reason };
+}
+
 function ensureOpenClawComposeOverride({ reason = 'repair' } = {}) {
  const overridePath = '/opt/openclaw/docker-compose.override.yml';
  if (!existsSync('/opt/openclaw')) return { changed: false, skipped: true, reason: 'missing-openclaw-dir' };
@@ -1351,11 +1406,11 @@ function ensureOpenClawComposeOverride({ reason = 'repair' } = {}) {
   '      PUPPETEER_EXECUTABLE_PATH: /opt/chrome-wrapper.sh',
   '      OPENCLAW_BROWSER_EXECUTABLE: /opt/chrome-wrapper.sh',
   '      COMPOSIO_API_KEY: ${COMPOSIO_API_KEY}',
-  '      TMPDIR: /var/tmp',
-  '      TMP: /var/tmp',
-  '      TEMP: /var/tmp',
-  '      OPENCLAW_TMPDIR: /var/tmp/openclaw-1000',
-  '      OPENCLAW_NATIVE_HOOK_RELAY_DIR: /var/tmp/openclaw-native-hook-relays-1000',
+  '      TMPDIR: /home/node/.cache/openclaw/tmp',
+  '      TMP: /home/node/.cache/openclaw/tmp',
+  '      TEMP: /home/node/.cache/openclaw/tmp',
+  '      OPENCLAW_TMPDIR: /home/node/.cache/openclaw/tmp',
+  '      OPENCLAW_NATIVE_HOOK_RELAY_DIR: /home/node/.cache/openclaw/native-hook-relays',
   '      JITI_CACHE_DIR: /var/tmp/jiti',
   '    user: "0:0"',
   '    entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]',
@@ -1366,12 +1421,16 @@ function ensureOpenClawComposeOverride({ reason = 'repair' } = {}) {
  ].join('\n');
  let current = '';
  try { current = readFileSync(overridePath, 'utf8'); } catch {}
- if (current === next) return { changed: false, path: overridePath, reason };
+ if (current === next) {
+  const startupRepair = ensureOpenClawStartupScript({ reason });
+  return { changed: startupRepair.changed === true, path: overridePath, reason, startupRepair };
+ }
  try {
   if (current) writeFileSync(`${overridePath}.bak.${Date.now()}`, current);
  } catch {}
  writeFileSync(overridePath, next, { mode: 0o644 });
  console.log(`[OpenClaw] docker-compose override repaired (${reason})`);
+ ensureOpenClawStartupScript({ reason });
  return { changed: true, path: overridePath, reason };
 }
 
@@ -12829,7 +12888,15 @@ if [ -z "\$GATEWAY_PORT" ] || [ "\$GATEWAY_PORT" -lt 1 ] || [ "\$GATEWAY_PORT" -
  echo "[startup] Invalid gateway port '\${1:-}', falling back to 18789"
  GATEWAY_PORT=18789
 fi
-exec node dist/index.js gateway --allow-unconfigured --bind lan --port "\$GATEWAY_PORT"
+export OPENCLAW_TMPDIR=/home/node/.cache/openclaw/tmp
+export OPENCLAW_NATIVE_HOOK_RELAY_DIR=/home/node/.cache/openclaw/native-hook-relays
+export TMPDIR="\$OPENCLAW_TMPDIR"
+export TMP="\$OPENCLAW_TMPDIR"
+export TEMP="\$OPENCLAW_TMPDIR"
+mkdir -p "\$OPENCLAW_TMPDIR" "\$OPENCLAW_NATIVE_HOOK_RELAY_DIR" /var/tmp/jiti 2>/dev/null || true
+chown -R 1000:1000 /home/node/.cache/openclaw /var/tmp/jiti 2>/dev/null || true
+chmod 755 "\$OPENCLAW_TMPDIR" "\$OPENCLAW_NATIVE_HOOK_RELAY_DIR" /var/tmp/jiti 2>/dev/null || true
+exec env DISPLAY=:99 TMPDIR="\$TMPDIR" TMP="\$TMP" TEMP="\$TEMP" OPENCLAW_TMPDIR="\$OPENCLAW_TMPDIR" OPENCLAW_NATIVE_HOOK_RELAY_DIR="\$OPENCLAW_NATIVE_HOOK_RELAY_DIR" JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port "\$GATEWAY_PORT"
 `;
  fs.writeFileSync('/opt/openclaw-data/startup.sh', startupScript, { mode: 0o755 });
  console.log('Startup script written to /opt/openclaw-data/startup.sh');

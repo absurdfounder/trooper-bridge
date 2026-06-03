@@ -1260,11 +1260,11 @@ services:
       PUPPETEER_EXECUTABLE_PATH: /opt/chrome-wrapper.sh
       OPENCLAW_BROWSER_EXECUTABLE: /opt/chrome-wrapper.sh
       COMPOSIO_API_KEY: \${COMPOSIO_API_KEY}
-      TMPDIR: /var/tmp
-      TMP: /var/tmp
-      TEMP: /var/tmp
-      OPENCLAW_TMPDIR: /var/tmp/openclaw-1000
-      OPENCLAW_NATIVE_HOOK_RELAY_DIR: /var/tmp/openclaw-native-hook-relays-1000
+      TMPDIR: /home/node/.cache/openclaw/tmp
+      TMP: /home/node/.cache/openclaw/tmp
+      TEMP: /home/node/.cache/openclaw/tmp
+      OPENCLAW_TMPDIR: /home/node/.cache/openclaw/tmp
+      OPENCLAW_NATIVE_HOOK_RELAY_DIR: /home/node/.cache/openclaw/native-hook-relays
       JITI_CACHE_DIR: /var/tmp/jiti
     user: "0:0"
     entrypoint: ["/bin/bash", "/opt/entrypoint.sh"]
@@ -1309,7 +1309,14 @@ rm -rf /tmp/jiti /tmp/node-* 2>/dev/null || true
 mkdir -p /tmp/jiti && chmod 1777 /tmp/jiti
 # Also set JITI_CACHE_DIR to a node-owned location as fallback
 export JITI_CACHE_DIR="/var/tmp/jiti"
-mkdir -p "$JITI_CACHE_DIR" && chown 1000:1000 "$JITI_CACHE_DIR" && chmod 755 "$JITI_CACHE_DIR"
+export OPENCLAW_TMPDIR="/home/node/.cache/openclaw/tmp"
+export OPENCLAW_NATIVE_HOOK_RELAY_DIR="/home/node/.cache/openclaw/native-hook-relays"
+export TMPDIR="$OPENCLAW_TMPDIR"
+export TMP="$OPENCLAW_TMPDIR"
+export TEMP="$OPENCLAW_TMPDIR"
+mkdir -p "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR"
+chown -R 1000:1000 "$JITI_CACHE_DIR" /home/node/.cache/openclaw 2>/dev/null || true
+chmod 755 "$JITI_CACHE_DIR" "$OPENCLAW_TMPDIR" "$OPENCLAW_NATIVE_HOOK_RELAY_DIR" 2>/dev/null || true
 
 # Fix devices dir permissions so bridge (host process) can write paired.json
 chmod 777 /home/node/.openclaw/devices 2>/dev/null || true
@@ -1317,9 +1324,9 @@ chmod 666 /home/node/.openclaw/devices/*.json 2>/dev/null || true
 
 # Drop back to node user for the gateway process when running as root.
 if [ "$(id -u)" = "0" ]; then
-  exec su -s /bin/bash node -c "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
+  exec su -s /bin/bash node -c "DISPLAY=:99 TMPDIR=/home/node/.cache/openclaw/tmp TMP=/home/node/.cache/openclaw/tmp TEMP=/home/node/.cache/openclaw/tmp OPENCLAW_TMPDIR=/home/node/.cache/openclaw/tmp OPENCLAW_NATIVE_HOOK_RELAY_DIR=/home/node/.cache/openclaw/native-hook-relays JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
 else
-  exec bash -lc "DISPLAY=:99 JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
+  exec bash -lc "DISPLAY=:99 TMPDIR=/home/node/.cache/openclaw/tmp TMP=/home/node/.cache/openclaw/tmp TEMP=/home/node/.cache/openclaw/tmp OPENCLAW_TMPDIR=/home/node/.cache/openclaw/tmp OPENCLAW_NATIVE_HOOK_RELAY_DIR=/home/node/.cache/openclaw/native-hook-relays JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port '$GATEWAY_PORT'"
 fi
 STARTUP
 chmod +x /opt/openclaw-data/startup.sh
