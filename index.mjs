@@ -7422,8 +7422,18 @@ app.post('/admin/upgrade', async (req, res) => {
    // 3. Sync latest bridge code
    steps.push({ step: 'bridge_pull', status: 'running' });
    try {
-     const gitOut = execSync('cd /opt/openclaw-bridge && git fetch origin main && git reset --hard origin/main 2>&1', { timeout: 30000 }).toString();
-     steps[steps.length - 1] = { step: 'bridge_pull', status: 'ok', output: gitOut.trim() };
+     let beforeSha = '';
+     let afterSha = '';
+     try { beforeSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
+     const fetchOut = execSync('git -C /opt/openclaw-bridge fetch origin main 2>&1', { timeout: 30000 }).toString();
+     const resetOut = execSync('git -C /opt/openclaw-bridge reset --hard origin/main 2>&1', { timeout: 30000 }).toString();
+     try { afterSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
+     const output = [
+       beforeSha && afterSha && beforeSha !== afterSha ? `changed ${beforeSha.slice(0, 7)} -> ${afterSha.slice(0, 7)}` : `already at ${(afterSha || beforeSha || 'unknown').slice(0, 7)}`,
+       fetchOut.trim(),
+       resetOut.trim(),
+     ].filter(Boolean).join('\n');
+     steps[steps.length - 1] = { step: 'bridge_pull', status: 'ok', output };
    } catch (e) {
      steps[steps.length - 1] = { step: 'bridge_pull', status: 'failed', error: e.message };
    }
@@ -9838,10 +9848,16 @@ function shaMatches(current, target) {
  return a.startsWith(b) || b.startsWith(a);
 }
 
+function isFloatingGatewayTarget(targetGatewayImage = null) {
+ const target = String(targetGatewayImage || '').trim().toLowerCase();
+ return Boolean(target && target.endsWith(':latest'));
+}
+
 function buildLocalUpgradeSummary(current = {}, target = {}) {
  const targetBridge = target.openclawBridgeCommit || target.bridgeCommit || target.bridgeSha || null;
  const targetGateway = target.gatewayImage || target.gatewayImageDigest || target.gatewayImageId || null;
  const bridgeAtTarget = shaMatches(current.bridgeFullSha || current.bridgeSha, targetBridge);
+ const gatewayTargetIsFloating = isFloatingGatewayTarget(targetGateway);
  let gatewayAtTarget = null;
  if (targetGateway) {
   const targetText = String(targetGateway).trim();
@@ -9855,6 +9871,10 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
  }
  const checked = Boolean(targetBridge || targetGateway);
  const available = bridgeAtTarget === false || gatewayAtTarget === false;
+ const unknown = checked && (
+  Boolean(targetBridge && bridgeAtTarget === null) ||
+  Boolean(targetGateway && gatewayAtTarget === null && !gatewayTargetIsFloating)
+ );
  const components = {
   bridge: { current: current.bridgeFullSha || current.bridgeSha || null, target: targetBridge, atTarget: bridgeAtTarget },
   gateway: {
@@ -9866,13 +9886,14 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
  return {
   checked,
   available: checked ? available : false,
+  unknown,
   current,
   target,
   components,
   reason: checked
    ? available
     ? 'One or more runtime components are behind the supplied target version.'
-    : Object.values(components).some((component) => component.atTarget === null)
+    : unknown
      ? 'Some target fields could not be compared exactly, but no known component is behind.'
      : 'Runtime matches the supplied target version.'
    : 'No target version was supplied to the bridge.',
@@ -9948,17 +9969,23 @@ app.post('/upgrade', async (req, res) => {
    if (scope === 'all' || scope === 'bridge') {
      step('Syncing latest bridge code...');
      try {
-       const gitOutput = execSync(
-        'cd /opt/openclaw-bridge && git fetch origin main && git reset --hard origin/main 2>&1',
-         { timeout: 30000 }
-       ).toString();
-      const noChanges = /HEAD is now at/i.test(gitOutput) && !/From github\.com/i.test(gitOutput);
-      step(noChanges ? 'Bridge code already up to date' : 'Bridge code synced');
+       let beforeSha = '';
+       let targetSha = '';
+       let afterSha = '';
+       try { beforeSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
+       execSync('git -C /opt/openclaw-bridge fetch origin main 2>&1', { timeout: 30000 }).toString();
+       try { targetSha = execSync('git -C /opt/openclaw-bridge rev-parse origin/main', { timeout: 10000 }).toString().trim(); } catch {}
+       execSync('git -C /opt/openclaw-bridge reset --hard origin/main 2>&1', { timeout: 30000 }).toString();
+       try { afterSha = execSync('git -C /opt/openclaw-bridge rev-parse HEAD', { timeout: 10000 }).toString().trim(); } catch {}
+       const bridgeChanged = Boolean(beforeSha && afterSha && beforeSha !== afterSha);
+       const beforeShort = beforeSha ? beforeSha.slice(0, 7) : 'unknown';
+       const afterShort = afterSha || targetSha ? (afterSha || targetSha).slice(0, 7) : 'unknown';
+       step(bridgeChanged ? `Bridge code synced ${beforeShort} -> ${afterShort}` : `Bridge code already up to date (${afterShort})`);
 
-       if (!noChanges) {
+       if (bridgeChanged) {
          // Install any new dependencies
          step('Installing bridge dependencies...');
-         execSync('cd /opt/openclaw-bridge && npm install --production 2>&1', { timeout: 60000 });
+         execSync('npm install --production 2>&1', { timeout: 60000, cwd: '/opt/openclaw-bridge' });
          step('Dependencies installed');
 
          // Restart bridge service (this will kill the current process — the response is sent first)
