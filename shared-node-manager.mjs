@@ -20,6 +20,7 @@ const PUBLIC_BASE_URL = String(process.env.TROOPER_SHARED_NODE_PUBLIC_URL || '')
 const BRIDGE_DIR = process.env.TROOPER_BRIDGE_DIR || process.cwd();
 const RUNTIME_AUTH_SECRET = process.env.RUNTIME_AUTH_SECRET || '';
 const MISSION_CONTROL_URL = process.env.MISSION_CONTROL_URL || process.env.TROOPER_CALLBACK_URL || '';
+const startTasks = new Map();
 
 app.use(express.json({ limit: '5mb' }));
 
@@ -35,6 +36,75 @@ function requireManagerAuth(req, res, next) {
 function proxyBaseFor(slotId) {
   if (!PUBLIC_BASE_URL) return null;
   return `${PUBLIC_BASE_URL}/runtime/workspaces/${encodeURIComponent(slotId)}/proxy`;
+}
+
+function buildSlotResponse(slot) {
+  const bridgeUrl = proxyBaseFor(slot.slotId);
+  return {
+    ok: slot.status !== 'failed',
+    status: slot.status,
+    slot,
+    bridgeUrl,
+    runtimeUrl: bridgeUrl ? `${bridgeUrl}/runtime-api` : null,
+    gatewayUrl: bridgeUrl,
+    error: slot.error || null,
+  };
+}
+
+async function runWorkspaceSlotStart(slot) {
+  const starting = updateWorkspaceSlotStatus({
+    slotId: slot.slotId,
+    status: 'starting',
+    registryPath: REGISTRY_PATH,
+    patch: {
+      error: null,
+      startRequestedAt: Date.now(),
+    },
+  });
+  try {
+    const runtime = await startSlotRuntime(starting, {
+      bridgeDir: BRIDGE_DIR,
+      runtimeAuthSecret: RUNTIME_AUTH_SECRET,
+      missionControlUrl: MISSION_CONTROL_URL,
+    });
+    return updateWorkspaceSlotStatus({
+      slotId: slot.slotId,
+      status: 'ready',
+      registryPath: REGISTRY_PATH,
+      patch: {
+        error: null,
+        readyAt: Date.now(),
+        gatewayToken: runtime.gatewayToken,
+        bridgeAuthToken: runtime.bridgeAuthToken,
+        containerName: runtime.gateway.containerName,
+        bridgePid: runtime.bridge.pid || starting.bridgePid || null,
+      },
+    });
+  } catch (error) {
+    updateWorkspaceSlotStatus({
+      slotId: slot.slotId,
+      status: 'failed',
+      registryPath: REGISTRY_PATH,
+      patch: {
+        error: error.message,
+        failedAt: Date.now(),
+      },
+    });
+    throw error;
+  } finally {
+    startTasks.delete(slot.slotId);
+  }
+}
+
+function ensureWorkspaceSlotStartTask(slot) {
+  const existing = startTasks.get(slot.slotId);
+  if (existing) return existing;
+  const task = runWorkspaceSlotStart(slot).catch((error) => {
+    console.error(`[shared-node-manager] workspace slot ${slot.slotId} failed: ${error.message}`);
+    return null;
+  });
+  startTasks.set(slot.slotId, task);
+  return task;
 }
 
 app.get('/health', (_req, res) => {
@@ -54,7 +124,7 @@ app.get('/runtime/workspaces/:slotId/status', requireManagerAuth, (req, res) => 
   const registry = readSlotRegistry(REGISTRY_PATH);
   const slot = registry.slots?.[req.params.slotId];
   if (!slot) return res.status(404).json({ error: 'workspace_slot_not_found' });
-  res.json({ ...slot, bridgeUrl: proxyBaseFor(slot.slotId), runtimeUrl: proxyBaseFor(slot.slotId) ? `${proxyBaseFor(slot.slotId)}/runtime-api` : null });
+  res.json(buildSlotResponse(slot));
 });
 
 app.post('/runtime/workspaces/:slotId/start', requireManagerAuth, async (req, res) => {
@@ -67,36 +137,22 @@ app.post('/runtime/workspaces/:slotId/start', requireManagerAuth, async (req, re
       root: WORKSPACES_ROOT,
       registryPath: REGISTRY_PATH,
     });
-    const starting = updateWorkspaceSlotStatus({
-      slotId: slot.slotId,
-      status: 'starting',
-      registryPath: REGISTRY_PATH,
-    });
-    const runtime = await startSlotRuntime(starting, {
-      bridgeDir: BRIDGE_DIR,
-      runtimeAuthSecret: RUNTIME_AUTH_SECRET,
-      missionControlUrl: MISSION_CONTROL_URL,
-    });
-    const next = updateWorkspaceSlotStatus({
-      slotId: slot.slotId,
-      status: 'ready',
-      registryPath: REGISTRY_PATH,
-      patch: {
-        gatewayToken: runtime.gatewayToken,
-        bridgeAuthToken: runtime.bridgeAuthToken,
-        containerName: runtime.gateway.containerName,
-        bridgePid: runtime.bridge.pid || starting.bridgePid || null,
-      },
-    });
-    const bridgeUrl = proxyBaseFor(next.slotId);
-    res.json({
-      ok: true,
-      status: next.status,
-      slot: next,
-      bridgeUrl,
-      runtimeUrl: bridgeUrl ? `${bridgeUrl}/runtime-api` : null,
-      gatewayUrl: bridgeUrl,
-    });
+    if (slot.status === 'ready') {
+      return res.json(buildSlotResponse(slot));
+    }
+    const asyncRequested = req.body?.async === true || req.query?.async === '1' || req.query?.async === 'true';
+    if (asyncRequested) {
+      ensureWorkspaceSlotStartTask(slot);
+      const registry = readSlotRegistry(REGISTRY_PATH);
+      const current = registry.slots?.[slot.slotId] || { ...slot, status: 'starting' };
+      return res.status(202).json({
+        ...buildSlotResponse(current),
+        ok: true,
+        accepted: true,
+      });
+    }
+    const next = await runWorkspaceSlotStart(slot);
+    return res.json(buildSlotResponse(next));
   } catch (error) {
     try {
       updateWorkspaceSlotStatus({
