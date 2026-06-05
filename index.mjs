@@ -10098,15 +10098,15 @@ app.post('/upgrade', async (req, res) => {
 
    step('Upgrade complete');
    res.json({ success: true, log });
-   if (bridgeRestartNeeded) {
-     setTimeout(() => {
-       try {
-         execSync('systemctl restart openclaw-bridge', { timeout: 10000 });
-       } catch (e) {
-         console.error('[upgrade] Bridge restart failed:', e.message);
-       }
-     }, 1000).unref?.();
-   }
+	   if (bridgeRestartNeeded) {
+	     setTimeout(() => {
+	       try {
+	        execSync('systemctl restart openclaw-bridge; systemctl restart trooper-shared-node-manager 2>/dev/null || true', { timeout: 10000 });
+	      } catch (e) {
+	        console.error('[upgrade] Bridge restart failed:', e.message);
+	      }
+	     }, 1000).unref?.();
+	   }
  } catch (err) {
    step(`❌ Upgrade failed: ${err.message}`);
    res.status(500).json({ success: false, error: err.message, log });
