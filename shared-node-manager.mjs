@@ -161,6 +161,7 @@ app.post('/runtime/workspaces/:slotId/start', requireManagerAuth, async (req, re
       orgName: req.body?.orgName || '',
       ownerUserId: req.body?.ownerUserId || '',
       workspaceSlotId: req.body?.workspaceSlotId || req.params.slotId,
+      publicBaseUrl: PUBLIC_BASE_URL,
       root: WORKSPACES_ROOT,
       registryPath: REGISTRY_PATH,
     });

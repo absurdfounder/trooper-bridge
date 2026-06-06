@@ -1024,9 +1024,9 @@ fi
 if has_codex_auth_profile; then
  add_provider ' "openai-codex": {
  "baseUrl": "https://chatgpt.com/backend-api",
- "api": "openai-codex-responses",
+ "api": "openai-chatgpt-responses",
  "models": [
- { "id": "gpt-5.4", "name": "gpt-5.4", "api": "openai-codex-responses" }
+ { "id": "gpt-5.4", "name": "gpt-5.4", "api": "openai-chatgpt-responses" }
  ]
  }'
 fi
@@ -1222,6 +1222,7 @@ ${MODELS_PROVIDERS}
  "controlUi": {
  "enabled": true,
  "allowInsecureAuth": true,
+ "allowedOrigins": ["https://${HTTPS_DOMAIN}", "https://${SSLIP_DOMAIN}", "https://app.trooper.so", "http://localhost:${GATEWAY_PORT}", "http://127.0.0.1:${GATEWAY_PORT}"],
  "dangerouslyAllowHostHeaderOriginFallback": true,
  "dangerouslyDisableDeviceAuth": true
  },

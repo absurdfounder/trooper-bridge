@@ -4358,7 +4358,45 @@ try {
  const { changed } = ensureOpenAiCodexProviderTransport();
  if (changed) {
   try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
-  console.log('[bridge] Repaired models.providers.openai-codex transport (openai-codex-responses)');
+  console.log('[bridge] Repaired models.providers.openai-codex transport (openai-chatgpt-responses)');
+ }
+} catch (e) { /* config not available yet */ }
+
+try {
+ const defaultTrustedProxies = [
+  '127.0.0.1', '::1', '172.16.0.0/12',
+  '173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22',
+  '103.31.4.0/22', '141.101.64.0/18', '108.162.192.0/18',
+  '190.93.240.0/20', '188.114.96.0/20', '197.234.240.0/22',
+  '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+  '104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+ ];
+ const originFromUrl = (value = '') => {
+  try { return new URL(String(value || '').trim()).origin; } catch { return ''; }
+ };
+ const configuredOrigins = [
+  process.env.TROOPER_SHARED_NODE_PUBLIC_URL,
+  process.env.OPENCLAW_PUBLIC_BASE_URL,
+  process.env.PUBLIC_BASE_URL,
+  'https://app.trooper.so',
+ ].map(originFromUrl).filter(Boolean);
+ const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, 'utf8'));
+ if (config.gateway && typeof config.gateway === 'object' && !Array.isArray(config.gateway)) {
+  const before = JSON.stringify(config.gateway);
+  const existingProxies = Array.isArray(config.gateway.trustedProxies) ? config.gateway.trustedProxies : [];
+  config.gateway.trustedProxies = [...new Set([...existingProxies, ...defaultTrustedProxies])];
+  if (!config.gateway.controlUi || typeof config.gateway.controlUi !== 'object' || Array.isArray(config.gateway.controlUi)) {
+   config.gateway.controlUi = {};
+  }
+  const existingOrigins = Array.isArray(config.gateway.controlUi.allowedOrigins)
+   ? config.gateway.controlUi.allowedOrigins
+   : [];
+  config.gateway.controlUi.allowedOrigins = [...new Set([...existingOrigins, ...configuredOrigins])];
+  if (JSON.stringify(config.gateway) !== before) {
+   writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2));
+   try { execSync(`chown 1000:1000 ${OPENCLAW_CONFIG_PATH} && chmod 600 ${OPENCLAW_CONFIG_PATH}`, { timeout: 3000 }); } catch {}
+   console.log('[bridge] Repaired gateway trusted proxies / Control UI origins');
+  }
  }
 } catch (e) { /* config not available yet */ }
 
