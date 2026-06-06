@@ -39,6 +39,27 @@ function proxyBaseFor(slotId) {
   return `${PUBLIC_BASE_URL}/runtime/workspaces/${encodeURIComponent(slotId)}/proxy`;
 }
 
+function hasManagerAuth(req) {
+  if (!AUTH_TOKEN) return true;
+  return String(req.headers.authorization || '') === `Bearer ${AUTH_TOKEN}`;
+}
+
+function shouldRouteToBridge(suffix = '') {
+  const pathname = (() => {
+    try {
+      return new URL(suffix || '/', 'http://slot.local').pathname || '/';
+    } catch {
+      return String(suffix || '/').split('?')[0] || '/';
+    }
+  })();
+  if (pathname === '/health' || pathname === '/healthz' || pathname === '/readyz') return true;
+  if (pathname === '/stats' || pathname === '/system-stats' || pathname === '/ws') return true;
+  if (/^\/(admin|webhook|agents|recording|llm|debug|files|skills|gateway|config|cron)(\/|$)/.test(pathname)) return true;
+  if (pathname === '/api/memories' || pathname.startsWith('/api/memories/')) return true;
+  if (/^\/api\/organizations\/[^/]+\/memory(\/|$)/.test(pathname)) return true;
+  return false;
+}
+
 function buildSlotResponse(slot) {
   const bridgeUrl = proxyBaseFor(slot.slotId);
   return {
@@ -48,6 +69,7 @@ function buildSlotResponse(slot) {
     bridgeUrl,
     runtimeUrl: bridgeUrl ? `${bridgeUrl}/runtime-api` : null,
     gatewayUrl: bridgeUrl,
+    gatewayToken: slot.gatewayToken || null,
     error: slot.error || null,
   };
 }
@@ -186,7 +208,7 @@ app.post('/runtime/workspaces/:slotId/pause', requireManagerAuth, async (req, re
   }
 });
 
-app.all('/runtime/workspaces/:slotId/proxy/*', requireManagerAuth, async (req, res) => {
+app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
   const registry = readSlotRegistry(REGISTRY_PATH);
   const slotId = normalizeWorkspaceSlotId(req.params.slotId);
   const slot = registry.slots?.[slotId];
@@ -200,11 +222,19 @@ app.all('/runtime/workspaces/:slotId/proxy/*', requireManagerAuth, async (req, r
   }
 
   const suffix = req.originalUrl.replace(/^\/runtime\/workspaces\/[^/]+\/proxy/, '') || '/';
-  const target = `http://127.0.0.1:${slot.ports.bridge}${suffix}`;
+  const routeToBridge = shouldRouteToBridge(suffix);
+  const authed = hasManagerAuth(req);
+  if (routeToBridge && !authed) {
+    return res.status(401).json({ error: 'unauthorized', message: 'Bridge workspace routes require manager authorization' });
+  }
+  const targetPort = routeToBridge ? slot.ports.bridge : slot.ports.gateway;
+  const target = `http://127.0.0.1:${targetPort}${suffix}`;
   try {
+    const headers = Object.fromEntries(Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase())));
+    if (routeToBridge && slot.bridgeAuthToken) headers.Authorization = `Bearer ${slot.bridgeAuthToken}`;
     const response = await fetch(target, {
       method: req.method,
-      headers: Object.fromEntries(Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase()))),
+      headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body || {}),
       signal: AbortSignal.timeout(30000),
     });
