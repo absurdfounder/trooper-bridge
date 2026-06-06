@@ -1236,8 +1236,8 @@ function syncGatewayAuthTokenInConfig() {
  return { updated: true, token: desiredToken, config: readOpenClawConfig() };
 }
 
-const OPENCLAW_DEVICES_DIR = '/opt/openclaw-data/config/devices';
-const OPENCLAW_PAIRED_JSON_PATH = `${OPENCLAW_DEVICES_DIR}/paired.json`;
+const OPENCLAW_DEVICES_DIR = process.env.OPENCLAW_DEVICES_DIR || joinOpenClawConfigPath('devices');
+const OPENCLAW_PAIRED_JSON_PATH = process.env.OPENCLAW_PAIRED_JSON_PATH || `${OPENCLAW_DEVICES_DIR}/paired.json`;
 
 function buildBridgePairedDeviceEntry(existing = {}) {
  const now = Date.now();
@@ -6750,8 +6750,8 @@ app.get('/admin/backups', (req, res) => {
 
 // ── Device Management ────────────────────────────────────────────────────
 
-const PAIRED_JSON_PATH_ADMIN = '/opt/openclaw-data/config/devices/paired.json';
-const DEVICES_DIR_ADMIN = '/opt/openclaw-data/config/devices';
+const PAIRED_JSON_PATH_ADMIN = OPENCLAW_PAIRED_JSON_PATH;
+const DEVICES_DIR_ADMIN = OPENCLAW_DEVICES_DIR;
 
 function arrayFromPayload(payload, keys = []) {
  if (Array.isArray(payload)) return payload;
