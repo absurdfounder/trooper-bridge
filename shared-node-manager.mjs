@@ -102,6 +102,8 @@ async function runWorkspaceSlotStart(slot) {
         bridgeAuthToken: runtime.bridgeAuthToken,
         containerName: runtime.gateway.containerName,
         bridgePid: runtime.bridge.pid || starting.bridgePid || null,
+        verifiedAt: Date.now(),
+        verification: runtime.verification || null,
       },
     });
   } catch (error) {

@@ -3152,21 +3152,30 @@ fi
 
 # ── [9/9] Start all services (single clean startup) ──────────────────
 dlog "Starting services..."
-# Kill the temporary log server so the real bridge can use the port
-kill "$LOG_SERVER_PID" 2>/dev/null || true
-sleep 1
+_snapshot_build_mode=0
+if [ "${TROOPER_SNAPSHOT_BUILD:-0}" = "1" ]; then
+ _snapshot_build_mode=1
+fi
 
-# Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
-run_cmd systemctl restart openclaw-bridge
-run_cmd systemctl restart trooper-shared-node-manager
-sleep 2
-if systemctl is-active --quiet openclaw-bridge; then
- echo "Bridge Service: RUNNING"
+if [ "$_snapshot_build_mode" = "1" ]; then
+ echo "[setup] Snapshot build: keeping installer health/log server on :${BRIDGE_PORT} until bake finalization"
 else
- echo "Bridge Service: NOT RUNNING"
- journalctl -u openclaw-bridge --no-pager -n 60 || true
- echo "FATAL: openclaw-bridge service failed to start"
- exit 1
+ # Kill the temporary log server so the real bridge can use the port.
+ kill "$LOG_SERVER_PID" 2>/dev/null || true
+ sleep 1
+
+ # Start bridge immediately — binds in ~5s, minimizes log gap (provision.js polls port 3002)
+ run_cmd systemctl restart openclaw-bridge
+ run_cmd systemctl restart trooper-shared-node-manager
+ sleep 2
+ if systemctl is-active --quiet openclaw-bridge; then
+  echo "Bridge Service: RUNNING"
+ else
+  echo "Bridge Service: NOT RUNNING"
+  journalctl -u openclaw-bridge --no-pager -n 60 || true
+  echo "FATAL: openclaw-bridge service failed to start"
+  exit 1
+ fi
 fi
 
 # Start docker containers
@@ -3188,10 +3197,15 @@ if [ "$_gw_alive" -eq 0 ]; then
  docker compose logs --tail 20 openclaw-gateway 2>/dev/null || true
 fi
 
-# Start org runtime, poller, VNC, desktop API, playwright (bridge already running)
+# Start org runtime, VNC, desktop API, playwright. The poller needs the bridge,
+# so snapshot baking starts it after the final real-bridge smoke handoff.
 run_cmd systemctl start trooper-org-runtime
 run_cmd systemctl start trooper-server
-run_cmd systemctl start openclaw-poller
+if [ "$_snapshot_build_mode" = "1" ]; then
+ echo "[setup] Snapshot build: deferring poller until final bridge smoke handoff"
+else
+ run_cmd systemctl start openclaw-poller
+fi
 run_cmd systemctl start openclaw-vnc
 run_cmd systemctl start trooper-desktop
 run_cmd systemctl start trooper-desktop-api
@@ -3266,24 +3280,36 @@ sleep 3
 # ── Verify ──
 if docker ps | grep -q openclaw; then echo "Container: UP"; else echo "Container: DOWN"; docker ps -a; fi
 
-if curl -s http://127.0.0.1:${BRIDGE_PORT}/health | grep -q ok; then
- echo "Bridge: HEALTHY"
+if [ "$_snapshot_build_mode" = "1" ]; then
+ echo "Bridge: deferred until snapshot bake finalization"
 else
- echo "Bridge: NOT HEALTHY (may need a few more seconds)"
+ if curl -s http://127.0.0.1:${BRIDGE_PORT}/health | grep -q ok; then
+  echo "Bridge: HEALTHY"
+ else
+  echo "Bridge: NOT HEALTHY (may need a few more seconds)"
+ fi
 fi
 
-if curl -s http://127.0.0.1:${SHARED_NODE_MANAGER_PORT}/health | grep -q trooper-shared-user-node-manager; then
- echo "Shared workspace manager: HEALTHY"
+if [ "$_snapshot_build_mode" = "1" ]; then
+ echo "Shared workspace manager: deferred until snapshot bake finalization"
 else
- echo "Shared workspace manager: NOT HEALTHY (later workspaces may wait for service restart)"
- journalctl -u trooper-shared-node-manager --no-pager -n 10 || true
+ if curl -s http://127.0.0.1:${SHARED_NODE_MANAGER_PORT}/health | grep -q trooper-shared-user-node-manager; then
+  echo "Shared workspace manager: HEALTHY"
+ else
+  echo "Shared workspace manager: NOT HEALTHY (later workspaces may wait for service restart)"
+  journalctl -u trooper-shared-node-manager --no-pager -n 10 || true
+ fi
 fi
 
-if systemctl is-active --quiet openclaw-poller; then
- echo "Poller: RUNNING"
+if [ "$_snapshot_build_mode" = "1" ]; then
+ echo "Poller: deferred until snapshot bake finalization"
 else
- echo "Poller: NOT RUNNING"
- journalctl -u openclaw-poller --no-pager -n 10
+ if systemctl is-active --quiet openclaw-poller; then
+  echo "Poller: RUNNING"
+ else
+  echo "Poller: NOT RUNNING"
+  journalctl -u openclaw-poller --no-pager -n 10
+ fi
 fi
 
 if systemctl is-active --quiet caddy; then
@@ -3421,5 +3447,35 @@ fi
 # builds this happens only after cloud-init and first-boot cleanup are complete.
 touch /tmp/openclaw-setup-complete
 touch /opt/openclaw-bridge/.setup-complete
+
+if [ "$_snapshot_build_mode" = "1" ]; then
+  echo "[setup] Snapshot build: swapping installer log server for real bridge smoke endpoint..."
+  kill "$LOG_SERVER_PID" 2>/dev/null || true
+  sleep 1
+  run_cmd systemctl restart openclaw-bridge
+  run_cmd systemctl restart trooper-shared-node-manager
+  run_cmd systemctl start openclaw-poller 2>/dev/null || true
+
+  _snapshot_bridge_ok=0
+  for i in $(seq 1 90); do
+    _snapshot_health="$(curl -sf --max-time 3 http://127.0.0.1:${BRIDGE_PORT}/health 2>/dev/null || true)"
+    if printf '%s' "$_snapshot_health" | grep -q '"status"[[:space:]]*:[[:space:]]*"ok"'; then
+      echo "[setup] Snapshot bridge health OK after $((i * 2))s"
+      _snapshot_bridge_ok=1
+      break
+    fi
+    if [ $((i % 15)) -eq 0 ]; then
+      echo "[setup] Waiting for snapshot bridge health: ${_snapshot_health:-fetch failed}"
+      journalctl -u openclaw-bridge --no-pager -n 20 || true
+    fi
+    sleep 2
+  done
+  if [ "$_snapshot_bridge_ok" -eq 0 ]; then
+    echo "FATAL: snapshot bridge health did not become ok after bake finalization"
+    journalctl -u openclaw-bridge --no-pager -n 80 || true
+    docker compose -f /opt/openclaw/docker-compose.yml logs --tail 80 openclaw-gateway 2>/dev/null || true
+    exit 1
+  fi
+fi
 
 echo done
