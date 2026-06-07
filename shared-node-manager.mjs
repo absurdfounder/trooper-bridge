@@ -258,13 +258,6 @@ app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
   const slotId = normalizeWorkspaceSlotId(req.params.slotId);
   const slot = registry.slots?.[slotId];
   if (!slot) return res.status(404).json({ error: 'workspace_slot_not_found', slotId });
-  if (slot.status !== 'ready') {
-    return res.status(503).json({
-      error: 'workspace_slot_not_ready',
-      message: `Workspace slot ${slot.slotId} is ${slot.status || 'cold'}`,
-      slotStatus: slot.status || 'cold',
-    });
-  }
 
   const suffix = getProxySuffix(req.originalUrl);
   const targetInfo = resolveProxyTarget({ slot, suffix, headers: req.headers, authToken: AUTH_TOKEN });
@@ -272,6 +265,15 @@ app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
     return res.status(401).json({ error: 'unauthorized', message: 'Bridge workspace routes require manager authorization' });
   }
   const { routeToBridge, targetPort } = targetInfo;
+
+  if (slot.status !== 'ready' && !routeToBridge) {
+    return res.status(503).json({
+      error: 'workspace_slot_not_ready',
+      message: `Workspace slot ${slot.slotId} is ${slot.status || 'cold'}`,
+      slotStatus: slot.status || 'cold',
+    });
+  }
+
   try {
     await forwardWorkspaceProxyRequest({ req, res, slot, suffix, routeToBridge, targetPort });
   } catch (error) {
