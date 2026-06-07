@@ -588,6 +588,10 @@ const OPENCLAW_WORKSPACE_HOST_ROOT = process.env.OPENCLAW_WORKSPACE_HOST_ROOT ||
 const OPENCLAW_AGENTS_CONFIG_ROOT = process.env.OPENCLAW_AGENTS_CONFIG_ROOT || `${OPENCLAW_CONFIG_ROOT}/agents`;
 const USE_GATEWAY_DEVICE_AUTH = process.env.OPENCLAW_BRIDGE_DEVICE_AUTH === '1';
 
+function expandGatewayContainerCommand(command) {
+ return String(command || '').replaceAll('${OPENCLAW_GATEWAY_CONTAINER}', OPENCLAW_GATEWAY_CONTAINER);
+}
+
 function openclawDataPath(...segments) {
  return path.join(OPENCLAW_DATA_ROOT, ...segments.filter(Boolean));
 }
@@ -972,16 +976,17 @@ function appendDiagnosticEvent(level, message, meta = {}) {
 }
 
 function safeDiagnosticExec(command, { timeout = 8000, maxBuffer = 4 * 1024 * 1024 } = {}) {
+ const expandedCommand = expandGatewayContainerCommand(command);
  try {
   return {
    ok: true,
-   command,
-   output: redactDiagnosticText(execSync(command, { timeout, maxBuffer, encoding: 'utf8' }).trim()),
+   command: expandedCommand,
+   output: redactDiagnosticText(execSync(expandedCommand, { timeout, maxBuffer, encoding: 'utf8' }).trim()),
   };
  } catch (err) {
   return {
    ok: false,
-   command,
+   command: expandedCommand,
    error: redactDiagnosticText(err.message),
    output: redactDiagnosticText(String(err.stdout || err.stderr || '').trim()),
   };
@@ -1626,7 +1631,7 @@ class OpenClawGateway {
    }
    if (process.env.OPENCLAW_RESET_RECOVERY_RESTART === '1') {
     console.warn('[OpenClaw] OPENCLAW_RESET_RECOVERY_RESTART=1; restarting gateway after reset recovery');
-    execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
+    execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
    }
    this.forceReconnect(30000, 'connect-reset-recovery');
  } catch (recoveryErr) {
@@ -1957,7 +1962,7 @@ class OpenClawGateway {
  if (repair.updated) {
  console.log('[OpenClaw] Rewrote openclaw.json with live gateway token before restart');
  }
- execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
+ execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
  this.token = getDesiredGatewayToken() || this.token;
  this.forceReconnect(10000, 'auth-token-repair');
  } catch (repairErr) {
@@ -2139,7 +2144,7 @@ class OpenClawGateway {
  }
 
  // Create timestamp marker so we can find screenshots created during this run
- try { execSync('docker exec ${OPENCLAW_GATEWAY_CONTAINER} touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
+ try { execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} touch /tmp/.openclaw-run-marker`, { timeout: 3000 }); } catch {}
 
  const id = randomUUID();
  const idempotencyKey = opts.idempotencyKey || randomUUID();
@@ -2527,7 +2532,7 @@ class OpenClawGateway {
  }
 
  // Create timestamp marker so we can find screenshots created during this run
- try { execSync('docker exec ${OPENCLAW_GATEWAY_CONTAINER} touch /tmp/.openclaw-run-marker', { timeout: 3000 }); } catch {}
+ try { execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} touch /tmp/.openclaw-run-marker`, { timeout: 3000 }); } catch {}
 
  const id = randomUUID();
  const idempotencyKey = opts.idempotencyKey || randomUUID();
@@ -6111,7 +6116,7 @@ function readGatewayContainerStatus({ includeLogs = false } = {}) {
   inspectError: null,
  };
  try {
-  const raw = execSync('docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 2500 }).toString().trim();
+  const raw = execSync(`docker inspect --format="{{.State.Status}}:{{.State.Running}}:{{.RestartCount}}" ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 2500 }).toString().trim();
   const [state, running, restarts] = raw.split(':');
   result.status = state || 'unknown';
   result.running = running === 'true';
@@ -6122,7 +6127,7 @@ function readGatewayContainerStatus({ includeLogs = false } = {}) {
  }
  if (includeLogs) {
   try {
-   result.recentLogs = execSync('docker logs --tail 80 --timestamps ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 3500 }).toString();
+   result.recentLogs = execSync(`docker logs --tail 80 --timestamps ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 3500 }).toString();
   } catch (err) {
    result.recentLogs = result.inspectError || err.message || '';
   }
@@ -6539,7 +6544,7 @@ app.get('/admin/health', async (req, res) => {
  // OpenClaw version
  let openclawVersion = null;
  try {
-   openclawVersion = execSync("docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>/dev/null", { timeout: 5000 }).toString().trim();
+   openclawVersion = execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
  } catch {}
 
  // Bridge version (from git)
@@ -7571,7 +7576,7 @@ app.post('/admin/upgrade', async (req, res) => {
    try {
      // Wait for gateway to start
      await new Promise(r => setTimeout(r, 10000));
-     newOpenclawVersion = execSync('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>/dev/null', { timeout: 10000 }).toString().trim();
+     newOpenclawVersion = execSync(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw --version 2>/dev/null`, { timeout: 10000 }).toString().trim();
    } catch {}
 
    const allOk = steps.every(s => s.status === 'ok');
@@ -9781,7 +9786,7 @@ app.post('/gateway/patch-auth', (req, res) => {
  }
  // Restart gateway to apply paired.json changes. Use a generous settle window so
  // external repair loops do not restart it again before the websocket re-pairs.
- execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
+ execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
  gateway.forceReconnect(30000, 'patch-auth');
  res.json({ success: true, message: 'Identity fixed, gateway auth synced, paired.json repaired, compose/startup checked, and gateway restarted', authRepair: repair, pairedRepair, composeRepair });
  } catch (err) {
@@ -9805,7 +9810,7 @@ app.post('/gateway/restart', (req, res) => {
  collectDiagnosticSnapshot('before-gateway-restart', { heavy: true });
  const configRepair = repairOpenClawConfigForGatewayStart('gateway-restart');
  const pairedRepair = upsertBridgePairedDevice({ force: true, reason: 'gateway-restart' });
- execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
+ execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
  gateway.forceReconnect(30000, 'gateway-restart');
  // Re-approve device and reconnect after restart
  setTimeout(async () => {
@@ -9923,7 +9928,7 @@ app.put('/gateway/config', (req, res) => {
  }
  let applyOutput = '';
  console.log('Gateway config updated, restarting...');
- applyOutput = execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 }).toString();
+ applyOutput = execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 }).toString();
  gateway.forceReconnect(30000, 'config-update');
  res.json({
    success: true,
@@ -10162,7 +10167,7 @@ app.get('/upgrade/status', (req, res) => {
    try { versions.bridgeGitHash = execSync('git -C /opt/openclaw-bridge rev-parse --short HEAD 2>/dev/null').toString().trim(); } catch {}
    try { versions.bridgeGitDate = execSync('git -C /opt/openclaw-bridge log -1 --format=%ci 2>/dev/null').toString().trim(); } catch {}
    try {
-     const containerStatus = execSync("docker inspect ${OPENCLAW_GATEWAY_CONTAINER} --format='{{.State.Status}}' 2>/dev/null").toString().trim();
+     const containerStatus = execSync(`docker inspect ${OPENCLAW_GATEWAY_CONTAINER} --format='{{.State.Status}}' 2>/dev/null`).toString().trim();
      versions.gatewayStatus = containerStatus;
    } catch { versions.gatewayStatus = 'unknown'; }
    res.json({
@@ -10367,8 +10372,9 @@ app.get('/diagnostics/export', async (req, res) => {
  const startedAt = Date.now();
  const durableSnapshot = collectDiagnosticSnapshot('diagnostics-export', { heavy: true });
  const safeExec = (command, timeout = 10000) => {
+  const expandedCommand = expandGatewayContainerCommand(command);
   try {
-   return { ok: true, output: execSync(command, { timeout, encoding: 'utf8' }).trim() };
+   return { ok: true, output: execSync(expandedCommand, { timeout, encoding: 'utf8' }).trim() };
   } catch (err) {
    return { ok: false, error: err.message, output: String(err.stdout || '').trim() };
   }
@@ -10427,8 +10433,9 @@ app.get('/diagnostics/export', async (req, res) => {
 app.get('/memory/dreaming', async (req, res) => {
  if (!requireBridgeAuth(req, res)) return;
  const safeExec = (command, timeout = 15000) => {
+  const expandedCommand = expandGatewayContainerCommand(command);
   try {
-   return { ok: true, output: execSync(command, { timeout, encoding: 'utf8' }).trim() };
+   return { ok: true, output: execSync(expandedCommand, { timeout, encoding: 'utf8' }).trim() };
   } catch (err) {
    return { ok: false, error: err.message, output: String(err.stdout || '').trim() };
   }
@@ -11218,8 +11225,8 @@ const _syncWarnings = [];
  // Newer OpenClaw builds can reload secrets explicitly. Do not signal PID 1:
  // in the gateway container that can terminate the startup process and create
  // a restart loop during fresh provisioning.
- await optionalStep('secrets.apply', 'docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets apply 2>/dev/null', 20000);
- await optionalStep('secrets.reload', 'docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets reload 2>/dev/null', 15000);
+ await optionalStep('secrets.apply', `docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets apply 2>/dev/null`, 20000);
+ await optionalStep('secrets.reload', `docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets reload 2>/dev/null`, 15000);
  const ok = steps.length > 0;
  if (ok) console.log(`[keys] Hot reload requested (${steps.join(', ')})`);
  else console.warn(`[keys] Hot reload failed: ${errors.join(' | ')}`);
@@ -11750,7 +11757,7 @@ app.get('/config/secrets/audit', async (req, res) => {
  const { promisify } = await import('util');
  const { exec } = await import('child_process');
  const run = promisify(exec);
- const { stdout } = await run('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets audit --json 2>/dev/null', { timeout: 15000 });
+ const { stdout } = await run(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets audit --json 2>/dev/null`, { timeout: 15000 });
  res.json(JSON.parse(stdout));
  } catch (e) {
  if (/not found|unknown command|No such/i.test(e.message || e.stderr || '')) {
@@ -11766,7 +11773,7 @@ app.post('/config/secrets/apply', async (req, res) => {
  const { promisify } = await import('util');
  const { exec } = await import('child_process');
  const run = promisify(exec);
- const { stdout } = await run('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets apply 2>&1', { timeout: 20000 });
+ const { stdout } = await run(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets apply 2>&1`, { timeout: 20000 });
  console.log('[secrets] Applied:', stdout.trim());
  res.json({ status: 'ok', output: stdout.trim() });
  } catch (e) { res.status(500).json({ error: e.message }); }
@@ -11777,7 +11784,7 @@ app.post('/config/secrets/reload', async (req, res) => {
  const { promisify } = await import('util');
  const { exec } = await import('child_process');
  const run = promisify(exec);
- const { stdout } = await run('docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets reload 2>&1', { timeout: 15000 });
+ const { stdout } = await run(`docker exec ${OPENCLAW_GATEWAY_CONTAINER} openclaw secrets reload 2>&1`, { timeout: 15000 });
  console.log('[secrets] Reloaded:', stdout.trim());
  res.json({ status: 'ok', output: stdout.trim() });
  } catch (e) { res.status(500).json({ error: e.message }); }
@@ -13065,7 +13072,7 @@ app.put('/config/openclaw', (req, res) => {
 		 const safeData = preserveSystemManagedSections({ file: 'openclaw.json', current, submitted: data });
 		 const changed = writeOpenClawConfig(normalizeOpenClawConfigForWrite(safeData, current));
 		 if (changed && restart) {
-		  execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
+		  execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
 		  gateway.forceReconnect(30000, 'config-openclaw-update');
 		 }
 	 res.json({ success: true, changed, reload: changed && restart ? 'restart' : 'deferred', hash: jsonFileHash(readOpenClawConfig()) });
@@ -13112,7 +13119,7 @@ app.put('/config/auth-profiles', (req, res) => {
   const existingText = readFileSync(AUTH_PROFILES_PATH + '.bak', 'utf8');
   writeTimestampedBackup(AUTH_PROFILES_PATH, existingText, 'pre-write');
  } catch {}
- execSync('docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1', { timeout: 30000 });
+ execSync(`docker restart ${OPENCLAW_GATEWAY_CONTAINER} 2>&1`, { timeout: 30000 });
  gateway.forceReconnect(30000, 'auth-profiles-update');
  res.json({ success: true, hash: jsonFileHash(JSON.parse(readFileSync(AUTH_PROFILES_PATH, 'utf8'))) });
  } catch (err) {
