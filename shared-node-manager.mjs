@@ -56,6 +56,17 @@ function shouldRouteToBridge(suffix = '') {
   return isBridgeCandidatePath(suffix);
 }
 
+function isGatewayProxyFailure(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return (
+    message.includes('fetch failed')
+    || message.includes('socket')
+    || message.includes('econnrefused')
+    || message.includes('terminated')
+    || message.includes('timeout')
+  );
+}
+
 function getProxySuffix(rawUrl = '') {
   const value = String(rawUrl || '');
   return value.replace(/^\/runtime\/workspaces\/[^/]+\/proxy/, '') || '/';
@@ -131,6 +142,24 @@ function ensureWorkspaceSlotStartTask(slot) {
   });
   startTasks.set(slot.slotId, task);
   return task;
+}
+
+async function forwardWorkspaceProxyRequest({ req, res, slot, suffix, routeToBridge, targetPort }) {
+  const target = `http://127.0.0.1:${targetPort}${suffix}`;
+  const headers = Object.fromEntries(Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase())));
+  if (routeToBridge && slot.bridgeAuthToken) headers.Authorization = `Bearer ${slot.bridgeAuthToken}`;
+  const response = await fetch(target, {
+    method: req.method,
+    headers,
+    body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body || {}),
+    signal: AbortSignal.timeout(30000),
+  });
+  res.status(response.status);
+  response.headers.forEach((value, key) => {
+    if (!['content-encoding', 'content-length'].includes(key.toLowerCase())) res.setHeader(key, value);
+  });
+  const body = Buffer.from(await response.arrayBuffer());
+  res.send(body);
 }
 
 app.get('/health', (_req, res) => {
@@ -231,24 +260,39 @@ app.all('/runtime/workspaces/:slotId/proxy/*', async (req, res) => {
     return res.status(401).json({ error: 'unauthorized', message: 'Bridge workspace routes require manager authorization' });
   }
   const { routeToBridge, targetPort } = targetInfo;
-  const target = `http://127.0.0.1:${targetPort}${suffix}`;
   try {
-    const headers = Object.fromEntries(Object.entries(req.headers).filter(([key]) => !['host', 'authorization'].includes(key.toLowerCase())));
-    if (routeToBridge && slot.bridgeAuthToken) headers.Authorization = `Bearer ${slot.bridgeAuthToken}`;
-    const response = await fetch(target, {
-      method: req.method,
-      headers,
-      body: ['GET', 'HEAD'].includes(req.method) ? undefined : JSON.stringify(req.body || {}),
-      signal: AbortSignal.timeout(30000),
-    });
-    res.status(response.status);
-    response.headers.forEach((value, key) => {
-      if (!['content-encoding', 'content-length'].includes(key.toLowerCase())) res.setHeader(key, value);
-    });
-    const body = Buffer.from(await response.arrayBuffer());
-    res.send(body);
+    await forwardWorkspaceProxyRequest({ req, res, slot, suffix, routeToBridge, targetPort });
   } catch (error) {
-    res.status(502).json({ error: 'workspace_slot_proxy_failed', message: error.message });
+    if (!routeToBridge && isGatewayProxyFailure(error)) {
+      console.warn(`[shared-node-manager] gateway proxy failed for ${slotId}; restarting slot runtime: ${error.message}`);
+      const recovered = await ensureWorkspaceSlotStartTask(slot);
+      const retrySlot = recovered || readSlotRegistry(REGISTRY_PATH).slots?.[slotId] || slot;
+      if (retrySlot.status === 'ready' && !res.headersSent) {
+        try {
+          const retryTargetInfo = resolveProxyTarget({ slot: retrySlot, suffix, headers: req.headers, authToken: AUTH_TOKEN });
+          await forwardWorkspaceProxyRequest({
+            req,
+            res,
+            slot: retrySlot,
+            suffix,
+            routeToBridge: retryTargetInfo.routeToBridge,
+            targetPort: retryTargetInfo.targetPort,
+          });
+          return;
+        } catch (retryError) {
+          if (!res.headersSent) {
+            return res.status(502).json({
+              error: 'workspace_slot_proxy_failed',
+              message: retryError.message,
+              recovered: Boolean(recovered),
+              slotStatus: retrySlot.status,
+            });
+          }
+          return;
+        }
+      }
+    }
+    if (!res.headersSent) res.status(502).json({ error: 'workspace_slot_proxy_failed', message: error.message });
   }
 });
 
