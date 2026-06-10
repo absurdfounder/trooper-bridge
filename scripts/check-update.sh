@@ -8,8 +8,10 @@
 # Flow:
 #   1. Resolve target from $MISSION_CONTROL_URL/api/current-versions.
 #   2. Compare to local /opt/openclaw-bridge HEAD and /opt/openclaw HEAD.
-#   3. If drift exists (any field mismatches), POST localhost:3002/upgrade
-#      with the Bearer token from /etc/openclaw-bridge.env.
+#   3. If drift exists, report it. Local mutation is disabled by default
+#      because it bypasses the control plane's verified rollback snapshot.
+#      Operators can explicitly set TROOPER_UNATTENDED_UPGRADE_MODE=apply
+#      for break-glass environments that accept that risk.
 #   4. Log every run to /var/log/openclaw-updater.log with timestamps.
 
 set -euo pipefail
@@ -72,12 +74,19 @@ if [ "$DRIFT" -eq 0 ]; then
   exit 0
 fi
 
+UNATTENDED_MODE="${TROOPER_UNATTENDED_UPGRADE_MODE:-report}"
+if [ "$UNATTENDED_MODE" != "apply" ]; then
+  echo "  drift detected; awaiting a verified control-plane rollout"
+  echo "  local unattended mutation is disabled (mode=${UNATTENDED_MODE})"
+  exit 0
+fi
+
 if [ -z "${BRIDGE_AUTH_TOKEN:-}" ]; then
   echo "  drift detected but BRIDGE_AUTH_TOKEN unset; cannot self-upgrade"
   exit 1
 fi
 
-echo "  triggering local /upgrade"
+echo "  WARNING: applying local unattended upgrade without a control-plane rollback snapshot"
 UPGRADE_BODY=$(jq -cn \
   --arg bridge "$TARGET_BRIDGE" \
   --arg gateway "$TARGET_GATEWAY" \

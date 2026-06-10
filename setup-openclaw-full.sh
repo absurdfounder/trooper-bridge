@@ -46,12 +46,18 @@ BROWSERBASE_PROJECT_ID="$(_resolve_input "${BROWSERBASE_PROJECT_ID:-}" "{{BROWSE
 RUNTIME_AUTH_SECRET="$(_resolve_input "${RUNTIME_AUTH_SECRET:-}" "{{RUNTIME_AUTH_SECRET}}")"
 OPENCLAW_COMPANY_PROVIDER_KEYS="$(_resolve_input "${OPENCLAW_COMPANY_PROVIDER_KEYS:-}" "{{OPENCLAW_COMPANY_PROVIDER_KEYS}}")"
 TROOPER_RUNTIME_TARBALL_URL="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_URL:-}" "{{TROOPER_RUNTIME_TARBALL_URL}}")"
+OPENCLAWBRIDGE_GIT_SHA="$(_resolve_input "${OPENCLAWBRIDGE_GIT_SHA:-}" "{{OPENCLAWBRIDGE_GIT_SHA}}")"
 TROOPER_RUNTIME_PORT=3101
 TROOPER_RUNTIME_DATA_DIR=/var/lib/trooper-org-runtime
+TROOPER_MANAGED_DEPLOYMENT="${TROOPER_MANAGED_DEPLOYMENT:-0}"
 
 # Defaults must be applied before validation. Snapshot-builder bootstrap may
 # omit optional values, but BRIDGE_PORT is required by the early log server.
 if [ -z "$OPENCLAW_DOCKER_IMAGE" ] || echo "$OPENCLAW_DOCKER_IMAGE" | grep -q '{{.*}}'; then
+  if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+    echo "FATAL: managed deployments require a digest-pinned OPENCLAW_DOCKER_IMAGE"
+    exit 1
+  fi
   OPENCLAW_DOCKER_IMAGE="ghcr.io/absurdfounder/trooper-gateway:latest"
 fi
 if [ -z "$OPENCLAW_COMPANY_PROVIDER_KEYS" ] || echo "$OPENCLAW_COMPANY_PROVIDER_KEYS" | grep -q '{{.*}}'; then
@@ -97,6 +103,23 @@ _validate_var PRIMARY_PROVIDER "$PRIMARY_PROVIDER" optional
 _validate_var PRIMARY_MODEL "$PRIMARY_MODEL" optional
 _validate_var RUNTIME_AUTH_SECRET "$RUNTIME_AUTH_SECRET" optional
 _validate_var TROOPER_RUNTIME_TARBALL_URL "$TROOPER_RUNTIME_TARBALL_URL" optional
+_validate_var OPENCLAWBRIDGE_GIT_SHA "$OPENCLAWBRIDGE_GIT_SHA" optional
+
+if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+  if ! echo "$OPENCLAW_DOCKER_IMAGE" | grep -Eq '@sha256:[a-fA-F0-9]{64}$'; then
+    echo "FATAL: managed OPENCLAW_DOCKER_IMAGE must be pinned to an sha256 digest"
+    exit 1
+  fi
+  if ! echo "$TROOPER_RUNTIME_TARBALL_URL" | grep -Eq \
+    '^https://api\.github\.com/repos/[^/]+/[^/]+/releases/assets/[0-9]+$|/releases/download/org-runtime-[a-fA-F0-9]{40}/trooper-org-runtime\.tar\.gz([?#].*)?$'; then
+    echo "FATAL: managed TROOPER_RUNTIME_TARBALL_URL must be an immutable promoted release asset"
+    exit 1
+  fi
+  if ! echo "$OPENCLAWBRIDGE_GIT_SHA" | grep -Eq '^[a-fA-F0-9]{40}$'; then
+    echo "FATAL: managed OPENCLAWBRIDGE_GIT_SHA must be a full 40-character commit"
+    exit 1
+  fi
+fi
 
 PLATFORM_API_URL="${API_URL:-https://trooper-production.up.railway.app}"
 
@@ -347,7 +370,11 @@ OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/trooper-ga
 if [ "$FROM_SNAPSHOT" = "1" ]; then
   # Image already cached on snapshot — just re-tag it
   dlog "Snapshot boot: tagging cached Docker image as openclaw:local"
-  docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local 2>/dev/null || docker tag ghcr.io/absurdfounder/trooper-gateway:latest openclaw:local
+  if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+    docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local
+  else
+    docker tag "${OPENCLAW_DOCKER_IMAGE}" openclaw:local 2>/dev/null || docker tag ghcr.io/absurdfounder/trooper-gateway:latest openclaw:local
+  fi
   echo "IMAGE_READY=true" > /tmp/docker-pull-status
   DOCKER_PULL_PID=""
 else
@@ -893,19 +920,60 @@ fi
 echo "Fallback chain: ${MODEL_FALLBACKS:-none}"
 
 # ── [5/9] OpenClaw ──────────────────────────────────────────────────
-# Shallow clone for docker-compose.yml only — the actual image comes from GHCR
-dlog "Fetching OpenClaw compose files..."
-if [ ! -d /opt/openclaw ]; then
- for _git_attempt in 1 2 3; do
- if git clone --depth 1 https://github.com/openclaw/openclaw.git /opt/openclaw; then
- break
- fi
- dlog "Git clone attempt ${_git_attempt} failed, retrying..."
- rm -rf /opt/openclaw 2>/dev/null || true
- sleep $((${_git_attempt} * 3))
- done
+# Managed installs use a local compose definition so upstream branch changes
+# cannot alter a promoted deployment. Self-hosted installs retain the upstream
+# checkout for optional sandbox tooling.
+dlog "Preparing OpenClaw compose files..."
+if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+  rm -rf /opt/openclaw 2>/dev/null || true
+  mkdir -p /opt/openclaw
+  cat > /opt/openclaw/docker-compose.yml << 'COMPOSE'
+services:
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-openclaw:local}
+    env_file:
+      - .env
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_DISABLE_BONJOUR: ${OPENCLAW_DISABLE_BONJOUR:-1}
+      TZ: ${OPENCLAW_TZ:-UTC}
+    volumes:
+      - "${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw"
+      - "${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace"
+      - "${OPENCLAW_AUTH_PROFILE_SECRET_DIR}:/home/node/.config/openclaw"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    restart: unless-stopped
+    command: ["node", "dist/index.js", "gateway", "--bind", "lan", "--port", "18789"]
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-openclaw:local}
+    profiles: ["disabled"]
+    entrypoint: ["node", "dist/index.js"]
+COMPOSE
 else
- cd /opt/openclaw && git fetch --depth 1 origin main && git reset --hard FETCH_HEAD || true
+  if [ ! -d /opt/openclaw ]; then
+    for _git_attempt in 1 2 3; do
+      if git clone --depth 1 https://github.com/openclaw/openclaw.git /opt/openclaw; then
+        break
+      fi
+      dlog "Git clone attempt ${_git_attempt} failed, retrying..."
+      rm -rf /opt/openclaw 2>/dev/null || true
+      sleep $((${_git_attempt} * 3))
+    done
+  else
+    cd /opt/openclaw && git fetch --depth 1 origin main && git reset --hard FETCH_HEAD || true
+  fi
 fi
 
 mkdir -p /opt/openclaw-data/config /opt/openclaw-data/workspace
@@ -2026,19 +2094,32 @@ restore_codex_oauth_sidecars
 # ── [6/9] Bridge + Sandbox + Poller (PARALLEL where possible) ─────────
 # Download bridge, create poller, and start sandbox build concurrently
 
-# Clone bridge repo (git clone always gets latest — no CDN caching issues)
+# Clone the bridge. Managed installs are bound to the promoted commit.
 dlog "Setting up Bridge..."
 dlog "Cloning bridge from GitHub..."
 rm -rf /opt/openclaw-bridge 2>/dev/null || true
 for _dl_attempt in 1 2 3; do
- if git clone --depth 1 https://github.com/absurdfounder/trooper-bridge.git /opt/openclaw-bridge; then
- dlog "Bridge cloned ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
- break
- fi
- dlog "Bridge clone attempt ${_dl_attempt} failed, retrying..."
- rm -rf /opt/openclaw-bridge 2>/dev/null || true
- sleep $((${_dl_attempt} * 3))
+  if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+    if git init -q /opt/openclaw-bridge \
+      && git -C /opt/openclaw-bridge remote add origin https://github.com/absurdfounder/trooper-bridge.git \
+      && git -C /opt/openclaw-bridge fetch -q --depth 1 origin "$OPENCLAWBRIDGE_GIT_SHA" \
+      && git -C /opt/openclaw-bridge checkout -q --detach FETCH_HEAD \
+      && [ "$(git -C /opt/openclaw-bridge rev-parse HEAD)" = "${OPENCLAWBRIDGE_GIT_SHA,,}" ]; then
+      dlog "Bridge cloned at ${OPENCLAWBRIDGE_GIT_SHA} ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
+      break
+    fi
+  elif git clone --depth 1 https://github.com/absurdfounder/trooper-bridge.git /opt/openclaw-bridge; then
+    dlog "Bridge cloned ($(wc -c < /opt/openclaw-bridge/index.mjs) bytes)"
+    break
+  fi
+  dlog "Bridge clone attempt ${_dl_attempt} failed, retrying..."
+  rm -rf /opt/openclaw-bridge 2>/dev/null || true
+  sleep $((${_dl_attempt} * 3))
 done
+if [ ! -s /opt/openclaw-bridge/index.mjs ]; then
+  echo "FATAL: bridge checkout failed"
+  exit 1
+fi
 
 # Create poller stub (fast)
 mkdir -p /opt/openclaw-poller
@@ -2064,14 +2145,14 @@ POLLER
 dlog "Installing bridge, sandbox, and dependencies in parallel..."
 
 # Task 1: Bridge npm install (background)
-(cd /opt/openclaw-bridge && timeout 180 npm install 2>&1 || {
+(cd /opt/openclaw-bridge && timeout 180 npm ci --omit=dev 2>&1 || {
  npm cache clean --force 2>/dev/null || true
- timeout 180 npm install 2>&1
+ timeout 180 npm ci --omit=dev 2>&1
 }) &
 BRIDGE_NPM_PID=$!
 
 # Task 2: Sandbox base image build (background)
-if [ "$FROM_SNAPSHOT" != "1" ]; then
+if [ "$FROM_SNAPSHOT" != "1" ] && [ "$TROOPER_MANAGED_DEPLOYMENT" != "1" ]; then
 (
  cd /opt/openclaw
  dlog "Building sandbox base image..."
@@ -2597,7 +2678,7 @@ echo "[setup] Desktop control API written"
 
 # Agent Daemon — Unix socket server for desktop exec (OpenClaw native integration)
 mkdir -p /opt/trooper-agent-daemon
-curl -fsSL "https://raw.githubusercontent.com/absurdfounder/openclawbridge/main/agent-daemon.mjs" -o /opt/trooper-agent-daemon/agent-daemon.mjs 2>/dev/null || true
+install -m 0755 /opt/openclaw-bridge/agent-daemon.mjs /opt/trooper-agent-daemon/agent-daemon.mjs
 if [ -s /opt/trooper-agent-daemon/agent-daemon.mjs ]; then
   chmod +x /opt/trooper-agent-daemon/agent-daemon.mjs
   cat > /etc/systemd/system/trooper-agent-daemon.service << 'AGENTDAEMON'
@@ -2751,6 +2832,9 @@ else
     tar -xzf /tmp/trooper-org-runtime.tar.gz -C /opt/trooper-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
     printf '{"runtimeTarballUrl":"%s"}\n' "$TROOPER_RUNTIME_TARBALL_URL" > /opt/trooper-org-runtime/.trooper-runtime-target.json
     dlog "Trooper org runtime installed from bundle"
+  elif [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+    echo "ERROR: managed deployment is missing its immutable Trooper runtime bundle" >&2
+    exit 1
   elif git clone --depth 1 https://github.com/absurdfounder/Trooper.git /tmp/trooper-clone 2>/dev/null; then
     cp -r /tmp/trooper-clone/server /opt/trooper-org-runtime/
     rm -rf /tmp/trooper-clone
@@ -2768,7 +2852,11 @@ fi
 
 dlog "Installing Trooper org runtime dependencies..."
 cd /opt/trooper-org-runtime/server
-npm install --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
+if [ -f package-lock.json ]; then
+  npm ci --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
+else
+  npm install --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
+fi
 cd /opt/openclaw
 
 cat > /etc/default/trooper-org-runtime << CRENV

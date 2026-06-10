@@ -12964,114 +12964,12 @@ app.post('/composio/tools/execute/:toolSlug', async (req, res) => {
 // ── Update OpenClaw ──────────────────────────────────────────────────
 
 let updateInProgress = false;
-app.post('/update', async (req, res) => {
- if (updateInProgress) return res.status(409).json({ error: 'Update already in progress' });
- updateInProgress = true;
- res.json({ status: 'updating', message: 'Update started' });
-
- const { exec } = await import('child_process');
- const { promisify } = await import('util');
- const run = promisify(exec);
- try {
- // Self-update bridge from git
- try {
- await run('cd /opt/openclaw-bridge && git fetch origin main && git reset --hard origin/main 2>&1');
- console.log('[Update] Bridge code updated from git');
- } catch (e) { console.warn('[Update] Bridge git sync failed (non-fatal):', e.message); }
- await run('cd /opt/openclaw && git fetch origin main && git reset --hard origin/main');
- const dockerImage = process.env.OPENCLAW_DOCKER_IMAGE || '';
- if (dockerImage) {
- const os = await import('os');
- const arch = os.arch();
- const platform = (arch === 'arm64' || arch === 'aarch64') ? 'linux/arm64' : 'linux/amd64';
- await run(`docker pull --platform ${platform} ${dockerImage} && docker tag ${dockerImage} openclaw:local`);
- } else {
- await run('cd /opt/openclaw && docker build --build-arg OPENCLAW_DOCKER_APT_PACKAGES="wget gnupg fonts-liberation fonts-noto-color-emoji" -t openclaw:local .', { timeout: 600000 });
- }
- // Ensure startup script exists (installs Chrome on container start)
- try {
- const fs = await import('fs');
- const startupScript = `#!/bin/bash
-# Ensure Chrome is installed (survives container restarts)
-if ! command -v google-chrome-stable &>/dev/null; then
- echo "[startup] Chrome not found, installing..."
- apt-get update -qq 2>/dev/null
- wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb 2>/dev/null
- apt-get install -y -qq /tmp/chrome.deb 2>/dev/null
- rm -f /tmp/chrome.deb
- echo "[startup] Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo 'unknown')"
-else
- echo "[startup] Chrome already installed: $(google-chrome-stable --version 2>/dev/null)"
-fi
-GATEWAY_PORT="\${1:-18789}"
-GATEWAY_PORT="\$(printf '%s' "\$GATEWAY_PORT" | tr -cd '0-9')"
-if [ -z "\$GATEWAY_PORT" ] || [ "\$GATEWAY_PORT" -lt 1 ] || [ "\$GATEWAY_PORT" -gt 65535 ]; then
- echo "[startup] Invalid gateway port '\${1:-}', falling back to 18789"
- GATEWAY_PORT=18789
-fi
-export OPENCLAW_TMPDIR=/home/node/.cache/openclaw/tmp
-export OPENCLAW_NATIVE_HOOK_RELAY_DIR=/home/node/.cache/openclaw/native-hook-relays
-export TMPDIR="\$OPENCLAW_TMPDIR"
-export TMP="\$OPENCLAW_TMPDIR"
-export TEMP="\$OPENCLAW_TMPDIR"
-mkdir -p "\$OPENCLAW_TMPDIR" "\$OPENCLAW_NATIVE_HOOK_RELAY_DIR" /var/tmp/jiti 2>/dev/null || true
-chown -R 1000:1000 /home/node/.cache/openclaw /var/tmp/jiti 2>/dev/null || true
-chmod 755 "\$OPENCLAW_TMPDIR" "\$OPENCLAW_NATIVE_HOOK_RELAY_DIR" /var/tmp/jiti 2>/dev/null || true
-exec env DISPLAY=:99 TMPDIR="\$TMPDIR" TMP="\$TMP" TEMP="\$TEMP" OPENCLAW_TMPDIR="\$OPENCLAW_TMPDIR" OPENCLAW_NATIVE_HOOK_RELAY_DIR="\$OPENCLAW_NATIVE_HOOK_RELAY_DIR" JITI_CACHE_DIR=/var/tmp/jiti OPENCLAW_NO_RESPAWN=1 node dist/index.js gateway --allow-unconfigured --bind lan --port "\$GATEWAY_PORT"
-`;
- fs.writeFileSync('/opt/openclaw-data/startup.sh', startupScript, { mode: 0o755 });
- console.log('Startup script written to /opt/openclaw-data/startup.sh');
-
- ensureOpenClawComposeOverride({ reason: 'update' });
- } catch (e) { console.error('Failed to write startup script:', e.message); }
-
- await run('cd /opt/openclaw && docker compose down && docker compose up -d');
- await run('sleep 5');
- await run('docker image prune -f');
- console.log('OpenClaw updated successfully (Chrome will be installed by startup script)');
-
- // Patch bridge code if needed (fix client.id, protocol version, device identity)
- try {
- const fs = await import('fs');
- const bridgePath = '/opt/openclaw-bridge/index.mjs';
- let bridgeCode = fs.readFileSync(bridgePath, 'utf8');
- let bridgePatched = false;
- if (bridgeCode.includes("id: 'trooper-bridge'")) {
- bridgeCode = bridgeCode.replace("id: 'trooper-bridge'", "id: 'gateway-client'");
- bridgePatched = true;
- }
- if (bridgeCode.includes('maxProtocol: 1')) {
- bridgeCode = bridgeCode.replace('maxProtocol: 1', 'maxProtocol: 3');
- bridgePatched = true;
- }
- // If bridge lacks device identity, it needs a full rewrite (too complex to patch inline)
- if (!bridgeCode.includes('loadOrCreateDeviceIdentity')) {
- console.log('Bridge lacks device identity — needs manual redeploy or full script update');
- bridgePatched = true; // still restart for other patches
- }
- if (bridgePatched) {
- fs.writeFileSync(bridgePath, bridgeCode);
- await run('systemctl restart openclaw-bridge');
- console.log('Bridge patched and restarted');
- }
- } catch (patchErr) { console.error('Bridge patch failed:', patchErr.message); }
-
- // Patch gateway config: add trustedProxies if missing (needed for device auth from Docker)
- try {
- const fs = await import('fs');
- const configPath = OPENCLAW_CONFIG_PATH;
- const existingConfigText = fs.readFileSync(configPath, 'utf8');
- const config = JSON.parse(existingConfigText);
- if (config.gateway && !config.gateway.trustedProxies) {
- config.gateway.trustedProxies = ['127.0.0.1', '172.16.0.0/12'];
- writeTimestampedBackup(configPath, existingConfigText, 'pre-update-patch');
-	 writeOpenClawConfig(config);
- await run('cd /opt/openclaw && docker compose down && docker compose up -d');
- console.log('Gateway config patched with trustedProxies and restarted');
- }
- } catch (configErr) { console.error('Gateway config patch failed:', configErr.message); }
- } catch (err) { console.error('Update failed:', err.message); }
- finally { updateInProgress = false; }
+app.post('/update', (req, res) => {
+ if (!requireBridgeAuth(req, res)) return;
+ res.status(410).json({
+  error: 'legacy_update_disabled',
+  message: 'Use the verified Trooper server upgrade flow with a promoted immutable target and rollback snapshot.',
+ });
 });
 
 // ── Callback endpoint for OpenClaw hooks results ─────────────────────
