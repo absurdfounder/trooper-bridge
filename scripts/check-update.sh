@@ -54,6 +54,7 @@ fi
 TARGET_BRIDGE=$(echo "$TARGET" | jq -r '.openclawBridgeCommit // empty')
 TARGET_GATEWAY=$(echo "$TARGET" | jq -r '.gatewayImage // empty')
 TARGET_RUNTIME=$(echo "$TARGET" | jq -r '.runtimeTarballUrl // empty')
+TARGET_RUNTIME_SHA256=$(echo "$TARGET" | jq -r '.runtimeTarballSha256 // empty')
 TARGET_RUNTIME_SCHEMA=$(echo "$TARGET" | jq -r '.runtimeSchemaVersion // 1')
 TARGET_RUNTIME_MIN_SOURCE=$(echo "$TARGET" | jq -r '.minimumSourceRuntimeSchemaVersion // 1')
 TARGET_RUNTIME_MAX_SOURCE=$(echo "$TARGET" | jq -r '.maximumSourceRuntimeSchemaVersion // (.runtimeSchemaVersion // 1)')
@@ -66,6 +67,7 @@ fi
 LOCAL_BRIDGE=$(git -C /opt/openclaw-bridge rev-parse HEAD 2>/dev/null || echo "")
 LOCAL_GATEWAY_DIGESTS=$(docker inspect openclaw:local --format='{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null || echo "")
 LOCAL_RUNTIME=$(jq -r '.runtimeTarballUrl // empty' /opt/trooper-org-runtime/.trooper-runtime-target.json 2>/dev/null || echo "")
+LOCAL_RUNTIME_SHA256=$(jq -r '.runtimeTarballSha256 // empty' /opt/trooper-org-runtime/.trooper-runtime-target.json 2>/dev/null || echo "")
 
 DRIFT=0
 if [ -n "$TARGET_BRIDGE" ] && [ "$LOCAL_BRIDGE" != "$TARGET_BRIDGE" ]; then
@@ -78,6 +80,10 @@ if [ -n "$TARGET_GATEWAY" ] && ! grep -Fxq "$TARGET_GATEWAY" <<<"$LOCAL_GATEWAY_
 fi
 if [ -n "$TARGET_RUNTIME" ] && [ "$LOCAL_RUNTIME" != "$TARGET_RUNTIME" ]; then
   echo "  runtime bundle drift: promoted asset is not installed"
+  DRIFT=1
+fi
+if [ -n "$TARGET_RUNTIME_SHA256" ] && [ "$LOCAL_RUNTIME_SHA256" != "$TARGET_RUNTIME_SHA256" ]; then
+  echo "  runtime checksum drift: installed bytes do not match the promoted digest"
   DRIFT=1
 fi
 
@@ -109,6 +115,7 @@ UPGRADE_BODY=$(jq -cn \
   --arg bridge "$TARGET_BRIDGE" \
   --arg gateway "$TARGET_GATEWAY" \
   --arg runtime "$TARGET_RUNTIME" \
+  --arg runtimeSha256 "$TARGET_RUNTIME_SHA256" \
   --argjson runtimeSchema "$TARGET_RUNTIME_SCHEMA" \
   --argjson runtimeMinSource "$TARGET_RUNTIME_MIN_SOURCE" \
   --argjson runtimeMaxSource "$TARGET_RUNTIME_MAX_SOURCE" \
@@ -118,6 +125,7 @@ UPGRADE_BODY=$(jq -cn \
       openclawBridgeCommit: $bridge,
       gatewayImage: $gateway,
       runtimeTarballUrl: $runtime,
+      runtimeTarballSha256: $runtimeSha256,
       runtimeSchemaVersion: $runtimeSchema,
       minimumSourceRuntimeSchemaVersion: $runtimeMinSource,
       maximumSourceRuntimeSchemaVersion: $runtimeMaxSource

@@ -7719,6 +7719,7 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
       env: {
         ...process.env,
         TROOPER_RUNTIME_TARBALL_URL: target.runtimeTarballUrl,
+        TROOPER_RUNTIME_TARBALL_SHA256: target.runtimeTarballSha256,
         TROOPER_RUNTIME_SKIP_RESTART: '1',
       },
       timeout: 240000,
@@ -10143,10 +10144,13 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
  const targetBridge = target.openclawBridgeCommit || target.bridgeCommit || target.bridgeSha || null;
  const targetGateway = target.gatewayImage || target.gatewayImageDigest || target.gatewayImageId || null;
  const targetRuntime = target.runtimeTarballUrl || null;
+ const targetRuntimeSha256 = target.runtimeTarballSha256 || null;
  const targetRuntimeSchema = Number(target.runtimeSchemaVersion || 1);
  const bridgeAtTarget = shaMatches(current.bridgeFullSha || current.bridgeSha, targetBridge);
  const runtimeAtTarget = targetRuntime
   ? String(current.runtimeTarballUrl || '').trim() === String(targetRuntime).trim()
+    && (!targetRuntimeSha256
+      || String(current.runtimeTarballSha256 || '').trim() === String(targetRuntimeSha256).trim())
     && Number(current.runtimeSchemaVersion || 1) === targetRuntimeSchema
   : null;
  const gatewayTargetIsFloating = isFloatingGatewayTarget(targetGateway);
@@ -10178,6 +10182,8 @@ function buildLocalUpgradeSummary(current = {}, target = {}) {
   runtime: {
    current: current.runtimeTarballUrl || null,
    target: targetRuntime,
+   currentSha256: current.runtimeTarballSha256 || null,
+   targetSha256: targetRuntimeSha256,
    currentSchemaVersion: Number(current.runtimeSchemaVersion || 1),
    targetSchemaVersion: targetRuntimeSchema,
    atTarget: runtimeAtTarget,
@@ -10206,6 +10212,10 @@ function targetFromRequest(req) {
   gatewayImage: req.query.targetGatewayImage || req.query.gatewayImage || null,
   gatewayImageId: req.query.targetGatewayImageId || req.query.gatewayImageId || null,
   runtimeTarballUrl: req.query.targetRuntimeTarballUrl || req.query.runtimeTarballUrl || null,
+  runtimeTarballSha256:
+   req.query.targetRuntimeTarballSha256
+   || req.query.runtimeTarballSha256
+   || null,
   runtimeSchemaVersion: req.query.targetRuntimeSchemaVersion || req.query.runtimeSchemaVersion || 1,
   minimumSourceRuntimeSchemaVersion:
    req.query.targetMinimumSourceRuntimeSchemaVersion

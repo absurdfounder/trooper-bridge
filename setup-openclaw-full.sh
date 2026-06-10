@@ -46,6 +46,7 @@ BROWSERBASE_PROJECT_ID="$(_resolve_input "${BROWSERBASE_PROJECT_ID:-}" "{{BROWSE
 RUNTIME_AUTH_SECRET="$(_resolve_input "${RUNTIME_AUTH_SECRET:-}" "{{RUNTIME_AUTH_SECRET}}")"
 OPENCLAW_COMPANY_PROVIDER_KEYS="$(_resolve_input "${OPENCLAW_COMPANY_PROVIDER_KEYS:-}" "{{OPENCLAW_COMPANY_PROVIDER_KEYS}}")"
 TROOPER_RUNTIME_TARBALL_URL="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_URL:-}" "{{TROOPER_RUNTIME_TARBALL_URL}}")"
+TROOPER_RUNTIME_TARBALL_SHA256="$(_resolve_input "${TROOPER_RUNTIME_TARBALL_SHA256:-}" "{{TROOPER_RUNTIME_TARBALL_SHA256}}")"
 OPENCLAWBRIDGE_GIT_SHA="$(_resolve_input "${OPENCLAWBRIDGE_GIT_SHA:-}" "{{OPENCLAWBRIDGE_GIT_SHA}}")"
 TROOPER_RUNTIME_PORT=3101
 TROOPER_RUNTIME_DATA_DIR=/var/lib/trooper-org-runtime
@@ -103,6 +104,7 @@ _validate_var PRIMARY_PROVIDER "$PRIMARY_PROVIDER" optional
 _validate_var PRIMARY_MODEL "$PRIMARY_MODEL" optional
 _validate_var RUNTIME_AUTH_SECRET "$RUNTIME_AUTH_SECRET" optional
 _validate_var TROOPER_RUNTIME_TARBALL_URL "$TROOPER_RUNTIME_TARBALL_URL" optional
+_validate_var TROOPER_RUNTIME_TARBALL_SHA256 "$TROOPER_RUNTIME_TARBALL_SHA256" optional
 _validate_var OPENCLAWBRIDGE_GIT_SHA "$OPENCLAWBRIDGE_GIT_SHA" optional
 
 if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
@@ -121,6 +123,11 @@ if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
   if ! echo "$TROOPER_RUNTIME_TARBALL_URL" | grep -Eq \
     '^https://api\.github\.com/repos/[^/]+/[^/]+/releases/assets/[0-9]+$|/releases/download/org-runtime-[a-fA-F0-9]{40}/trooper-org-runtime\.tar\.gz([?#].*)?$'; then
     echo "FATAL: managed TROOPER_RUNTIME_TARBALL_URL must be an immutable promoted release asset"
+    exit 1
+  fi
+  if [ -n "$TROOPER_RUNTIME_TARBALL_SHA256" ] \
+    && ! echo "$TROOPER_RUNTIME_TARBALL_SHA256" | grep -Eq '^[a-fA-F0-9]{64}$'; then
+    echo "FATAL: managed TROOPER_RUNTIME_TARBALL_SHA256 must be a full sha256 digest"
     exit 1
   fi
   if ! echo "$OPENCLAWBRIDGE_GIT_SHA" | grep -Eq '^[a-fA-F0-9]{40}$'; then
@@ -2832,11 +2839,21 @@ else
     else
       curl -fsSL "$TROOPER_RUNTIME_TARBALL_URL" -o /tmp/trooper-org-runtime.tar.gz || { echo "ERROR: failed to download runtime bundle from ${TROOPER_RUNTIME_TARBALL_URL}" >&2; exit 1; }
     fi
+    if [ -n "${TROOPER_RUNTIME_TARBALL_SHA256:-}" ]; then
+      _runtime_actual_sha256="$(sha256sum /tmp/trooper-org-runtime.tar.gz | awk '{print $1}')"
+      if [ "$_runtime_actual_sha256" != "$(printf '%s' "$TROOPER_RUNTIME_TARBALL_SHA256" | tr '[:upper:]' '[:lower:]')" ]; then
+        echo "ERROR: runtime bundle checksum mismatch" >&2
+        exit 1
+      fi
+      echo "[setup] Runtime bundle checksum verified: ${_runtime_actual_sha256}"
+    elif [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
+      echo "[setup] WARNING: legacy promoted runtime has no checksum; upgrade to a checksum-pinned snapshot"
+    fi
     tar -xzf /tmp/trooper-org-runtime.tar.gz -C /opt/trooper-org-runtime --strip-components=1 || { echo "ERROR: failed to extract runtime bundle" >&2; exit 1; }
     test -f /opt/trooper-org-runtime/server/org-runtime/runtime-manifest.json || { echo "ERROR: runtime bundle is missing its compatibility manifest" >&2; exit 1; }
-    node - /opt/trooper-org-runtime/server/org-runtime/runtime-manifest.json /opt/trooper-org-runtime/.trooper-runtime-target.json "$TROOPER_RUNTIME_TARBALL_URL" <<'NODE'
+    node - /opt/trooper-org-runtime/server/org-runtime/runtime-manifest.json /opt/trooper-org-runtime/.trooper-runtime-target.json "$TROOPER_RUNTIME_TARBALL_URL" "$TROOPER_RUNTIME_TARBALL_SHA256" <<'NODE'
 const fs = require('fs');
-const [manifestPath, targetPath, runtimeTarballUrl] = process.argv.slice(2);
+const [manifestPath, targetPath, runtimeTarballUrl, runtimeTarballSha256] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const runtimeSchemaVersion = Number(manifest.runtimeSchemaVersion);
 if (!Number.isInteger(runtimeSchemaVersion) || runtimeSchemaVersion < 1) {
@@ -2844,6 +2861,7 @@ if (!Number.isInteger(runtimeSchemaVersion) || runtimeSchemaVersion < 1) {
 }
 fs.writeFileSync(targetPath, `${JSON.stringify({
   runtimeTarballUrl,
+  runtimeTarballSha256: runtimeTarballSha256 || null,
   runtimeSchemaVersion,
 })}\n`, { mode: 0o600 });
 NODE

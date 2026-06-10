@@ -2,6 +2,7 @@
 set -euo pipefail
 
 RELEASE_URL="${TROOPER_RUNTIME_TARBALL_URL:-}"
+RELEASE_SHA256="$(printf '%s' "${TROOPER_RUNTIME_TARBALL_SHA256:-}" | tr '[:upper:]' '[:lower:]')"
 INSTALL_DIR="${TROOPER_RUNTIME_INSTALL_DIR:-/opt/trooper-org-runtime}"
 NEXT_DIR="${INSTALL_DIR}.next"
 PREVIOUS_DIR="${INSTALL_DIR}.previous"
@@ -16,6 +17,10 @@ trap cleanup EXIT
 
 if [ -z "$RELEASE_URL" ]; then
   echo "ERROR: TROOPER_RUNTIME_TARBALL_URL is required" >&2
+  exit 1
+fi
+if [[ ! "$RELEASE_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+  echo "ERROR: TROOPER_RUNTIME_TARBALL_SHA256 must be a full sha256 digest" >&2
   exit 1
 fi
 if [[ "$RELEASE_URL" == *"/org-runtime-latest/"* ]]; then
@@ -34,6 +39,13 @@ if [[ "$RELEASE_URL" == https://api.github.com/repos/*/releases/assets/* ]]; the
 else
   curl -fsSL "$RELEASE_URL" -o "$TMP_TARBALL"
 fi
+
+ACTUAL_SHA256="$(sha256sum "$TMP_TARBALL" | awk '{print $1}')"
+if [ "$ACTUAL_SHA256" != "$RELEASE_SHA256" ]; then
+  echo "ERROR: runtime bundle checksum mismatch: expected $RELEASE_SHA256, got $ACTUAL_SHA256" >&2
+  exit 1
+fi
+echo "[update-org-runtime] Runtime checksum verified: $ACTUAL_SHA256"
 
 rm -rf "$NEXT_DIR"
 mkdir -p "$NEXT_DIR"
@@ -61,9 +73,16 @@ node - \
   "$NEXT_DIR/server/org-runtime/runtime-manifest.json" \
   "$INSTALL_DIR/.trooper-runtime-target.json" \
   "$NEXT_DIR/.trooper-runtime-target.json" \
-  "$RELEASE_URL" <<'NODE'
+  "$RELEASE_URL" \
+  "$RELEASE_SHA256" <<'NODE'
 const fs = require('fs');
-const [manifestPath, currentTargetPath, nextTargetPath, releaseUrl] = process.argv.slice(2);
+const [
+  manifestPath,
+  currentTargetPath,
+  nextTargetPath,
+  releaseUrl,
+  runtimeTarballSha256,
+] = process.argv.slice(2);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const positiveInteger = (value, name) => {
   const parsed = Number(value);
@@ -105,6 +124,7 @@ if (
 }
 fs.writeFileSync(nextTargetPath, `${JSON.stringify({
   runtimeTarballUrl: releaseUrl,
+  runtimeTarballSha256,
   runtimeSchemaVersion,
 })}\n`, { mode: 0o600 });
 NODE
