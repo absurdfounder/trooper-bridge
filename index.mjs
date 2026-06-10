@@ -84,6 +84,7 @@ import {
   getSubmittedConfigHash,
   jsonFileHash,
   preserveSystemManagedSections,
+  resolveContainedPath,
   shouldRejectConfigWrite,
   stripTrooperFileMetadata,
   writeJsonFileIfChanged,
@@ -1494,8 +1495,6 @@ app.use((req, res, next) => {
  if (req.path === '/health' || req.path === '/healthz' || req.path === '/readyz' || req.path === '/system-stats' || req.path === '/deploy-logs' || req.path === '/deploy-logs-raw') return next();
  // /api/* routes have their own Firebase auth middleware (applied below)
  if (req.path.startsWith('/api/')) return next();
- // Files needed during provisioning for workspace push
- if (req.path === '/files' || req.path.startsWith('/files/') || req.path === '/llm/vision') return next();
  // Desktop API is localhost-only (bound to 127.0.0.1), safe to skip here
  if (req.path.startsWith('/desktop-api/')) return next();
  // Everything else (including /admin/*, /debug/*, /gateway/*, /agents/*, /config/*,
@@ -7886,8 +7885,8 @@ app.post('/files/write', (req, res) => {
  const { path: filePath, content, encoding } = file;
  if (!filePath || typeof content !== 'string') continue;
  // Security: prevent path traversal
- const resolved = path.resolve(basePath, filePath);
- if (!resolved.startsWith(basePath)) continue;
+ const resolved = resolveContainedPath(basePath, filePath);
+ if (!resolved) continue;
  const dir = path.dirname(resolved);
  execSync(`mkdir -p "${dir}"`, { timeout: 5000 });
  if (encoding === 'base64') {
