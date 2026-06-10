@@ -72,6 +72,7 @@ import {
   assertRuntimeUpgradeCompatibility,
   validateRuntimeUpgradeRequest,
 } from './lib/runtime-upgrade-target.mjs';
+import { assertRuntimeUpgradePreflight } from './lib/runtime-upgrade-preflight.mjs';
 import { isAllowedCorsOrigin } from './lib/cors-policy.mjs';
 import {
   LOCAL_BACKUP_DIR,
@@ -7644,6 +7645,14 @@ async function restartReadySharedWorkspaceSlots({ scope, target, step }) {
 }
 
 async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots = false } = {}) {
+  if (performManagedRuntimeUpgrade.inProgress) {
+    const error = new Error('A runtime upgrade is already in progress');
+    error.statusCode = 409;
+    error.code = 'runtime_upgrade_in_progress';
+    throw error;
+  }
+  performManagedRuntimeUpgrade.inProgress = true;
+  try {
   const { scope, target } = validateRuntimeUpgradeRequest(request);
   const log = [];
   const step = (msg) => {
@@ -7665,6 +7674,12 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
       + `${compatibility.runtimeSchemaVersion}`,
     );
   }
+
+  const preflight = assertRuntimeUpgradePreflight({ scope, includeSharedSlots });
+  step(
+    `Upgrade preflight passed: ${preflight.checks.length} checks, `
+    + `${Math.floor(preflight.checks.find((check) => check.name === 'disk')?.value / 1024 / 1024)} MiB free`,
+  );
 
   if (['all', 'gateway'].includes(scope)) {
     step(`Pulling promoted gateway image ${target.gatewayImage}`);
@@ -7742,8 +7757,20 @@ async function performManagedRuntimeUpgrade({ request = {}, includeSharedSlots =
   }
 
   step('Immutable upgrade commands completed');
-  return { success: true, scope, target, sharedSlots, log, restartRequired: ['all', 'bridge'].includes(scope) };
+  return {
+    success: true,
+    scope,
+    target,
+    sharedSlots,
+    preflight,
+    log,
+    restartRequired: ['all', 'bridge'].includes(scope),
+  };
+  } finally {
+    performManagedRuntimeUpgrade.inProgress = false;
+  }
 }
+performManagedRuntimeUpgrade.inProgress = false;
 
 // Shared-host upgrade entry point. It upgrades the host and every ready slot.
 app.post('/admin/upgrade', async (req, res) => {
@@ -7761,7 +7788,12 @@ app.post('/admin/upgrade', async (req, res) => {
     scheduleManagedRuntimeServiceRestart(result.scope);
   } catch (error) {
     captureLog('error', `Shared runtime upgrade failed: ${error.message}`, { stack: error.stack });
-    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || 'runtime_upgrade_failed',
+      preflight: error.preflight || null,
+    });
   }
 });
 
@@ -10250,7 +10282,12 @@ app.post('/upgrade', async (req, res) => {
    scheduleManagedRuntimeServiceRestart(result.scope);
  } catch (err) {
    captureLog('error', `Runtime upgrade failed: ${err.message}`, { stack: err.stack });
-   res.status(err.statusCode || 500).json({ success: false, error: err.message });
+   res.status(err.statusCode || 500).json({
+    success: false,
+    error: err.message,
+    code: err.code || 'runtime_upgrade_failed',
+    preflight: err.preflight || null,
+   });
  }
 });
 
