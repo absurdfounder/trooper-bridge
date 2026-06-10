@@ -232,19 +232,28 @@ fi
 # The real bridge will replace this later. If a baked service still owns the
 # port, skip the temporary server rather than failing the whole setup.
 python3 -c "
-import http.server, json, os, sys
+import http.server, json, os, re, sys
 class H(http.server.BaseHTTPRequestHandler):
+  def send_cors(self):
+    origin = self.headers.get('Origin', '')
+    allowed = (
+      re.match(r'^https://([a-z0-9-]+\.)*(trooper\.so|crabhq\.com|trooper\.com)$', origin, re.I)
+      or re.match(r'^https?://(localhost|127\.0\.0\.1)(:[0-9]+)?$', origin, re.I)
+    )
+    if allowed:
+      self.send_header('Access-Control-Allow-Origin', origin)
+      self.send_header('Vary', 'Origin')
   def do_GET(self):
     if self.path=='/health':
       self.send_response(200); self.send_header('Content-Type','application/json'); self.end_headers()
       self.wfile.write(b'{\"status\":\"installing\"}')
     elif self.path=='/deploy-logs':
       self.send_response(200); self.send_header('Content-Type','application/json')
-      self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+      self.send_cors(); self.end_headers()
       with open('$DEPLOY_LOG') as f: self.wfile.write(f.read().encode())
     elif self.path=='/deploy-logs-raw':
       self.send_response(200); self.send_header('Content-Type','text/plain; charset=utf-8')
-      self.send_header('Access-Control-Allow-Origin','*'); self.end_headers()
+      self.send_cors(); self.end_headers()
       try:
         with open('$DEPLOY_RAW_LOG') as f: self.wfile.write(f.read().encode())
       except: self.wfile.write(b'')

@@ -69,6 +69,7 @@ import {
 } from './lib/provider-runtime.mjs';
 import { startFleetHeartbeat } from './lib/fleet-heartbeat.mjs';
 import { validateRuntimeUpgradeRequest } from './lib/runtime-upgrade-target.mjs';
+import { isAllowedCorsOrigin } from './lib/cors-policy.mjs';
 import { startSlotRuntime } from './lib/shared-slot-runtime.mjs';
 import {
   DEFAULT_SHARED_STATE_DIR,
@@ -1470,20 +1471,10 @@ function ensureOpenClawComposeOverride({ reason = 'repair' } = {}) {
 const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
-// CORS: allow direct frontend access from Trooper domains + dev
-const CORS_ALLOWED_ORIGINS = [
- /\.trooper\.com$/,
- /\.netlify\.app$/,
- /^https?:\/\/localhost(:\d+)?$/,
- /^https?:\/\/127\.0\.0\.1(:\d+)?$/,
-];
+// CORS: allow direct frontend access from explicit Trooper and development origins.
 app.use(cors({
  origin: (origin, callback) => {
-   // Allow requests with no origin (server-to-server, curl, etc.)
-   if (!origin) return callback(null, true);
-   if (CORS_ALLOWED_ORIGINS.some(pattern => pattern.test(origin))) return callback(null, true);
-   // Allow same-origin (VPS domain)
-   return callback(null, true);
+   callback(null, isAllowedCorsOrigin(origin));
  },
  credentials: true,
  allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'X-API-Key'],
@@ -6098,7 +6089,6 @@ app.get('/deploy-logs', (req, res) => {
      ? readFileSync(durablePath, 'utf8')
      : '[]';
    res.set('Content-Type', 'application/json');
-   res.set('Access-Control-Allow-Origin', '*');
    res.send(data);
  } catch (e) {
    res.status(500).json([]);
@@ -6113,7 +6103,6 @@ app.get('/deploy-logs-raw', (req, res) => {
      ? readFileSync(durablePath, 'utf8')
      : '';
    res.set('Content-Type', 'text/plain; charset=utf-8');
-   res.set('Access-Control-Allow-Origin', '*');
    res.send(data);
  } catch (e) {
    res.status(500).send('');
