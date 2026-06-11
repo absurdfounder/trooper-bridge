@@ -7,6 +7,8 @@ NEXT_DIR="${INSTALL_DIR}.next"
 PREVIOUS_DIR="${INSTALL_DIR}.previous"
 FAILED_DIR="${INSTALL_DIR}.failed"
 TARGET_COMMIT="$(printf '%s' "${TROOPER_BRIDGE_COMMIT:-}" | tr '[:upper:]' '[:lower:]')"
+BRIDGE_REPO_URL="${TROOPER_BRIDGE_REPO_URL:-https://github.com/absurdfounder/trooper-bridge.git}"
+TROOPER_PROTECT_BRIDGE="${TROOPER_PROTECT_BRIDGE:-1}"
 
 cleanup_next() {
   rm -rf "$NEXT_DIR"
@@ -30,6 +32,30 @@ copy_mutable_state() {
     rm -rf "$target_dir/$relative_path"
     cp -a "$source_dir/$relative_path" "$target_dir/$relative_path"
   done
+}
+
+read_bridge_commit() {
+  local dir="$1"
+  local commit=""
+  if [ -d "$dir/.git" ]; then
+    commit="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if [ -z "$commit" ] && [ -f "$dir/.trooper-bridge-target.json" ]; then
+    commit="$(node -e "try{const fs=require('fs');const p=process.argv[1];const j=JSON.parse(fs.readFileSync(p,'utf8'));process.stdout.write(j.commit||'')}catch{}" "$dir/.trooper-bridge-target.json" 2>/dev/null || true)"
+  fi
+  printf '%s' "$commit"
+}
+
+read_bridge_remote_url() {
+  local dir="$1"
+  local remote_url=""
+  if [ -d "$dir/.git" ]; then
+    remote_url="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
+  fi
+  if [ -z "$remote_url" ] && [ -f "$dir/.trooper-bridge-target.json" ]; then
+    remote_url="$(node -e "try{const fs=require('fs');const p=process.argv[1];const j=JSON.parse(fs.readFileSync(p,'utf8'));process.stdout.write(j.remoteUrl||'')}catch{}" "$dir/.trooper-bridge-target.json" 2>/dev/null || true)"
+  fi
+  printf '%s' "${remote_url:-$BRIDGE_REPO_URL}"
 }
 
 rollback_bridge() {
@@ -61,15 +87,15 @@ if [[ ! "$TARGET_COMMIT" =~ ^[a-f0-9]{40}$ ]]; then
   echo "ERROR: TROOPER_BRIDGE_COMMIT must be a full 40-character commit" >&2
   exit 1
 fi
-if [ ! -d "$INSTALL_DIR/.git" ]; then
-  echo "ERROR: bridge install is not a git checkout: $INSTALL_DIR" >&2
+if [ ! -d "$INSTALL_DIR" ]; then
+  echo "ERROR: bridge install does not exist: $INSTALL_DIR" >&2
   exit 1
 fi
 
 trap cleanup_next EXIT
 
-BEFORE_SHA="$(git -C "$INSTALL_DIR" rev-parse HEAD)"
-REMOTE_URL="$(git -C "$INSTALL_DIR" remote get-url origin)"
+BEFORE_SHA="$(read_bridge_commit "$INSTALL_DIR")"
+REMOTE_URL="$(read_bridge_remote_url "$INSTALL_DIR")"
 if [ "$BEFORE_SHA" = "$TARGET_COMMIT" ]; then
   echo "[update-bridge] Bridge already at $TARGET_COMMIT"
   exit 0
@@ -103,6 +129,11 @@ test -f "$NEXT_DIR/scripts/update-org-runtime.sh" || {
 
 echo "[update-bridge] Installing locked production dependencies in staging..."
 (cd "$NEXT_DIR" && npm ci --omit=dev)
+
+if [ "$TROOPER_PROTECT_BRIDGE" = "1" ] && [ -x "$NEXT_DIR/scripts/protect-js-tree.sh" ]; then
+  echo "[update-bridge] Protecting staged bridge runtime files..."
+  TROOPER_PROTECT_CODE=1 TROOPER_PROTECT_STRICT=1 "$NEXT_DIR/scripts/protect-js-tree.sh" "$NEXT_DIR" bridge
+fi
 
 # These files predate /opt/openclaw-data and can still be updated by existing
 # deployments. Copy them immediately before activation so the staged checkout

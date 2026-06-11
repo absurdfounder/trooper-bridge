@@ -20,8 +20,19 @@ rsync -a --delete \
   --exclude '.env' \
   --exclude 'server.log' \
   --exclude '*.test.js' \
+  --exclude '*.map' \
   --exclude 'test-data' \
   "$src/" "$stage/trooper-org-runtime/server/"
+
+if [[ "${TROOPER_PROTECT_RUNTIME_BUNDLE:-1}" == "1" ]]; then
+  script_dir="$(cd "$(dirname "$0")" && pwd)"
+  if [[ ! -x "$script_dir/protect-js-tree.sh" ]]; then
+    echo "ERROR: runtime bundle protection script is missing or not executable: $script_dir/protect-js-tree.sh" >&2
+    exit 1
+  fi
+  TROOPER_PROTECT_CODE=1 TROOPER_PROTECT_STRICT=1 "$script_dir/protect-js-tree.sh" \
+    "$stage/trooper-org-runtime/server" runtime
+fi
 
 COPYFILE_DISABLE=1 tar -C "$stage" -czf "$out" trooper-org-runtime
 

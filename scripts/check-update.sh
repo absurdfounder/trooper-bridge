@@ -64,7 +64,10 @@ if [ -z "$TARGET_BRIDGE" ] && [ -z "$TARGET_GATEWAY" ] && [ -z "$TARGET_RUNTIME"
   exit 0
 fi
 
-LOCAL_BRIDGE=$(git -C /opt/openclaw-bridge rev-parse HEAD 2>/dev/null || echo "")
+LOCAL_BRIDGE=$(git -C /opt/openclaw-bridge rev-parse HEAD 2>/dev/null || true)
+if [ -z "$LOCAL_BRIDGE" ] && [ -f /opt/openclaw-bridge/.trooper-bridge-target.json ]; then
+  LOCAL_BRIDGE=$(node -e "try{const fs=require('fs');const j=JSON.parse(fs.readFileSync('/opt/openclaw-bridge/.trooper-bridge-target.json','utf8'));process.stdout.write(j.commit||'')}catch{}" 2>/dev/null || echo "")
+fi
 LOCAL_GATEWAY_DIGESTS=$(docker inspect openclaw:local --format='{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null || echo "")
 LOCAL_RUNTIME=$(jq -r '.runtimeTarballUrl // empty' /opt/trooper-org-runtime/.trooper-runtime-target.json 2>/dev/null || echo "")
 LOCAL_RUNTIME_SHA256=$(jq -r '.runtimeTarballSha256 // empty' /opt/trooper-org-runtime/.trooper-runtime-target.json 2>/dev/null || echo "")

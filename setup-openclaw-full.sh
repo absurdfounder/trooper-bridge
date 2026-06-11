@@ -51,6 +51,8 @@ OPENCLAWBRIDGE_GIT_SHA="$(_resolve_input "${OPENCLAWBRIDGE_GIT_SHA:-}" "{{OPENCL
 TROOPER_RUNTIME_PORT=3101
 TROOPER_RUNTIME_DATA_DIR=/var/lib/trooper-org-runtime
 TROOPER_MANAGED_DEPLOYMENT="${TROOPER_MANAGED_DEPLOYMENT:-0}"
+TROOPER_PROTECT_BRIDGE="${TROOPER_PROTECT_BRIDGE:-$TROOPER_MANAGED_DEPLOYMENT}"
+TROOPER_PROTECT_RUNTIME_INSTALL="${TROOPER_PROTECT_RUNTIME_INSTALL:-0}"
 
 # Defaults must be applied before validation. Snapshot-builder bootstrap may
 # omit optional values, but BRIDGE_PORT is required by the early log server.
@@ -2777,6 +2779,10 @@ wait $BRIDGE_NPM_PID 2>/dev/null || {
  dlog "Bridge npm install may have failed, retrying..."
  cd /opt/openclaw-bridge && npm cache clean --force 2>/dev/null; timeout 180 npm install 2>&1
 }
+if [ "$TROOPER_PROTECT_BRIDGE" = "1" ] && [ -x /opt/openclaw-bridge/scripts/protect-js-tree.sh ]; then
+ dlog "Protecting bridge runtime files..."
+ TROOPER_PROTECT_CODE=1 TROOPER_PROTECT_STRICT=1 /opt/openclaw-bridge/scripts/protect-js-tree.sh /opt/openclaw-bridge bridge
+fi
 dlog "Waiting for sandbox build..."
 [ -n "${SANDBOX_PID:-}" ] && wait $SANDBOX_PID 2>/dev/null || true
 
@@ -2890,6 +2896,10 @@ if [ -f package-lock.json ]; then
   npm ci --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
 else
   npm install --omit=dev >/tmp/trooper-org-runtime-npm.log 2>&1 || (tail -n 50 /tmp/trooper-org-runtime-npm.log; exit 1)
+fi
+if [ "$TROOPER_PROTECT_RUNTIME_INSTALL" = "1" ] && [ -x /opt/openclaw-bridge/scripts/protect-js-tree.sh ]; then
+  dlog "Protecting installed Trooper org runtime files..."
+  TROOPER_PROTECT_CODE=1 TROOPER_PROTECT_STRICT=1 /opt/openclaw-bridge/scripts/protect-js-tree.sh /opt/trooper-org-runtime/server runtime
 fi
 cd /opt/openclaw
 
