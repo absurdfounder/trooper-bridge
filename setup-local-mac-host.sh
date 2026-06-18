@@ -37,6 +37,23 @@ OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/openclaw:l
 
 mkdir -p "$TROOPER_HOME" "$BRIDGE_DIR" "$OPENCLAW_DATA_DIR" "$LOG_DIR" "$BIN_DIR" "$PLIST_DIR"
 
+if [[ "$EUID" -eq 0 ]]; then
+  echo "Run this installer as your signed-in macOS user, not with sudo." >&2
+  exit 1
+fi
+
+# Repair files left by older installers that incorrectly ran the whole setup as root.
+ROOT_OWNED_PATHS=()
+for path in "$TROOPER_HOME" "$PLIST_DIR"/so.trooper.local-*.plist; do
+  if [[ -e "$path" && ! -O "$path" ]]; then
+    ROOT_OWNED_PATHS+=("$path")
+  fi
+done
+if (( ${#ROOT_OWNED_PATHS[@]} > 0 )); then
+  echo "Repairing ownership from an earlier Trooper local-host installation..."
+  sudo chown -R "$(id -u):$(id -g)" "${ROOT_OWNED_PATHS[@]}"
+fi
+
 if ! command -v git >/dev/null 2>&1; then
   echo "git is required. Install Xcode Command Line Tools, then rerun this installer." >&2
   exit 1
@@ -49,6 +66,23 @@ fi
 
 if ! command -v npm >/dev/null 2>&1; then
   echo "npm is required. Install Node.js 20+ or run: brew install node" >&2
+  exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Docker Desktop is required for the local AI gateway. Install and open Docker Desktop, then rerun this installer." >&2
+  exit 1
+fi
+if ! docker info >/dev/null 2>&1; then
+  open -a Docker >/dev/null 2>&1 || true
+  echo "Waiting for Docker Desktop to start..."
+  for _ in {1..60}; do
+    docker info >/dev/null 2>&1 && break
+    sleep 2
+  done
+fi
+if ! docker info >/dev/null 2>&1; then
+  echo "Docker Desktop did not become ready. Open Docker Desktop, finish its first-run setup, then rerun this installer." >&2
   exit 1
 fi
 
@@ -220,6 +254,12 @@ write_plist() {
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>$HOME</string>
+    <key>TROOPER_HOME</key><string>$TROOPER_HOME</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
   <key>StandardOutPath</key><string>$LOG_DIR/$label.out.log</string>
   <key>StandardErrorPath</key><string>$LOG_DIR/$label.err.log</string>
   <key>WorkingDirectory</key><string>$TROOPER_HOME</string>
@@ -234,8 +274,8 @@ write_plist so.trooper.local-tunnel "$BIN_DIR/start-tunnel.sh"
 write_plist so.trooper.local-heartbeat "$BIN_DIR/heartbeat.sh"
 
 for label in so.trooper.local-gateway so.trooper.local-bridge so.trooper.local-tunnel so.trooper.local-heartbeat; do
-  launchctl unload "$PLIST_DIR/$label.plist" >/dev/null 2>&1 || true
-  launchctl load "$PLIST_DIR/$label.plist"
+  launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_DIR/$label.plist"
 done
 
 cat <<EOF
