@@ -35,8 +35,13 @@ BROWSER_MODE="${BROWSER_MODE:-managed}"
 TUNNEL_PROVIDER="${TUNNEL_PROVIDER:-cloudflare}"
 TROOPER_BRIDGE_REPO_URL="${TROOPER_BRIDGE_REPO_URL:-https://github.com/absurdfounder/trooper-bridge.git}"
 OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/openclaw:latest}"
+COLIMA_VERSION="${COLIMA_VERSION:-v0.10.3}"
+LIMA_VERSION="${LIMA_VERSION:-2.1.2}"
+DOCKER_CLI_VERSION="${DOCKER_CLI_VERSION:-29.1.3}"
+DOCKER_COMPOSE_VERSION="${DOCKER_COMPOSE_VERSION:-v5.1.4}"
+DOCKER_BUILDX_VERSION="${DOCKER_BUILDX_VERSION:-v0.35.0}"
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$BIN_DIR:$TROOPER_HOME/lima/bin:/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 load_homebrew_path() {
   local brew_bin
@@ -89,6 +94,23 @@ docker_ready() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
 }
 
+mac_arch() {
+  case "$(uname -m)" in
+    arm64|aarch64) echo "arm64" ;;
+    x86_64|amd64) echo "x86_64" ;;
+    *)
+      echo "Unsupported macOS CPU architecture: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+}
+
+download_file() {
+  local url="$1"
+  local dest="$2"
+  curl --fail --location --retry 3 --retry-delay 2 --output "$dest" "$url"
+}
+
 install_homebrew() {
   if [[ "${TROOPER_SKIP_HOMEBREW_INSTALL:-0}" == "1" ]]; then
     return 1
@@ -109,12 +131,79 @@ install_homebrew() {
   command -v brew >/dev/null 2>&1
 }
 
+install_standalone_colima_docker_runtime() (
+  if [[ "${TROOPER_SKIP_STANDALONE_DOCKER_INSTALL:-0}" == "1" ]]; then
+    return 1
+  fi
+
+  if ! command -v curl >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local arch docker_arch colima_arch lima_arch compose_arch buildx_arch tmp_dir
+  arch="$(mac_arch)" || return 1
+  case "$arch" in
+    arm64)
+      docker_arch="aarch64"
+      colima_arch="arm64"
+      lima_arch="arm64"
+      compose_arch="aarch64"
+      buildx_arch="arm64"
+      ;;
+    x86_64)
+      docker_arch="x86_64"
+      colima_arch="x86_64"
+      lima_arch="x86_64"
+      compose_arch="x86_64"
+      buildx_arch="amd64"
+      ;;
+  esac
+
+  echo "Installing user-local Docker CLI runtime with Colima..."
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "$tmp_dir" "$TROOPER_HOME/lima.tmp"' EXIT
+
+  download_file "https://download.docker.com/mac/static/stable/${docker_arch}/docker-${DOCKER_CLI_VERSION}.tgz" "$tmp_dir/docker.tgz"
+  tar -xzf "$tmp_dir/docker.tgz" -C "$tmp_dir"
+  install -m 0755 "$tmp_dir/docker/docker" "$BIN_DIR/docker"
+
+  mkdir -p "$TROOPER_HOME/lima"
+  download_file "https://github.com/lima-vm/lima/releases/download/v${LIMA_VERSION}/lima-${LIMA_VERSION}-Darwin-${lima_arch}.tar.gz" "$tmp_dir/lima.tgz"
+  rm -rf "$TROOPER_HOME/lima.tmp"
+  mkdir -p "$TROOPER_HOME/lima.tmp"
+  tar -xzf "$tmp_dir/lima.tgz" -C "$TROOPER_HOME/lima.tmp"
+  rm -rf "$TROOPER_HOME/lima"
+  mv "$TROOPER_HOME/lima.tmp" "$TROOPER_HOME/lima"
+  if [[ -x "$TROOPER_HOME/lima/bin/limactl" ]]; then
+    ln -sfn "$TROOPER_HOME/lima/bin/limactl" "$BIN_DIR/limactl"
+  fi
+  if [[ -x "$TROOPER_HOME/lima/bin/lima" ]]; then
+    ln -sfn "$TROOPER_HOME/lima/bin/lima" "$BIN_DIR/lima"
+  fi
+
+  download_file "https://github.com/abiosoft/colima/releases/download/${COLIMA_VERSION}/colima-Darwin-${colima_arch}" "$BIN_DIR/colima"
+  chmod 0755 "$BIN_DIR/colima"
+
+  mkdir -p "$HOME/.docker/cli-plugins"
+  download_file "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-darwin-${compose_arch}" "$HOME/.docker/cli-plugins/docker-compose"
+  chmod 0755 "$HOME/.docker/cli-plugins/docker-compose"
+  download_file "https://github.com/docker/buildx/releases/download/${DOCKER_BUILDX_VERSION}/buildx-${DOCKER_BUILDX_VERSION}.darwin-${buildx_arch}" "$HOME/.docker/cli-plugins/docker-buildx"
+  chmod 0755 "$HOME/.docker/cli-plugins/docker-buildx"
+  hash -r
+
+  echo "Starting Colima..."
+  colima start --runtime docker --vm-type vz --mount-type virtiofs || colima start --runtime docker
+)
+
 install_colima_docker_runtime() {
   if [[ "${TROOPER_SKIP_DOCKER_INSTALL:-0}" == "1" ]]; then
     return 1
   fi
 
   if ! command -v brew >/dev/null 2>&1; then
+    if install_standalone_colima_docker_runtime; then
+      return 0
+    fi
     install_homebrew || return 1
   fi
 
@@ -196,33 +285,38 @@ fi
 
 npm --prefix "$BRIDGE_DIR" install --omit=dev
 
-cat > "$ENV_FILE" <<EOF
-ORG_ID=$ORG_ID
-API_URL=$API_URL
-GATEWAY_TOKEN=$GATEWAY_TOKEN
-BRIDGE_AUTH_TOKEN=$BRIDGE_AUTH_TOKEN
-HOST_DEVICE_ID=$HOST_DEVICE_ID
-BRIDGE_PORT=$BRIDGE_PORT
-PORT=$BRIDGE_PORT
-GATEWAY_PORT=$GATEWAY_PORT
-OPENCLAW_GATEWAY_URL=http://127.0.0.1:$GATEWAY_PORT
-PUBLIC_BRIDGE_URL=${PUBLIC_BRIDGE_URL:-}
-PUBLIC_GATEWAY_URL=${PUBLIC_GATEWAY_URL:-}
-TUNNEL_ID=${TUNNEL_ID:-}
-TUNNEL_PROVIDER=$TUNNEL_PROVIDER
-BROWSER_MODE=$BROWSER_MODE
-TROOPER_LOCAL_MAC_HOST=1
-TROOPER_LOCAL_UNPAIRED=${TROOPER_LOCAL_UNPAIRED:-0}
-TROOPER_BRIDGE_DIR=$BRIDGE_DIR
-TROOPER_HOME=$TROOPER_HOME
-OPENCLAW_DATA_DIR=$OPENCLAW_DATA_DIR
-OPENCLAW_DOCKER_IMAGE=$OPENCLAW_DOCKER_IMAGE
-CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
-TROOPER_MAC_ACCESSIBILITY=${TROOPER_MAC_ACCESSIBILITY:-0}
-TROOPER_MAC_AUTOMATION=${TROOPER_MAC_AUTOMATION:-0}
-TROOPER_MAC_SCREEN_RECORDING=${TROOPER_MAC_SCREEN_RECORDING:-0}
-TROOPER_ALLOW_EXISTING_BROWSER=${TROOPER_ALLOW_EXISTING_BROWSER:-0}
-EOF
+write_env_line() {
+  printf '%s=%q\n' "$1" "${2:-}"
+}
+
+{
+  write_env_line ORG_ID "$ORG_ID"
+  write_env_line API_URL "$API_URL"
+  write_env_line GATEWAY_TOKEN "$GATEWAY_TOKEN"
+  write_env_line BRIDGE_AUTH_TOKEN "$BRIDGE_AUTH_TOKEN"
+  write_env_line HOST_DEVICE_ID "$HOST_DEVICE_ID"
+  write_env_line BRIDGE_PORT "$BRIDGE_PORT"
+  write_env_line PORT "$BRIDGE_PORT"
+  write_env_line GATEWAY_PORT "$GATEWAY_PORT"
+  write_env_line OPENCLAW_GATEWAY_URL "http://127.0.0.1:$GATEWAY_PORT"
+  write_env_line PUBLIC_BRIDGE_URL "${PUBLIC_BRIDGE_URL:-}"
+  write_env_line PUBLIC_GATEWAY_URL "${PUBLIC_GATEWAY_URL:-}"
+  write_env_line TUNNEL_ID "${TUNNEL_ID:-}"
+  write_env_line TUNNEL_PROVIDER "$TUNNEL_PROVIDER"
+  write_env_line BROWSER_MODE "$BROWSER_MODE"
+  write_env_line TROOPER_LOCAL_MAC_HOST "1"
+  write_env_line TROOPER_LOCAL_UNPAIRED "${TROOPER_LOCAL_UNPAIRED:-0}"
+  write_env_line TROOPER_BRIDGE_DIR "$BRIDGE_DIR"
+  write_env_line TROOPER_HOME "$TROOPER_HOME"
+  write_env_line OPENCLAW_DATA_DIR "$OPENCLAW_DATA_DIR"
+  write_env_line OPENCLAW_DOCKER_IMAGE "$OPENCLAW_DOCKER_IMAGE"
+  write_env_line CLOUDFLARE_TUNNEL_TOKEN "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+  write_env_line TROOPER_MAC_ACCESSIBILITY "${TROOPER_MAC_ACCESSIBILITY:-0}"
+  write_env_line TROOPER_MAC_AUTOMATION "${TROOPER_MAC_AUTOMATION:-0}"
+  write_env_line TROOPER_MAC_SCREEN_RECORDING "${TROOPER_MAC_SCREEN_RECORDING:-0}"
+  write_env_line TROOPER_ALLOW_EXISTING_BROWSER "${TROOPER_ALLOW_EXISTING_BROWSER:-0}"
+  write_env_line PATH "$PATH"
+} > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
 cat > "$BIN_DIR/start-bridge.sh" <<'EOF'
