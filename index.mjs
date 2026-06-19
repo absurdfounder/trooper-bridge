@@ -1558,12 +1558,16 @@ const OPENCLAW_GATEWAY_TOKEN = getDesiredGatewayToken();
 const OPENCLAW_HOOK_TOKEN = process.env.OPENCLAW_HOOK_TOKEN || '';
 
 // CORS: allow direct frontend access from explicit Trooper and development origins.
+app.use((req, res, next) => {
+ res.setHeader('Access-Control-Allow-Private-Network', 'true');
+ next();
+});
 app.use(cors({
  origin: (origin, callback) => {
    callback(null, isAllowedCorsOrigin(origin));
  },
  credentials: true,
- allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'X-API-Key'],
+ allowedHeaders: ['Content-Type', 'Authorization', 'X-Org-Id', 'X-API-Key', 'Access-Control-Request-Private-Network'],
 }));
 app.use(express.json({ limit: '5mb' }));
 
