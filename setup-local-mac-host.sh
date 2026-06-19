@@ -342,6 +342,26 @@ write_env_line() {
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
+OPENCLAW_ROOT_CONFIG_PATH="$OPENCLAW_DATA_DIR/openclaw.json" GATEWAY_TOKEN="$GATEWAY_TOKEN" node <<'NODE'
+const { existsSync, readFileSync, writeFileSync } = require('node:fs');
+const configPath = process.env.OPENCLAW_ROOT_CONFIG_PATH;
+const token = process.env.GATEWAY_TOKEN;
+let config = {};
+if (existsSync(configPath)) {
+  try {
+    config = JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch {
+    config = {};
+  }
+}
+config.gateway = config.gateway && typeof config.gateway === 'object' ? config.gateway : {};
+config.gateway.auth = config.gateway.auth && typeof config.gateway.auth === 'object' ? config.gateway.auth : {};
+config.gateway.auth.mode = config.gateway.auth.mode || 'token';
+config.gateway.auth.token = token;
+writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+NODE
+chmod 600 "$OPENCLAW_DATA_DIR/openclaw.json"
+
 cat > "$BIN_DIR/start-bridge.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
