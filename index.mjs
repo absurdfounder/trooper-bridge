@@ -620,9 +620,9 @@ function getDevicePublicKeyBase64Url(identity) {
 }
 
 function buildDeviceAuthPayload({ deviceId, clientId, clientMode, role, scopes, signedAtMs, token, nonce, platform, deviceFamily }) {
- const version = nonce ? 'v3' : 'v1';
+ const version = nonce ? 'v2' : 'v1';
  const parts = [version, deviceId, clientId, clientMode, role, scopes.join(','), String(signedAtMs), token || ''];
- if (version === 'v3') parts.push(nonce || '', platform || '', deviceFamily || '');
+ if (version === 'v2') parts.push(nonce || '');
  return parts.join('|');
 }
 
