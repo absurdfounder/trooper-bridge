@@ -178,6 +178,7 @@ TUNNEL_ID=${TUNNEL_ID:-}
 TUNNEL_PROVIDER=$TUNNEL_PROVIDER
 BROWSER_MODE=$BROWSER_MODE
 TROOPER_LOCAL_MAC_HOST=1
+TROOPER_LOCAL_UNPAIRED=${TROOPER_LOCAL_UNPAIRED:-0}
 TROOPER_BRIDGE_DIR=$BRIDGE_DIR
 TROOPER_HOME=$TROOPER_HOME
 OPENCLAW_DATA_DIR=$OPENCLAW_DATA_DIR
@@ -248,6 +249,11 @@ ENV_FILE="${TROOPER_HOME:-$HOME/Library/Application Support/Trooper/runtime}/tro
 set -a
 source "$ENV_FILE"
 set +a
+
+if [[ "${TROOPER_LOCAL_UNPAIRED:-0}" == "1" || "${ORG_ID:-}" == "local-unpaired" ]]; then
+  echo "Trooper local host is installed but not paired yet. Open Trooper to connect this Mac to a workspace."
+  while true; do sleep 3600; done
+fi
 
 post_json() {
   local path="$1"
@@ -348,6 +354,9 @@ Host device: $HOST_DEVICE_ID
 Runtime dir: $TROOPER_HOME
 Bridge: http://127.0.0.1:$BRIDGE_PORT
 Gateway: http://127.0.0.1:$GATEWAY_PORT
+
+If you installed without a Trooper setup token, open Trooper to connect this Mac
+to a workspace. The local host can keep running while it waits for pairing.
 
 This Mac mode does not install LXQt, Xvnc, noVNC, or a Linux desktop.
 For hosted app access, configure PUBLIC_BRIDGE_URL/PUBLIC_GATEWAY_URL or CLOUDFLARE_TUNNEL_TOKEN in:
