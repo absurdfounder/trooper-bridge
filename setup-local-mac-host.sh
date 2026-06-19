@@ -35,6 +35,7 @@ BROWSER_MODE="${BROWSER_MODE:-managed}"
 TUNNEL_PROVIDER="${TUNNEL_PROVIDER:-cloudflare}"
 TROOPER_BRIDGE_REPO_URL="${TROOPER_BRIDGE_REPO_URL:-https://github.com/absurdfounder/trooper-bridge.git}"
 OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/trooper-gateway:latest}"
+OPENCLAW_GATEWAY_CONTAINER="${OPENCLAW_GATEWAY_CONTAINER:-openclaw-openclaw-gateway-1}"
 COLIMA_VERSION="${COLIMA_VERSION:-v0.10.3}"
 LIMA_VERSION="${LIMA_VERSION:-2.1.2}"
 DOCKER_CLI_VERSION="${DOCKER_CLI_VERSION:-29.1.3}"
@@ -281,6 +282,9 @@ if ! ensure_docker_runtime; then
   exit 1
 fi
 
+echo "Preparing Trooper gateway image..."
+docker pull "$OPENCLAW_DOCKER_IMAGE"
+
 if [[ ! -d "$BRIDGE_DIR/.git" ]]; then
   git clone "$TROOPER_BRIDGE_REPO_URL" "$BRIDGE_DIR"
 else
@@ -322,6 +326,7 @@ write_env_line() {
   write_env_line OPENCLAW_CONFIG_ROOT "$OPENCLAW_DATA_DIR/config"
   write_env_line OPENCLAW_WORKSPACE_HOST_ROOT "$OPENCLAW_DATA_DIR/workspace"
   write_env_line OPENCLAW_DOCKER_IMAGE "$OPENCLAW_DOCKER_IMAGE"
+  write_env_line OPENCLAW_GATEWAY_CONTAINER "$OPENCLAW_GATEWAY_CONTAINER"
   write_env_line BRIDGE_DEVICE_IDENTITY_PATH "$BRIDGE_DIR/device-identity.json"
   write_env_line TROOPER_DIAGNOSTICS_DIR "$OPENCLAW_DATA_DIR/diagnostics"
   write_env_line CLOUDFLARE_TUNNEL_TOKEN "${CLOUDFLARE_TUNNEL_TOKEN:-}"
@@ -353,8 +358,8 @@ source "$ENV_FILE"
 set +a
 
 if command -v docker >/dev/null 2>&1; then
-  docker rm -f trooper-local-gateway >/dev/null 2>&1 || true
-  exec docker run --name trooper-local-gateway --pull=always \
+  docker rm -f "${OPENCLAW_GATEWAY_CONTAINER}" trooper-local-gateway >/dev/null 2>&1 || true
+  exec docker run --name "${OPENCLAW_GATEWAY_CONTAINER}" --pull=missing \
     -p "127.0.0.1:${GATEWAY_PORT}:${GATEWAY_PORT}" \
     -v "${OPENCLAW_DATA_DIR}:/home/node/.openclaw" \
     -e "OPENCLAW_HOST=0.0.0.0" \
@@ -486,7 +491,13 @@ write_plist so.trooper.local-heartbeat "$BIN_DIR/heartbeat.sh"
 
 for label in so.trooper.local-gateway so.trooper.local-bridge so.trooper.local-tunnel so.trooper.local-heartbeat; do
   launchctl bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST_DIR/$label.plist"
+  launchctl bootout "gui/$(id -u)" "$PLIST_DIR/$label.plist" >/dev/null 2>&1 || true
+  if ! launchctl bootstrap "gui/$(id -u)" "$PLIST_DIR/$label.plist"; then
+    if ! launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
+      echo "Failed to start $label. Run: launchctl print gui/$(id -u)/$label" >&2
+      exit 1
+    fi
+  fi
 done
 
 cat <<EOF
