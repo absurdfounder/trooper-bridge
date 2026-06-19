@@ -288,7 +288,10 @@ docker pull "$OPENCLAW_DOCKER_IMAGE"
 if [[ ! -d "$BRIDGE_DIR/.git" ]]; then
   git clone "$TROOPER_BRIDGE_REPO_URL" "$BRIDGE_DIR"
 else
-  git -C "$BRIDGE_DIR" fetch --all --prune
+  git -C "$BRIDGE_DIR" fetch --all --prune || {
+    rm -f "$BRIDGE_DIR/.git/refs/remotes/origin/main" "$BRIDGE_DIR/.git/packed-refs.lock"
+    git -C "$BRIDGE_DIR" fetch origin main --prune
+  }
   git -C "$BRIDGE_DIR" pull --ff-only || true
 fi
 
