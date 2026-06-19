@@ -38,6 +38,19 @@ OPENCLAW_DOCKER_IMAGE="${OPENCLAW_DOCKER_IMAGE:-ghcr.io/absurdfounder/openclaw:l
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/Applications/Docker.app/Contents/Resources/bin:$HOME/Applications/Docker.app/Contents/Resources/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+load_homebrew_path() {
+  local brew_bin
+  for brew_bin in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [[ -x "$brew_bin" ]]; then
+      eval "$("$brew_bin" shellenv)"
+      return 0
+    fi
+  done
+  return 1
+}
+
+load_homebrew_path || true
+
 if [[ "$EUID" -eq 0 ]]; then
   echo "Run this installer as your signed-in macOS user, not with sudo." >&2
   exit 1
@@ -76,13 +89,33 @@ docker_ready() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
 }
 
+install_homebrew() {
+  if [[ "${TROOPER_SKIP_HOMEBREW_INSTALL:-0}" == "1" ]]; then
+    return 1
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to install Homebrew automatically." >&2
+    return 1
+  fi
+
+  echo "Installing Homebrew so Trooper can install a local Docker runtime..."
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  load_homebrew_path || true
+  command -v brew >/dev/null 2>&1
+}
+
 install_colima_docker_runtime() {
   if [[ "${TROOPER_SKIP_DOCKER_INSTALL:-0}" == "1" ]]; then
     return 1
   fi
 
   if ! command -v brew >/dev/null 2>&1; then
-    return 1
+    install_homebrew || return 1
   fi
 
   echo "Installing Docker CLI runtime with Colima..."
@@ -139,8 +172,9 @@ ensure_docker_runtime() {
     echo "Trooper tried to install/start Colima. You can retry manually with:" >&2
     echo "  brew install colima docker docker-compose docker-buildx && colima start" >&2
   else
-    echo "Install Homebrew, then rerun this installer so Trooper can install Colima automatically." >&2
-    open "https://brew.sh/" >/dev/null 2>&1 || true
+    echo "Trooper tried to install Homebrew automatically but it did not complete." >&2
+    echo "You can retry manually with:" >&2
+    echo "  NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"" >&2
   fi
   return 1
 }
