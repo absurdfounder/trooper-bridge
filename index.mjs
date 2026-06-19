@@ -111,7 +111,7 @@ import {
   writePluginFilesFromAbsolutePaths,
 } from './lib/gateway-plugins.mjs';
 
-const OPERATOR_SCOPES = ['operator.admin', 'operator.read', 'operator.write', 'operator.pairing', 'operator.approvals', 'operator.talk.secrets'];
+const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals', 'operator.talk.secrets'];
 
 function isLocalHostRuntime() {
  return process.platform === 'darwin'
