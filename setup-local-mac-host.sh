@@ -79,6 +79,7 @@ mkdir -p \
   "$BRIDGE_DIR" \
   "$OPENCLAW_DATA_DIR" \
   "$OPENCLAW_DATA_DIR/config" \
+  "$OPENCLAW_DATA_DIR/devices" \
   "$OPENCLAW_DATA_DIR/workspace" \
   "$OPENCLAW_DATA_DIR/diagnostics/logs" \
   "$LOG_DIR" \
@@ -328,6 +329,7 @@ write_env_line() {
   write_env_line OPENCLAW_DATA_DIR "$OPENCLAW_DATA_DIR"
   write_env_line OPENCLAW_DATA_ROOT "$OPENCLAW_DATA_DIR"
   write_env_line OPENCLAW_CONFIG_ROOT "$OPENCLAW_DATA_DIR/config"
+  write_env_line OPENCLAW_DEVICES_DIR "$OPENCLAW_DATA_DIR/devices"
   write_env_line OPENCLAW_WORKSPACE_HOST_ROOT "$OPENCLAW_DATA_DIR/workspace"
   write_env_line OPENCLAW_DOCKER_IMAGE "$OPENCLAW_DOCKER_IMAGE"
   write_env_line OPENCLAW_GATEWAY_CONTAINER "$OPENCLAW_GATEWAY_CONTAINER"
