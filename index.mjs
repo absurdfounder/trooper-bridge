@@ -10384,12 +10384,40 @@ function targetFromRequest(req) {
 app.get('/version', (req, res) => {
  try {
  const current = readBridgeVersion({ force: req.query.force === '1' || req.query.force === 'true' });
- const gitHash = current.gatewaySha || execSync('git -C /opt/openclaw rev-parse --short HEAD 2>/dev/null').toString().trim();
- const gitDate = current.gatewayCommittedAt || execSync('git -C /opt/openclaw log -1 --format=%ci 2>/dev/null').toString().trim();
- const dockerImage = current.gatewayImageId || execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19);
+ let gitHash = current.gatewaySha || null;
+ let gitDate = current.gatewayCommittedAt || null;
+ let dockerImage = current.gatewayImageId || null;
+
+ // Managed installs can run from a local compose directory under /opt/openclaw
+ // without a live git checkout. Missing git metadata should not make /version
+ // fail because the upgrade precheck treats any returned `error` as fatal.
+ if (!gitHash) {
+  try {
+   gitHash = execSync('git -C /opt/openclaw rev-parse --short HEAD 2>/dev/null').toString().trim() || null;
+  } catch {}
+ }
+ if (!gitDate) {
+  try {
+   gitDate = execSync('git -C /opt/openclaw log -1 --format=%ci 2>/dev/null').toString().trim() || null;
+  } catch {}
+ }
+ if (!dockerImage) {
+  try {
+   dockerImage = execSync("docker inspect openclaw:local --format='{{.Id}}' 2>/dev/null").toString().trim().slice(7, 19) || null;
+  } catch {}
+ }
+
  const target = targetFromRequest(req);
- res.json({ gitHash, gitDate, dockerImage, ...current, upgrade: buildLocalUpgradeSummary(current, target) });
- } catch (err) { res.json({ error: err.message, ...readBridgeVersion() }); }
+ res.json({
+  gitHash,
+  gitDate,
+  dockerImage,
+  ...current,
+  upgrade: buildLocalUpgradeSummary(current, target),
+ });
+ } catch (err) {
+  res.json({ error: err.message, ...readBridgeVersion() });
+ }
 });
 
 // ── Upgrade — apply the exact promoted runtime target ──────────────
