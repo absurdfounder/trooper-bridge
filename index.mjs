@@ -2633,6 +2633,7 @@ class OpenClawGateway {
  const timeoutMs = Number.isFinite(Number(opts.timeoutMs)) ? Number(opts.timeoutMs) : 600000;
  const runStartedAt = Date.now();
  const _projectFolder = opts.projectFolder || null;
+ const attachmentCount = Array.isArray(opts.attachments) ? opts.attachments.filter(Boolean).length : 0;
  const { explicitModel, effectiveModel: effectiveRequestedModel } = resolveGatewayModelSelection(opts.model);
 	 const selectedThinking = resolveGatewayThinkingSelection(opts.thinking, effectiveRequestedModel, { explicitModel });
 	 const steerMode = opts.steer === true;
@@ -3279,7 +3280,9 @@ function extractPatchFilePaths(patchText = '') {
  expectFinal: !steerMode, runId: null, idempotencyKey,
  });
 
- const method = steerMode ? 'sessions.steer' : 'agent';
+ const method = steerMode
+ ? 'sessions.steer'
+ : (opts.preferChatSendForAttachments === true && attachmentCount > 0 ? 'chat.send' : 'agent');
  const params = steerMode
  ? {
  key: sessionKey,
@@ -3287,6 +3290,17 @@ function extractPatchFilePaths(patchText = '') {
  idempotencyKey,
  thinking: selectedThinking || undefined,
  timeoutMs,
+ }
+ : method === 'chat.send'
+ ? {
+ message,
+ sessionKey,
+ idempotencyKey,
+ agentId: opts.agentId || undefined,
+ thinking: selectedThinking || undefined,
+ deliver: false,
+ timeoutMs,
+ ...(Array.isArray(opts.attachments) && opts.attachments.length > 0 ? { attachments: opts.attachments } : {}),
  }
  : withGatewayAttachments({
  message, sessionKey, idempotencyKey,
@@ -3301,7 +3315,7 @@ function extractPatchFilePaths(patchText = '') {
  params,
  }));
 
- console.log(`[OpenClaw] ${steerMode ? 'Native steer' : 'Agent'} streaming request sent (session=${sessionKey})`);
+ console.log(`[OpenClaw] ${steerMode ? 'Native steer' : method} streaming request sent (session=${sessionKey})`);
 
  const pollSessionHistory = async () => {
  if (historyPollInFlight || sawLiveStreamPayload) return;
@@ -5521,6 +5535,7 @@ const emitViewportScreenshotFrame = ({
  model: streamingExplicitModel || undefined,
  extraSystemPrompt: resolvedSystemPrompt,
  attachments,
+ preferChatSendForAttachments: true,
  timeoutMs: inactivityMs,
  projectFolder,
  steer: req.body?.steer === true || context?.steer === true,
