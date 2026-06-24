@@ -1225,7 +1225,8 @@ ${MODELS_PROVIDERS}
  "llm-task", "lobster"
  ],
  "exec": {
- "host": "gateway",
+ "host": "auto",
+ "mode": "full",
  "notifyOnExit": true
  }
  },

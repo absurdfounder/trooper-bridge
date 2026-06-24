@@ -3892,11 +3892,75 @@ try {
    }
   }
  }
- // Startup migration: exec host should be "gateway" when sandbox is off
- if (config.tools?.exec?.host === 'sandbox') {
-  config.tools.exec.host = 'gateway';
+ // Startup migration: native-node execution needs exec host auto/full.
+ // Gateway-only exec can run inside the VPS, but it cannot launch or control
+ // enrolled Macs/PCs. Keep this aligned with Trooper provisioning repair.
+ if (!config.tools || typeof config.tools !== 'object' || Array.isArray(config.tools)) {
+  config.tools = {};
   changed = true;
-  console.log('[bridge] Migrated: tools.exec.host → gateway (sandbox is off)');
+ }
+ if (!config.tools.exec || typeof config.tools.exec !== 'object' || Array.isArray(config.tools.exec)) {
+  config.tools.exec = {};
+  changed = true;
+ }
+ if (config.tools.exec.host !== 'auto') {
+  const oldHost = config.tools.exec.host || '(unset)';
+  config.tools.exec.host = 'auto';
+  changed = true;
+  console.log(`[bridge] Migrated: tools.exec.host → auto (was "${oldHost}")`);
+ }
+ if (config.tools.exec.mode !== 'full') {
+  const oldMode = config.tools.exec.mode || '(unset)';
+  config.tools.exec.mode = 'full';
+  changed = true;
+  console.log(`[bridge] Migrated: tools.exec.mode → full (was "${oldMode}")`);
+ }
+ for (const key of ['security', 'ask']) {
+  if (Object.prototype.hasOwnProperty.call(config.tools.exec, key)) {
+   delete config.tools.exec[key];
+   changed = true;
+   console.log(`[bridge] Migrated: removed tools.exec.${key} because mode=full is authoritative`);
+  }
+ }
+ if (Array.isArray(config.tools.deny)) {
+  const nextDeny = config.tools.deny.filter((name) => String(name || '').trim() !== 'exec');
+  if (nextDeny.length !== config.tools.deny.length) {
+   config.tools.deny = nextDeny;
+   changed = true;
+   console.log('[bridge] Migrated: removed exec from tools.deny');
+  }
+ }
+ if (Array.isArray(config.tools.allow) && !config.tools.allow.includes('exec')) {
+  config.tools.allow.push('exec');
+  changed = true;
+  console.log('[bridge] Migrated: added exec to tools.allow');
+ }
+ if (!config.gateway || typeof config.gateway !== 'object' || Array.isArray(config.gateway)) {
+  config.gateway = {};
+  changed = true;
+ }
+ if (!config.gateway.nodes || typeof config.gateway.nodes !== 'object' || Array.isArray(config.gateway.nodes)) {
+  config.gateway.nodes = {};
+  changed = true;
+ }
+ const allowedNodeCommands = Array.isArray(config.gateway.nodes.allowCommands)
+  ? config.gateway.nodes.allowCommands
+  : [];
+ for (const command of ['system.run', 'system.which']) {
+  if (!allowedNodeCommands.includes(command)) {
+   allowedNodeCommands.push(command);
+   changed = true;
+   console.log(`[bridge] Migrated: allowed node command ${command}`);
+  }
+ }
+ config.gateway.nodes.allowCommands = allowedNodeCommands;
+ if (Array.isArray(config.gateway.nodes.denyCommands)) {
+  const nextDenied = config.gateway.nodes.denyCommands.filter((name) => !['system.run', 'system.which'].includes(String(name || '').trim()));
+  if (nextDenied.length !== config.gateway.nodes.denyCommands.length) {
+   config.gateway.nodes.denyCommands = nextDenied;
+   changed = true;
+   console.log('[bridge] Migrated: removed system.run/system.which from gateway.nodes.denyCommands');
+  }
  }
  // Startup migration: add maxSpawnDepth if missing
  if (config.agents?.defaults?.subagents && !config.agents.defaults.subagents.maxSpawnDepth) {
