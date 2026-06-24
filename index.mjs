@@ -3427,6 +3427,42 @@ function extractPatchFilePaths(patchText = '') {
  console.log(`[OpenClaw:DBG] payloads sample:`, JSON.stringify((result?.result?.payloads || []).slice(0,5).map(p => Object.keys(p))));
  console.log(`[OpenClaw:DBG] full result snippet:`, previewString(result?.result, 800));
  let response = resultText || textChunks.join('') || null;
+ if (!response) {
+ const extractLatestAssistantText = (historyMessages = []) => {
+  const runCutoff = runStartedAt - 5000;
+  let latest = { ts: 0, text: '' };
+  for (const msg of Array.isArray(historyMessages) ? historyMessages : []) {
+   const m = msg?.message || msg;
+   const ts = new Date(msg?.timestamp || m?.timestamp || 0).getTime() || 0;
+   if (ts < runCutoff || ts < latest.ts) continue;
+   if ((m?.role || '') !== 'assistant') continue;
+   const content = m?.content;
+   let text = '';
+   if (Array.isArray(content)) {
+    text = content
+     .filter(block => block?.type === 'text')
+     .map(block => block?.text || '')
+     .filter(Boolean)
+     .join('\n\n');
+   } else if (typeof content === 'string') {
+    text = content;
+   }
+   text = sanitizeVisibleAssistantText(text);
+   if (text) latest = { ts, text };
+  }
+  return latest.text || '';
+ };
+ for (let attempt = 0; attempt < 4 && !response; attempt += 1) {
+  if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 750));
+  this._historyCache.delete(`${String(sessionKey || '').trim()}\0${50}`);
+  const historyMessages = await this.fetchSessionHistory(sessionKey, 50, { timeoutMs: 5000 });
+  const historyText = extractLatestAssistantText(historyMessages);
+  if (historyText) {
+   response = historyText;
+   console.warn(`[OpenClaw] Recovered empty agent result from session history (${response.length} chars, attempt ${attempt + 1})`);
+  }
+ }
+ }
 
  // Check for new screenshots created during this agent run — convert to base64 data URIs
  if (response) {
