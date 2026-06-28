@@ -28,7 +28,7 @@ if [[ "$RELEASE_URL" == *"/org-runtime-latest/"* ]]; then
   exit 1
 fi
 if [[ ! "$RELEASE_URL" =~ ^https://api\.github\.com/repos/[^/]+/[^/]+/releases/assets/[0-9]+$ ]] \
-  && [[ ! "$RELEASE_URL" =~ /releases/download/org-runtime-[a-fA-F0-9]{40}/trooper-org-runtime\.tar\.gz([?#].*)?$ ]]; then
+  && [[ ! "$RELEASE_URL" =~ /releases/download/org-runtime-[a-fA-F0-9]{40}(-[a-fA-F0-9]{40})?/trooper-org-runtime\.tar\.gz([?#].*)?$ ]]; then
   echo "ERROR: runtime bundle URL is not an immutable promoted release asset" >&2
   exit 1
 fi

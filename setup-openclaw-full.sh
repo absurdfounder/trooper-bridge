@@ -121,7 +121,7 @@ if [ "$TROOPER_MANAGED_DEPLOYMENT" = "1" ]; then
     exit 1
   fi
   if ! echo "$TROOPER_RUNTIME_TARBALL_URL" | grep -Eq \
-    '^https://api\.github\.com/repos/[^/]+/[^/]+/releases/assets/[0-9]+$|/releases/download/org-runtime-[a-fA-F0-9]{40}/trooper-org-runtime\.tar\.gz([?#].*)?$'; then
+    '^https://api\.github\.com/repos/[^/]+/[^/]+/releases/assets/[0-9]+$|/releases/download/org-runtime-[a-fA-F0-9]{40}(-[a-fA-F0-9]{40})?/trooper-org-runtime\.tar\.gz([?#].*)?$'; then
     echo "FATAL: managed TROOPER_RUNTIME_TARBALL_URL must be an immutable promoted release asset"
     exit 1
   fi
@@ -241,6 +241,13 @@ _free_progress_port() {
 if [ "$FROM_SNAPSHOT" = "1" ]; then
   systemctl stop openclaw-bridge trooper-org-runtime trooper-server openclaw-poller openclaw-vnc trooper-desktop trooper-desktop-api trooper-playwright 2>/dev/null || true
   _free_progress_port "${BRIDGE_PORT}"
+fi
+
+if [ -n "${BOOTSTRAP_LOG_SERVER_PID:-}" ]; then
+  echo "[setup] Replacing bootstrap log server on :${BRIDGE_PORT} (pid ${BOOTSTRAP_LOG_SERVER_PID})"
+  kill "$BOOTSTRAP_LOG_SERVER_PID" 2>/dev/null || true
+  wait "$BOOTSTRAP_LOG_SERVER_PID" 2>/dev/null || true
+  unset BOOTSTRAP_LOG_SERVER_PID
 fi
 
 # Start a tiny HTTP server to serve deploy logs on BRIDGE_PORT.
