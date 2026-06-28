@@ -1082,6 +1082,196 @@ function normalizeRuntimeUsageModelBreakdown(rows = [], fallback = {}) {
   .filter(Boolean);
 }
 
+function formatUsageDateParam(ms) {
+ const value = Number(ms);
+ if (!Number.isFinite(value) || value <= 0) return null;
+ const date = new Date(value);
+ if (Number.isNaN(date.getTime())) return null;
+ const year = date.getFullYear();
+ const month = String(date.getMonth() + 1).padStart(2, '0');
+ const day = String(date.getDate()).padStart(2, '0');
+ return `${year}-${month}-${day}`;
+}
+
+function usagePromptContextTokens(usage = {}) {
+ const inputTokens = normalizeUsageLogToken(usage.input ?? usage.inputTokens ?? usage.input_tokens);
+ const cacheReadTokens = normalizeUsageLogToken(usage.cacheRead ?? usage.cacheReadTokens ?? usage.cache_read_tokens ?? usage.cache_read);
+ const cacheWriteTokens = normalizeUsageLogToken(usage.cacheWrite ?? usage.cacheWriteTokens ?? usage.cache_write_tokens ?? usage.cache_write);
+ const promptTokens = inputTokens + cacheReadTokens + cacheWriteTokens;
+ return promptTokens > 0 ? promptTokens : null;
+}
+
+function estimateContextWeightTokens(contextWeight = null) {
+ if (!contextWeight || typeof contextWeight !== 'object') return null;
+ const systemChars = Number(contextWeight?.systemPrompt?.chars) || 0;
+ const skillsChars = Number(contextWeight?.skills?.promptChars) || 0;
+ const toolsChars = (Number(contextWeight?.tools?.listChars) || 0) + (Number(contextWeight?.tools?.schemaChars) || 0);
+ const filesChars = Array.isArray(contextWeight?.injectedWorkspaceFiles)
+  ? contextWeight.injectedWorkspaceFiles.reduce((sum, file) => sum + (Number(file?.injectedChars) || 0), 0)
+  : 0;
+ const chars = systemChars + skillsChars + toolsChars + filesChars;
+ return chars > 0 ? Math.round(chars / 4) : null;
+}
+
+function normalizeOpenClawModelUsageBreakdown(modelUsage = [], fallback = {}) {
+ return (Array.isArray(modelUsage) ? modelUsage : [])
+  .map((entry) => {
+   if (!entry || typeof entry !== 'object') return null;
+   const totals = entry.totals && typeof entry.totals === 'object' ? entry.totals : entry;
+   const model = entry.model || fallback.model || null;
+   const provider = entry.provider || fallback.provider || null;
+   const inputTokens = normalizeUsageLogToken(totals.input ?? totals.inputTokens ?? totals.input_tokens);
+   const outputTokens = normalizeUsageLogToken(totals.output ?? totals.outputTokens ?? totals.output_tokens);
+   const cacheReadTokens = normalizeUsageLogToken(totals.cacheRead ?? totals.cacheReadTokens ?? totals.cache_read_tokens ?? totals.cache_read);
+   const cacheWriteTokens = normalizeUsageLogToken(totals.cacheWrite ?? totals.cacheWriteTokens ?? totals.cache_write_tokens ?? totals.cache_write);
+   const totalTokens = normalizeUsageLogToken(
+    totals.totalTokens
+    ?? totals.total_tokens
+    ?? totals.total
+    ?? (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens)
+   );
+   const costUsd = roundUsageCost(totals.totalCost ?? totals.total_cost ?? totals.costUsd ?? totals.cost_usd);
+   if (!model && !provider && !totalTokens && !costUsd) return null;
+   return {
+    model,
+    provider,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens: 0,
+    contextTokens: usagePromptContextTokens({
+     input: inputTokens,
+     cacheRead: cacheReadTokens,
+     cacheWrite: cacheWriteTokens,
+    }),
+    costUsd,
+    callCount: Math.max(1, Number(entry.count) || 1),
+    source: fallback.source || 'openclaw_sessions_usage',
+   };
+  })
+  .filter(Boolean);
+}
+
+function inferOpenClawUsageActivity(session = {}) {
+ const sourceText = [
+  session.key,
+  session.sessionId,
+  session.label,
+  session.channel,
+  session.chatType,
+  session.origin?.provider,
+  session.origin?.surface,
+  session.origin?.chatType,
+  session.origin?.label,
+ ].filter(Boolean).join(' ').toLowerCase();
+
+ if (sourceText.includes('heartbeat')) return { type: 'heartbeat', label: 'Heartbeat' };
+ if (sourceText.includes('cron') || sourceText.includes('routine') || sourceText.includes('workflow')) return { type: 'routine', label: 'Routine' };
+ if (sourceText.includes('memory') || sourceText.includes('knowledge')) return { type: 'memory', label: 'Memory' };
+ if (sourceText.includes('compact')) return { type: 'compaction', label: 'Compaction' };
+ if (sourceText.includes('subagent')) return { type: 'subagent', label: 'Subagent' };
+ if (sourceText.includes('image') || sourceText.includes('video') || sourceText.includes('speech') || sourceText.includes('music')) return { type: 'media', label: 'Media generation' };
+ if (sourceText.includes('chat') || sourceText.includes('dm') || sourceText.includes('hook:trooper')) return { type: 'chat', label: 'Chat' };
+ if (sourceText.includes('task') || sourceText.includes('plan')) return { type: 'task', label: 'Task invocation' };
+ return { type: 'openclaw_runtime', label: 'OpenClaw session' };
+}
+
+function normalizeOpenClawUsageSession(session = {}) {
+ const usage = session?.usage && typeof session.usage === 'object' ? session.usage : null;
+ if (!usage) return null;
+ const sessionKey = String(session?.key || session?.sessionKey || session?.sessionId || '').trim();
+ if (!sessionKey) return null;
+ const runId = String(session?.sessionId || sessionKey).trim() || sessionKey;
+ const atMs = sessionTimestampMs({
+  updatedAt: usage.lastActivity || session.updatedAt || usage.firstActivity,
+ });
+ const modelUsage = normalizeOpenClawModelUsageBreakdown(usage.modelUsage, {
+  model: session.model || session.modelOverride || null,
+  provider: session.modelProvider || session.providerOverride || null,
+  source: 'openclaw_sessions_usage',
+ });
+ const inputTokens = normalizeUsageLogToken(usage.input ?? usage.inputTokens ?? usage.input_tokens);
+ const outputTokens = normalizeUsageLogToken(usage.output ?? usage.outputTokens ?? usage.output_tokens);
+ const cacheReadTokens = normalizeUsageLogToken(usage.cacheRead ?? usage.cacheReadTokens ?? usage.cache_read_tokens ?? usage.cache_read);
+ const cacheWriteTokens = normalizeUsageLogToken(usage.cacheWrite ?? usage.cacheWriteTokens ?? usage.cache_write_tokens ?? usage.cache_write);
+ const totalTokens = normalizeUsageLogToken(
+  usage.totalTokens
+  ?? usage.total_tokens
+  ?? usage.total
+  ?? (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens)
+ );
+ const contextTokens = normalizeUsageLogContextTokens(
+  usage.contextTokens,
+  session.contextTokens,
+  usagePromptContextTokens(usage),
+  estimateContextWeightTokens(session.contextWeight),
+ );
+ const costUsd = roundUsageCost(usage.totalCost ?? usage.total_cost ?? usage.costUsd ?? usage.cost_usd);
+ const model = session.model || session.modelOverride || modelUsage[0]?.model || null;
+ const provider = session.modelProvider || session.providerOverride || modelUsage[0]?.provider || null;
+ const fallbackBreakdown = (!modelUsage.length && (model || provider || totalTokens || contextTokens || costUsd))
+  ? [{
+    model,
+    provider,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens: 0,
+    contextTokens,
+    costUsd,
+    callCount: Math.max(1, Number(usage.messageCounts?.assistant) || 1),
+    source: 'openclaw_sessions_usage',
+   }]
+  : [];
+ const rows = modelUsage.length ? modelUsage : fallbackBreakdown;
+ if (!rows.length && !totalTokens && !contextTokens && !costUsd) return null;
+ const activity = inferOpenClawUsageActivity(session);
+ const callCount = Math.max(
+  1,
+  Number(usage.messageCounts?.assistant) || 0,
+  rows.reduce((sum, row) => sum + Math.max(1, Number(row.callCount) || 1), 0),
+ );
+ return {
+  id: `openclaw-sessions-usage:${runId}:${atMs || 'unknown'}`,
+  at: atMs > 0 ? new Date(atMs).toISOString() : null,
+  runId,
+  sessionKey,
+  source: 'openclaw_runtime',
+  usageSource: `openclaw_${activity.type}`,
+  activityType: activity.type,
+  activityLabel: activity.label,
+  activityDetailType: activity.type,
+  activityDetailLabel: activity.label,
+  model,
+  provider,
+  inputTokens,
+  outputTokens,
+  totalTokens,
+  cacheReadTokens,
+  cacheWriteTokens,
+  reasoningTokens: 0,
+  contextTokens,
+  costUsd,
+  callCount,
+  modelBreakdown: rows,
+  openclaw: {
+   key: sessionKey,
+   agentId: session.agentId || null,
+   channel: session.channel || null,
+   chatType: session.chatType || null,
+   firstActivity: usage.firstActivity || null,
+   lastActivity: usage.lastActivity || null,
+   messageCounts: usage.messageCounts || null,
+   toolUsage: usage.toolUsage || null,
+   latency: usage.latency || null,
+  },
+ };
+}
+
 function buildRuntimeUsageEntry(session = {}, historyUsage = null) {
  const sessionKey = String(session?.key || session?.sessionKey || session?.sessionId || '').trim();
  if (!sessionKey) return null;
@@ -2672,6 +2862,69 @@ class OpenClawGateway {
   return null;
  }
 
+ async fetchOpenClawUsageSessions({
+  limit = 500,
+  fromMs = 0,
+  toMs = 0,
+  timeoutMs = 10000,
+ } = {}) {
+  const normalizedLimit = Math.max(1, Math.min(1000, Number(limit) || 500));
+  const lowerBound = Number.isFinite(Number(fromMs)) ? Math.max(0, Math.floor(Number(fromMs))) : 0;
+  const upperBound = Number.isFinite(Number(toMs)) && Number(toMs) > 0 ? Math.floor(Number(toMs)) : Date.now();
+  const startDate = lowerBound > 0 ? formatUsageDateParam(lowerBound) : '2000-01-01';
+  const endDate = formatUsageDateParam(upperBound) || formatUsageDateParam(Date.now());
+  const baseParams = {
+   ...(startDate ? { startDate } : {}),
+   ...(endDate ? { endDate } : {}),
+   limit: normalizedLimit,
+   includeContextWeight: true,
+  };
+
+  const requestUsage = async (includeDateInterpretation) => {
+   const dateParams = includeDateInterpretation ? { mode: 'gateway' } : {};
+   const params = { ...baseParams, ...dateParams };
+   const costPromise = this.request('usage.cost', params, { timeoutMs }).catch((err) => {
+    console.warn(`[OpenClaw] usage.cost unavailable: ${err.message}`);
+    return null;
+   });
+   const sessions = await this.request('sessions.usage', params, { timeoutMs });
+   const costSummary = await costPromise;
+   return { sessions, costSummary };
+  };
+
+  try {
+   let result;
+   try {
+    result = await requestUsage(true);
+   } catch (err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    if (!message.includes('unexpected property') && !message.includes('mode') && !message.includes('utcoffset')) {
+     throw err;
+    }
+    result = await requestUsage(false);
+   }
+   const rows = Array.isArray(result?.sessions?.sessions)
+    ? result.sessions.sessions
+    : Array.isArray(result?.sessions)
+      ? result.sessions
+      : [];
+   const entries = rows
+    .map((row) => normalizeOpenClawUsageSession(row))
+    .filter(Boolean)
+    .sort((left, right) => sessionTimestampMs({ updatedAt: right?.at }) - sessionTimestampMs({ updatedAt: left?.at }))
+    .slice(0, normalizedLimit);
+   return {
+    entries,
+    totals: result?.sessions?.totals || result?.costSummary?.totals || null,
+    aggregates: result?.sessions?.aggregates || null,
+    source: 'openclaw_sessions_usage',
+   };
+  } catch (err) {
+   console.warn(`[OpenClaw] sessions.usage unavailable: ${err.message}`);
+   return { entries: [], totals: null, aggregates: null, source: 'unavailable', error: err.message };
+  }
+ }
+
  async listUsageSessions({
   limit = 200,
   fromMs = 0,
@@ -2688,6 +2941,14 @@ class OpenClawGateway {
   const normalizedTimeoutMs = Math.max(1000, Math.min(30000, Number(timeoutMs) || 10000));
   const lowerBound = Number.isFinite(Number(fromMs)) ? Math.max(0, Math.floor(Number(fromMs))) : 0;
   const upperBound = Number.isFinite(Number(toMs)) ? Math.max(0, Math.floor(Number(toMs))) : 0;
+  const openClawUsage = await this.fetchOpenClawUsageSessions({
+   limit: normalizedLimit,
+   fromMs: lowerBound,
+   toMs: upperBound,
+   timeoutMs: normalizedTimeoutMs,
+  });
+  if (openClawUsage.entries.length) return openClawUsage.entries;
+
   const id = randomUUID();
   try {
    const result = await new Promise((resolve, reject) => {
