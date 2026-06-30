@@ -7669,6 +7669,11 @@ function firstString(...values) {
  return '';
 }
 
+// A node that was last seen longer ago than this, and isn't explicitly reported
+// connected by the gateway, is treated as no longer live (status: recently_seen)
+// instead of a "ghost online" entry. Mirrors the client-side snapshot TTL.
+const NODE_LIVENESS_STALE_MS = 5 * 60 * 1000;
+
 function normalizeNodeRecord(record = {}, { source = 'node' } = {}) {
  const raw = record && typeof record === 'object' ? record : {};
  const nodeId = firstString(raw.nodeId, raw.id, raw.deviceId, raw.clientId, raw.requestId);
@@ -7676,10 +7681,19 @@ function normalizeNodeRecord(record = {}, { source = 'node' } = {}) {
  const statusText = firstString(raw.status, raw.state, raw.connectionState).toLowerCase();
  const explicitlyDisconnected = raw.connected === false || /\b(disconnected|offline|stale|lost|removed)\b/i.test(statusText);
  const explicitlyConnected = raw.connected === true || /\b(connected|online|running|ready|live)\b/i.test(statusText);
- const connected = explicitlyDisconnected ? false : (explicitlyConnected || (source === 'node' && raw.connected !== false));
  const lastSeenAtMs = normalizeTimestampMs(
   raw.lastSeenAtMs ?? raw.lastSeenAt ?? raw.lastSeen ?? raw.lastConnectedAtMs ?? raw.connectedAtMs ?? raw.approvedAtMs ?? raw.ts,
  );
+ let connected = explicitlyDisconnected ? false : (explicitlyConnected || (source === 'node' && raw.connected !== false));
+ // Demote *implicitly* live nodes whose last-seen is stale. node.list can return
+ // persisted-but-gone nodes that default to connected (no explicit status), which
+ // otherwise linger in liveNodes as "ghost online". Only applies when we have a
+ // timestamp AND the gateway didn't explicitly mark the node connected/online, so
+ // a genuinely live node (or one without any timestamp) is never wrongly demoted.
+ if (connected && !explicitlyConnected && lastSeenAtMs
+  && Date.now() - lastSeenAtMs > NODE_LIVENESS_STALE_MS) {
+  connected = false;
+ }
  const connectedAtMs = normalizeTimestampMs(raw.connectedAtMs ?? raw.connectedAt);
  const approvedAtMs = normalizeTimestampMs(raw.approvedAtMs ?? raw.approvedAt);
  const status = connected ? 'connected' : (lastSeenAtMs ? 'recently_seen' : (statusText || 'disconnected'));
