@@ -1,12 +1,25 @@
 name: Build Gateway Image
 on:
   workflow_dispatch:
-  schedule:
-    # Rebuild regularly so `FROM ghcr.io/openclaw/openclaw:latest` actually
-    # picks up upstream OpenClaw fixes even when our bridge code has not changed.
-    - cron: '17 7 * * *'
   push:
     branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'entrypoint.sh'
+      - 'startup.sh'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.mjs'
+      - 'agent-daemon.mjs'
+      - 'shared-node-manager.mjs'
+      - 'db/**'
+      - 'lib/**'
+      - 'scripts/**'
+      - '.github/workflows/docker.yml'
+
+concurrency:
+  group: build-gateway-image-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:

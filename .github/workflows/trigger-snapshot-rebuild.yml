@@ -1,8 +1,7 @@
 name: Trigger Snapshot Rebuild
 
-# Cross-repo trigger: when trooper-core merges to main or its gateway
-# Docker image rebuilds, fire a `repository_dispatch` event at trooper so
-# the snapshot pipeline picks up the new bridge SHA.
+# Manual cross-repo trigger: fire a `repository_dispatch` event at trooper so
+# the snapshot pipeline picks up the requested bridge SHA only when needed.
 #
 # Phase 3 / Workstream 1 of CRABBOX_FLEET_AUTOMATION_PLAN.
 #
@@ -12,9 +11,6 @@ name: Trigger Snapshot Rebuild
 #   OPENCLAWBRIDGE_DISPATCH_TOKEN flow on the trooper side.
 
 on:
-  workflow_run:
-    workflows: ['Build Gateway Image']
-    types: [completed]
   workflow_dispatch:
     inputs:
       reason:
@@ -30,15 +26,11 @@ jobs:
   dispatch:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # For workflow_run triggers, only fire when the upstream gateway build succeeded.
-    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     steps:
       - name: Resolve commit SHA
         id: sha
         run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            SHA="${{ github.event.workflow_run.head_sha }}"
-          elif [ -n "${{ github.sha }}" ]; then
+          if [ -n "${{ github.sha }}" ]; then
             SHA="${{ github.sha }}"
           else
             echo "::error::Could not resolve source commit SHA"
